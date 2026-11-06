@@ -2,10 +2,8 @@ import { signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/fir
 import {
   doc,
   getDoc,
-  serverTimestamp,
-  updateDoc,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
+import { auth, authReady, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
 
 (() => {
   const emailInput = document.getElementById("login-email");
@@ -81,28 +79,6 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
       : null;
   }
 
-  async function harmonizeSuperAdminProfiles(uid, profiles) {
-    const staleProfiles = profiles.filter(
-        (candidate) => candidate.data.role !== "Super Admin",
-    );
-    const results = await Promise.allSettled(
-      staleProfiles.map((candidate) =>
-        updateDoc(doc(db, candidate.collectionName, uid), {
-          role: "Super Admin",
-          updatedAt: serverTimestamp(),
-        }),
-      ),
-    );
-    results.forEach((result, index) => {
-      if (result.status === "rejected") {
-        console.warn(
-          `[AdminLogin] Could not harmonize ${staleProfiles[index].collectionName}/${uid} to Super Admin.`,
-          result.reason,
-        );
-      }
-    });
-  }
-
   async function findProfile(uid) {
     const reads = await Promise.allSettled(
       profileCollections.map(async (collectionName) => {
@@ -128,7 +104,6 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
         })),
         finalRole: "Super Admin",
       });
-      await harmonizeSuperAdminProfiles(uid, profiles);
       return { ...resolution, candidates: profiles };
     }
     if (lookupErrors.length) {
@@ -137,10 +112,10 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
     }
     if (resolution) return { ...resolution, candidates: profiles };
 
-    const studentSnapshot = await getDoc(doc(db, "studentUser", uid));
+    const studentSnapshot = await getDoc(doc(db, "users", uid));
     if (!studentSnapshot.exists()) return null;
     const studentProfile = {
-      collectionName: "studentUser",
+      collectionName: "users",
       data: studentSnapshot.data(),
     };
     return {
@@ -182,6 +157,7 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
     let authenticated = false;
 
     try {
+      await authReady;
       const credential = await signInWithEmailAndPassword(
         auth,
         normalizedEmail,

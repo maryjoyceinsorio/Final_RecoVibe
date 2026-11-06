@@ -3,9 +3,11 @@ import {
   onSnapshot,
   orderBy,
   query,
+  where,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
+import { auth, db, functions, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
+import { syncApproverOrganization } from "../organizationScope.js";
 
 (() => {
   "use strict";
@@ -152,10 +154,15 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
     subscribeToEvents();
   });
 
-  function subscribeToEvents() {
+  async function subscribeToEvents() {
     try {
+      if (auth?.authStateReady) await auth.authStateReady();
+      const organizationCode = await syncApproverOrganization(functions);
+      unsubscribeEvents?.();
       const eventsRef = collection(db, "events");
-      const q = query(eventsRef, orderBy("createdAt", "desc"));
+      const q = organizationCode === "*"
+        ? query(eventsRef, orderBy("createdAt", "desc"))
+        : query(eventsRef, where("organizationCode", "==", organizationCode));
       unsubscribeEvents = onSnapshot(
         q,
         (snapshot) => {
@@ -172,8 +179,8 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
         },
       );
     } catch (e) {
-      console.error(e);
-      showError("Failed to initialize database query.");
+      console.error("Could not load approval-scoped events:", e);
+      showError("Could not verify your approval access or load events.");
     }
   }
 
@@ -777,4 +784,3 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
 
   init();
 })();
-

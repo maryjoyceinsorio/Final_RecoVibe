@@ -470,7 +470,7 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
   }
 
   // Data from both collections; we merge and recount on every snapshot
-  let studentUserDocs = [];
+  let studentDocs = [];
   let adminUserDocs = [];
 
   function recomputeAndRender() {
@@ -478,7 +478,7 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
     const actives = { student: 0, teacher: 0, eo: 0, admin: 0 };
     let totalActiveUsers = 0;
 
-    const allDocs = [...studentUserDocs, ...adminUserDocs];
+    const allDocs = [...studentDocs, ...adminUserDocs];
     allDocs.forEach((data) => {
       const key = classifyRole(data.role);
       if (!key) return;
@@ -506,13 +506,20 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
     if (unsubStaff) { unsubStaff(); unsubStaff = null; }
 
     unsubStudents = onSnapshot(
-      collection(db, "studentUser"),
+      collection(db, "users"),
       (snapshot) => {
-        studentUserDocs = snapshot.docs.map((d) => d.data());
+        studentDocs = snapshot.docs
+          .map((d) => d.data())
+          .filter(
+            (data) =>
+              String(data.role || data.userRole || "")
+                .trim()
+                .toLowerCase() === "student",
+          );
         recomputeAndRender();
       },
       (error) => {
-        console.info("[SuperAdminDashboard] studentUser listener failed:", error);
+        console.info("[SuperAdminDashboard] users student-profile listener failed:", error);
         showAoError();
       },
     );

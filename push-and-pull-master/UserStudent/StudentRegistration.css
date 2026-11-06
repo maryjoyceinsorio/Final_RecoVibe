@@ -479,7 +479,8 @@ body.is-leaving {
   grid-template-areas:
     "last first middle"
     "email student contact"
-    "department year organization"
+    "department year course-organization"
+    "gender . ."
     "pass confirm ."
     "form-error form-error form-error"
     "create create create";
@@ -509,8 +510,11 @@ body.is-leaving {
 #field-reg-year {
   grid-area: year;
 }
-#field-reg-organization {
-  grid-area: organization;
+#field-reg-course-organization {
+  grid-area: course-organization;
+}
+#field-reg-gender {
+  grid-area: gender;
 }
 #field-reg-pass {
   grid-area: pass;
@@ -591,7 +595,8 @@ body.is-leaving {
       "contact"
       "department"
       "year"
-      "organization"
+      "course-organization"
+      "gender"
       "pass"
       "confirm"
       "create";
@@ -857,7 +862,8 @@ body.is-leaving {
       "middle middle"
       "email student"
       "contact department"
-      "year organization"
+      "year course-organization"
+      "gender ."
       "pass confirm"
       "form-error form-error"
       "create create";
@@ -886,7 +892,8 @@ body.is-leaving {
       "contact"
       "department"
       "year"
-      "organization"
+      "course-organization"
+      "gender"
       "pass"
       "confirm"
       "form-error"
@@ -929,7 +936,8 @@ body.is-leaving {
   grid-template-areas:
     "last first middle"
     "email student contact"
-    "department year organization"
+    "department year course-organization"
+    "gender . ."
     "pass confirm ."
     "checklist checklist checklist"
     "password-error password-error password-error"
@@ -1172,7 +1180,8 @@ body.is-leaving {
       "middle middle"
       "email student"
       "contact department"
-      "year organization"
+      "year course-organization"
+      "gender ."
       "pass confirm"
       "checklist checklist"
       "password-error password-error"
@@ -1200,7 +1209,8 @@ body.is-leaving {
       "contact"
       "department"
       "year"
-      "organization"
+      "course-organization"
+      "gender"
       "pass"
       "confirm"
       "checklist"

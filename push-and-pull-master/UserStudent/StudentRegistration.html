@@ -157,6 +157,16 @@
                   <option value="BSHM" title="Bachelor of Science in Hospitality Management (BSHM)">
                     Bachelor of Science in Hospitality Management (BSHM)
                   </option>
+                  <option value="BSIE" title="Bachelor of Science in Industrial Education">
+                    Bachelor of Science in Industrial Education (BSIE)
+                  </option>
+                  <option value="BS Psychology">BS Psychology</option>
+                  <option value="BSBA HRM" title="Bachelor of Science in Business Administration Major in Human Resource Management">
+                    Bachelor of Science in Business Administration Major in Human Resource Management (BSBA HRM)
+                  </option>
+                  <option value="BSED Secondary">BSED Secondary</option>
+                  <option value="BSED Elementary (Elem)">BSED Elementary (Elem)</option>
+                  <option value="BSED Social Science">BSED Social Science</option>
                   <option value="Other" title="Other">Other</option>
                 </select>
                 <div class="error-msg" id="reg-department-error" role="alert"></div>
@@ -174,15 +184,33 @@
                 />
                 <div class="error-msg" id="reg-year-error" role="alert"></div>
               </div>
-              <div class="field" id="field-reg-organization">
-                <label for="reg-organization">Organization</label>
-                <select id="reg-organization" required aria-describedby="reg-organization-error">
-                  <option value="">Select organization</option>
+              <div class="field" id="field-reg-course-organization">
+                <label for="reg-course-organization">Course organization</label>
+                <select
+                  id="reg-course-organization"
+                  required
+                  aria-describedby="reg-course-organization-error"
+                >
+                  <option value="">Select course organization</option>
+                  <option value="PIEE">PIEE</option>
+                  <option value="ACES">ACES</option>
+                  <option value="SMS">SMS</option>
+                  <option value="HRSS">HRSS</option>
+                  <option value="YES">YES</option>
                   <option value="IBITS">IBITS</option>
-                  <option value="ORG">ORG</option>
-                  <option value="None">None</option>
                 </select>
-                <div class="error-msg" id="reg-organization-error" role="alert"></div>
+                <div class="error-msg" id="reg-course-organization-error" role="alert"></div>
+              </div>
+              <div class="field" id="field-reg-gender">
+                <label for="reg-gender">Gender</label>
+                <select id="reg-gender" required aria-describedby="reg-gender-error">
+                  <option value="">Select gender</option>
+                  <option value="Male">Male</option>
+                  <option value="Female">Female</option>
+                  <option value="Prefer not to say">Prefer not to say</option>
+                  <option value="Other">Other / custom</option>
+                </select>
+                <div class="error-msg" id="reg-gender-error" role="alert"></div>
               </div>
             </div>
 

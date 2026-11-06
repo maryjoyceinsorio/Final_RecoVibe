@@ -1,0 +1,107 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Merge these helpers and matches into the deployed rules. Do not replace
+    // a broader project ruleset with this events-only example.
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function canManageEvents() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role
+          in [
+            "superadmin", "admin", "eo", "organizer",
+            "event_organizer", "teacher"
+          ];
+    }
+
+    function validEventData() {
+      return request.resource.data.keys().hasOnly([
+          "id", "eventId", "title", "eventName", "organizer",
+          "organizerName", "organizerId", "organizerUid", "createdBy",
+          "createdByRole", "creatorRole", "source", "categories", "category",
+          "targetYear", "date", "dateISO", "dateStart", "dateEnd", "endDate",
+          "endDateISO", "dailySchedule", "dailySchedules", "timeStart", "timeEnd",
+          "time", "venue", "location", "customVenueName", "customVenueAddress",
+          "venueName", "venueAddress", "building", "roomNumber",
+          "onlineMeetingLink", "meetingLink", "maxCapacity", "capacity",
+          "openSlots", "slots", "registrationStart", "registrationEnd",
+          "registrationDeadline", "registrationEnabled", "attendanceRequired",
+          "weatherContingency", "venueType", "description", "rationale",
+          "keyDetails", "objectives", "requirements", "participatingFaculty",
+          "contactPerson", "contactName", "contactEmail", "contactPhone",
+          "participantDocuments", "attachments", "approvalDocuments",
+          "adminDocuments", "targetAudience", "isCollaboration",
+          "partnerOrganizations", "collaborationNotes", "externalGuests",
+          "outsideGuests", "approvers", "approvalStages", "status", "startAt",
+          "endAt", "createdAt", "updatedAt", "hap1Approved", "hap2Approved",
+          "hap3Approved"
+        ])
+        && request.resource.data.keys().hasAll([
+          "id", "eventId", "eventName", "date", "dateEnd", "timeStart",
+          "timeEnd", "venue", "location", "description", "status",
+          "createdBy", "organizerUid", "createdAt", "updatedAt"
+        ])
+        && request.resource.data.eventName is string
+        && request.resource.data.eventName.size() >= 3
+        && request.resource.data.eventName.size() <= 150
+        && request.resource.data.date is string
+        && request.resource.data.date.matches("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+        && request.resource.data.dateEnd is string
+        && request.resource.data.timeStart is string
+        && request.resource.data.timeEnd is string
+        && request.resource.data.venue is string
+        && request.resource.data.venue.size() > 0
+        && request.resource.data.venue.size() <= 300
+        && request.resource.data.description is string
+        && request.resource.data.description.size() <= 3000
+        && request.resource.data.status == "pending";
+    }
+
+    match /users/{userId} {
+      allow get: if signedIn() && request.auth.uid == userId;
+    }
+
+    match /events/{eventId} {
+      allow read: if signedIn();
+
+      allow create: if canManageEvents()
+        && validEventData()
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.organizerUid == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+
+      allow update: if canManageEvents()
+        && validEventData()
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.organizerUid == resource.data.organizerUid
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.status == resource.data.status
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "title", "eventName", "organizer", "organizerName", "source",
+          "categories", "category", "targetYear", "date", "dateISO",
+          "dateStart", "dateEnd", "endDate", "endDateISO", "dailySchedule",
+          "dailySchedules", "timeStart", "timeEnd", "time", "venue", "location",
+          "customVenueName", "customVenueAddress", "venueName", "venueAddress",
+          "building", "roomNumber", "onlineMeetingLink", "meetingLink",
+          "maxCapacity", "capacity", "openSlots", "slots", "registrationStart",
+          "registrationEnd", "registrationDeadline", "registrationEnabled",
+          "attendanceRequired", "weatherContingency", "venueType", "description",
+          "rationale", "keyDetails", "objectives", "requirements",
+          "participatingFaculty", "contactPerson", "contactName", "contactEmail",
+          "contactPhone", "participantDocuments", "attachments",
+          "approvalDocuments", "adminDocuments", "targetAudience",
+          "isCollaboration", "partnerOrganizations", "collaborationNotes",
+          "externalGuests", "outsideGuests", "approvers", "approvalStages",
+          "updatedAt", "hap1Approved", "hap2Approved", "hap3Approved"
+        ]);
+
+      allow delete: if false;
+    }
+  }
+}

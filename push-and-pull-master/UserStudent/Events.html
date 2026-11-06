@@ -2792,15 +2792,12 @@
     <script src="../EventDetailsModal.js"></script>
     <script type="module">
       import { auth, rtdb, functions, isFirebaseConfigured, isRtdbConfigured } from "./firebaseConfig.js";
+      import { isEventVisibleToStudent } from "./eventAudience.js";
       import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
       import {
         ref,
         onValue,
         off,
-        query,
-        orderByChild,
-        startAt,
-        endAt,
       } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
       import { httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
 
@@ -2817,8 +2814,9 @@
         lastName: "",
         fullName: "Student",
         studentNo: "2025-00790-BN-1",
-        organization: "IBITS",
-        department: "BSIT",
+        organization: "",
+        department: "",
+        departmentCode: "",
       };
 
       const rawEventsMap = new Map(); // id -> normalized event
@@ -2974,6 +2972,9 @@
         const avatarLetter =
           Array.from(firstName || "S")[0]?.toLocaleUpperCase() || "S";
         const organization = String(user.organization || "").trim();
+        studentProfile.organization = organization || String(user.courseOrganization || "").trim();
+        studentProfile.department = String(user.department || "").trim();
+        studentProfile.departmentCode = String(user.departmentCode || "").trim();
         const role =
           organization && organization.toLowerCase() !== "none"
             ? organization
@@ -3129,8 +3130,23 @@
           checkedInCount: typeof data.checkedInCount === "number" ? data.checkedInCount : undefined,
           organizerName: data.organizerName || data.organizer || "Event Organizer",
           organizerUid: data.organizerUid || data.organizerId || "",
+          targetAudience: data.targetAudience || "",
+          targetDepartments: data.targetDepartments || data.targetDepartment || [],
+          targetOrganizations: data.targetOrganizations || data.targetOrganization || [],
+          organizationCode: data.organizationCode || "",
+          organizerOrganization: data.organizerOrganization || "",
+          organization: data.organization || "",
+          organizationName: data.organizationName || "",
+          orgCode: data.orgCode || "",
+          orgName: data.orgName || "",
+          creatorRole: data.creatorRole || data.createdByRole || "",
+          eventSource: data.eventSource || "",
           description: data.description || data.eventDescription || "",
           status: String(data.status || "published").toLowerCase(),
+          adminDocuments: data.adminDocuments || "",
+          approvalDocuments: Array.isArray(data.approvalDocuments) ? data.approvalDocuments : [],
+          participantDocuments: Array.isArray(data.participantDocuments) ? data.participantDocuments : [],
+          attachments: Array.isArray(data.attachments) ? data.attachments : [],
           raw: data,
         };
       }
@@ -3974,40 +3990,30 @@
           off(activePublicEventsRef, "value", activePublicEventsListener);
         }
 
-        const now = getNow();
-        const hasRange = Boolean(filterState.from && filterState.to);
-
-        if (!hasRange) {
-          // Without date range: load from three days ago onward
-          const threeDaysAgo = now - 3 * 24 * 3600 * 1000;
-          activePublicEventsRef = query(ref(rtdb, "publicEvents"), orderByChild("startAt"), startAt(threeDaysAgo));
-        } else {
-          // With date range: load from three days before range start to end of range end day
-          const rangeStartMs = new Date(`${filterState.from}T00:00:00+08:00`).getTime();
-          const rangeEndMs = new Date(`${filterState.to}T23:59:59.999+08:00`).getTime();
-          const queryStartMs = rangeStartMs - 3 * 24 * 3600 * 1000;
-          activePublicEventsRef = query(
-            ref(rtdb, "publicEvents"),
-            orderByChild("startAt"),
-            startAt(queryStartMs),
-            endAt(rangeEndMs),
-          );
-        }
+        activePublicEventsRef = ref(rtdb, "publicEvents");
 
         activePublicEventsListener = (snap) => {
           rawEventsMap.clear();
           const data = snap.val() || {};
           Object.entries(data).forEach(([id, evData]) => {
-            if (evData && (evData.status === "published" || evData.status === "completed")) {
+            const status = String(evData?.status || "").toLowerCase();
+            if (evData && (status === "published" || status === "completed")) {
               const ev = normalizeEvent(id, evData);
-              rawEventsMap.set(ev.id, ev);
+              if (isEventVisibleToStudent(ev, studentProfile)) {
+                rawEventsMap.set(ev.id, ev);
+              }
             }
           });
 
-          if (rawEventsMap.size === 0 && Array.isArray(window.RECOVIBE_EVENTS) && window.RECOVIBE_EVENTS.length > 0) {
+          if (!snap.exists() && Array.isArray(window.RECOVIBE_EVENTS) && window.RECOVIBE_EVENTS.length > 0) {
             window.RECOVIBE_EVENTS.forEach((item) => {
               const ev = normalizeEvent(item.id || item.eventId, item);
-              rawEventsMap.set(ev.id, ev);
+              if (
+                (ev.status === "published" || ev.status === "completed") &&
+                isEventVisibleToStudent(ev, studentProfile)
+              ) {
+                rawEventsMap.set(ev.id, ev);
+              }
             });
           }
 
@@ -4026,7 +4032,12 @@
         if (Array.isArray(window.RECOVIBE_EVENTS)) {
           window.RECOVIBE_EVENTS.forEach((item) => {
             const ev = normalizeEvent(item.id || item.eventId, item);
-            rawEventsMap.set(ev.id, ev);
+            if (
+              (ev.status === "published" || ev.status === "completed") &&
+              isEventVisibleToStudent(ev, studentProfile)
+            ) {
+              rawEventsMap.set(ev.id, ev);
+            }
           });
         }
         renderAll();
@@ -4687,7 +4698,7 @@
             const id = modalBtn.dataset.eventId;
             const ev = rawEventsMap.get(id);
             if (ev && window.RecovibeEventDetails) {
-              window.RecovibeEventDetails.open(ev.raw || ev);
+              window.RecovibeEventDetails.open(ev.raw || ev, { showApprovalDocuments: true });
             }
             return;
           }

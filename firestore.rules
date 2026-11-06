@@ -1,0 +1,229 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function currentAdminProfile() {
+      let profilePath = /databases/$(database)/documents/adminUser/$(request.auth.uid);
+      return exists(profilePath) ? get(profilePath).data : {};
+    }
+
+    function normalizeAccessKey(value) {
+      return value is string ? value.lower().replace("[^a-z0-9]", "") : "";
+    }
+
+    function normalizeOrganizationCode(value) {
+      return value is string ? value.lower() : "";
+    }
+
+    function isAdminAccount() {
+      let profile = currentAdminProfile();
+      let role = normalizeAccessKey(profile.get("role", profile.get("userRole", "")));
+      let status = normalizeAccessKey(profile.get("status", "Active"));
+      return role in ["admin", "superadmin"]
+        && !(status in ["disabled", "inactive", "suspended"]);
+    }
+
+    function isOrganizationAdviser() {
+      let organizationPath = /databases/$(database)/documents/approverOrganizations/$(request.auth.uid);
+      let organizationCode = exists(organizationPath)
+        ? get(organizationPath).data.get("organizationCode", "")
+        : "";
+      return isAdminAccount()
+        && organizationCode != ""
+        && organizationCode != "*";
+    }
+
+    function adviserOrganizationMatches(eventData) {
+      let adviserPath = /databases/$(database)/documents/approverOrganizations/$(request.auth.uid);
+      let organization = exists(adviserPath)
+        ? get(adviserPath).data.get("organizationCode", "")
+        : "";
+      let creatorUid = eventData.get("organizerUid", eventData.get("organizerId", eventData.get("createdBy", "__missing__")));
+      let creatorOrganizationPath = /databases/$(database)/documents/eventOrganizations/$(creatorUid);
+      let creatorProfilePath = /databases/$(database)/documents/adminUser/$(creatorUid);
+      let creatorProfile = exists(creatorProfilePath) ? get(creatorProfilePath).data : {};
+      let creatorOrganization = creatorProfile.get("organizationCode", creatorProfile.get("orgCode", creatorProfile.get("organization", "")));
+      let verifiedCreatorOrganization = creatorOrganization != ""
+        ? creatorOrganization
+        : (exists(creatorOrganizationPath)
+          ? get(creatorOrganizationPath).data.get("organizationCode", "")
+          : "");
+      return organization != "" && normalizeOrganizationCode(verifiedCreatorOrganization) == normalizeOrganizationCode(organization)
+        && (
+          normalizeOrganizationCode(eventData.get("organizationCode", "")) == normalizeOrganizationCode(organization)
+          || normalizeOrganizationCode(eventData.get("organizerOrganization", "")) == normalizeOrganizationCode(organization)
+          || normalizeOrganizationCode(eventData.get("organization", "")) == normalizeOrganizationCode(organization)
+          || normalizeOrganizationCode(eventData.get("organizationName", "")) == normalizeOrganizationCode(organization)
+          || normalizeOrganizationCode(eventData.get("orgName", "")) == normalizeOrganizationCode(organization)
+        );
+    }
+
+    function isEventOrganizerAccount() {
+        let profile = currentAdminProfile();
+          let role = normalizeAccessKey(profile.get("role", profile.get("userRole", "")));
+          let organizationPath = /databases/$(database)/documents/eventOrganizations/$(request.auth.uid);
+          return exists(organizationPath)
+            || role in ["eventorganizer", "organizer", "eo"];
+    }
+
+    function organizerOrganizationMatches(eventData) {
+        let organizationPath = /databases/$(database)/documents/eventOrganizations/$(request.auth.uid);
+        let profile = currentAdminProfile();
+        let profileOrganization = profile.get("organizationCode", profile.get("orgCode", profile.get("organization", "")));
+        let organization = profileOrganization != ""
+          ? profileOrganization
+          : (exists(organizationPath)
+            ? get(organizationPath).data.get("organizationCode", "")
+            : "");
+        return organization != ""
+          && (
+            normalizeOrganizationCode(eventData.get("organizationCode", "")) == normalizeOrganizationCode(organization)
+            || normalizeOrganizationCode(eventData.get("organizerOrganization", "")) == normalizeOrganizationCode(organization)
+            || normalizeOrganizationCode(eventData.get("organization", "")) == normalizeOrganizationCode(organization)
+          );
+    }
+
+    function eventOwnerOrganizationMatches(eventData) {
+        let organizationPath = /databases/$(database)/documents/eventOrganizations/$(request.auth.uid);
+        let profile = currentAdminProfile();
+        let profileOrganization = profile.get("organizationCode", profile.get("orgCode", profile.get("organization", "")));
+        let organization = profileOrganization != ""
+          ? profileOrganization
+          : (exists(organizationPath)
+            ? get(organizationPath).data.get("organizationCode", "")
+            : "");
+        let eventOrganization = eventData.get("organizationCode", eventData.get("organizerOrganization", eventData.get("organization", "")));
+        return !isEventOrganizerAccount()
+          || (organization != "" && organization != "*"
+            && normalizeOrganizationCode(eventOrganization) == normalizeOrganizationCode(organization));
+    }
+
+    function eventOwner(eventData) {
+      return eventData.get("organizerUid", "") == request.auth.uid
+        || eventData.get("organizerId", "") == request.auth.uid
+        || eventData.get("createdBy", "") == request.auth.uid;
+    }
+
+    function eventIsPublished(eventData) {
+      return eventData.get("status", "") in ["approved", "Approved", "APPROVED", "published", "Published", "PUBLISHED", "completed", "Completed", "COMPLETED", "rescheduled", "Rescheduled", "RESCHEDULED"]
+        || eventData.get("publicationStatus", "") in ["published", "Published", "PUBLISHED"]
+        || eventData.get("published", false) == true
+        || eventData.get("isPublished", false) == true;
+    }
+
+    function canReadEvent(eventData) {
+      return request.auth != null && (
+        (isOrganizationAdviser()
+          ? adviserOrganizationMatches(eventData)
+          : (eventIsPublished(eventData)
+            || (isEventOrganizerAccount()
+              ? (eventOwner(eventData) || organizerOrganizationMatches(eventData))
+              : (isAdminAccount() || eventOwner(eventData)))))
+      );
+    }
+
+    function canManageEvent(eventData) {
+      return request.auth != null && (
+        (isOrganizationAdviser()
+          ? adviserOrganizationMatches(eventData)
+          : (eventOwner(eventData) || isAdminAccount()))
+      );
+    }
+
+    match /users/{userId} {
+      allow read, write: if request.auth != null;
+    }
+    match /adminUser/{userId} {
+      allow read: if request.auth != null;
+      allow create, update, delete: if request.auth != null && isAdminAccount()
+        && normalizeAccessKey(currentAdminProfile().get("role", currentAdminProfile().get("userRole", ""))) == "superadmin";
+    }
+    match /approverOrganizations/{userId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if false;
+    }
+    match /eventOrganizations/{userId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if false;
+    }
+    match /system_settings/{settingsId} {
+      allow read: if request.auth != null
+        && (isAdminAccount()
+          || isEventOrganizerAccount()
+          || normalizeAccessKey(
+            currentAdminProfile().get("role", currentAdminProfile().get("userRole", ""))
+          ) in ["teacher", "faculty"]);
+      allow create, update, delete: if request.auth != null
+        && isAdminAccount()
+        && normalizeAccessKey(
+          currentAdminProfile().get("role", currentAdminProfile().get("userRole", ""))
+        ) == "superadmin";
+    }
+    match /notifications/{notificationId} {
+      allow read: if request.auth != null
+        && (
+          resource.data.get("recipientUid", "") == request.auth.uid
+          || resource.data.get("recipientUserId", "") == request.auth.uid
+          || resource.data.get("recipientId", "") == request.auth.uid
+          || resource.data.get("userId", "") == request.auth.uid
+          || resource.data.get("organizerUid", "") == request.auth.uid
+          || resource.data.get("organizerId", "") == request.auth.uid
+        );
+    }
+    match /events/{eventId} {
+      allow read: if canReadEvent(resource.data);
+      allow create: if canManageEvent(request.resource.data)
+        && (isOrganizationAdviser() || eventOwnerOrganizationMatches(request.resource.data));
+      allow update: if canManageEvent(resource.data) && canManageEvent(request.resource.data)
+        && (isOrganizationAdviser() || eventOwnerOrganizationMatches(request.resource.data));
+      allow delete: if canManageEvent(resource.data)
+        && (isOrganizationAdviser() || eventOwnerOrganizationMatches(resource.data));
+
+      match /registrations/{userId} {
+        function eventIsPublished() {
+          let event = get(/databases/$(database)/documents/events/$(eventId)).data;
+          let status = event.get("status", "");
+          let publicationStatus = event.get("publicationStatus", "");
+          return status == "published"
+            || status == "Published"
+            || status == "PUBLISHED"
+            || publicationStatus == "published"
+            || publicationStatus == "Published"
+            || publicationStatus == "PUBLISHED"
+            || event.get("published", false) == true
+            || event.get("isPublished", false) == true;
+        }
+
+        allow read: if request.auth != null
+          && request.auth.uid == userId;
+
+        allow create: if request.auth != null
+          && request.auth.uid == userId
+          && eventIsPublished()
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.status == "registered";
+
+        allow update: if request.auth != null
+          && request.auth.uid == userId
+          && eventIsPublished()
+          && resource.data.uid == request.auth.uid
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            "uid", "status", "registeredAt", "cancelledAt", "at"
+          ])
+          && (
+            (resource.data.status == "registered"
+              && request.resource.data.status == "cancelled")
+            || (resource.data.status == "cancelled"
+              && request.resource.data.status == "registered")
+          );
+
+        allow delete: if false;
+      }
+    }
+
+    match /{path=**}/registrations/{registrationId} {
+      allow read: if request.auth != null
+        && resource.data.uid == request.auth.uid;
+    }
+  }
+}

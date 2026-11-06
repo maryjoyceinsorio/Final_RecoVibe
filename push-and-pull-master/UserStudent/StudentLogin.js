@@ -1,22 +1,12 @@
 import {
-  browserLocalPersistence,
-  browserSessionPersistence,
-  setPersistence,
   signInWithEmailAndPassword,
   signOut,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import {
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  query,
-  where,
-} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { auth, db, isFirebaseConfigured } from "./firebaseConfig.js";
+import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { auth, authReady, db, isFirebaseConfigured } from "./firebaseConfig.js";
 
 const currentUserStorageKey = "recovibeCurrentUser";
-const studentIdInput = document.getElementById("student-id");
+const emailInput = document.getElementById("student-id");
 const passwordInput = document.getElementById("student-pass");
 const submitButton = document.getElementById("login-submit");
 
@@ -36,34 +26,29 @@ function loginErrorMessage(error) {
     case "auth/wrong-password":
     case "auth/user-not-found":
       return "Incorrect email or password.";
-    case "student/not-found":
-      return "Incorrect email or password.";
     case "auth/too-many-requests":
       return "Too many sign-in attempts. Please wait and try again.";
     case "auth/network-request-failed":
       return "A network error occurred. Check your connection and try again.";
-    case "permission-denied":
-      return "Unable to look up your student account. Please contact support.";
-    case "student/duplicate-number":
-      return "This student ID is linked to more than one account. Please contact support.";
-    case "student/missing-email":
-      return "The student account has no sign-in email. Please contact support.";
     case "student/profile-mismatch":
       return "The signed-in account does not match this student profile. Please contact support.";
+    case "permission-denied":
+    case "firestore/permission-denied":
+      return "Your account signed in, but its profile could not be loaded. Please contact support.";
     default:
       return "We couldn't sign you in right now. Please try again.";
   }
 }
 
 async function signIn() {
-  const studentNumber = studentIdInput.value.trim();
+  const email = emailInput.value.trim().toLowerCase();
   const password = passwordInput.value;
   const banner = document.getElementById("login-banner");
 
-  setInvalid("field-id", !studentNumber);
+  setInvalid("field-id", !email);
   setInvalid("field-pass", !password);
   banner.classList.remove("show");
-  if (!studentNumber || !password) return;
+  if (!email || !password) return;
 
   if (!isFirebaseConfigured || !auth || !db) {
     showBanner("Sign in is not configured. Please contact support.");
@@ -80,9 +65,16 @@ async function signIn() {
       } catch (_) {}
     }
     if (loginAllowed && db) {
-      const snap = await getDoc(doc(db, "systemSettings", "default"));
-      if (snap.exists() && snap.data()?.loginEnabled === false) {
-        loginAllowed = false;
+      try {
+        const snap = await getDoc(doc(db, "systemSettings", "default"));
+        if (snap.exists() && snap.data()?.loginEnabled === false) {
+          loginAllowed = false;
+        }
+      } catch (sysErr) {
+        if (sysErr?.code !== "permission-denied" && sysErr?.code !== "firestore/permission-denied") {
+          throw sysErr;
+        }
+        console.warn("System settings verification notice: permission denied; continuing with sign-in.", sysErr);
       }
     }
     if (!loginAllowed) {
@@ -97,37 +89,10 @@ async function signIn() {
   submitButton.setAttribute("aria-busy", "true");
 
   try {
-    const studentQuery = query(
-      collection(db, "studentUser"),
-      where("studentNumber", "==", studentNumber),
-    );
-    const studentMatches = await getDocs(studentQuery);
-    if (studentMatches.empty) {
-      setInvalid("field-id", true);
-      showBanner(loginErrorMessage({ code: "student/not-found" }));
-      return;
-    }
-    if (studentMatches.size !== 1) {
-      throw Object.assign(new Error("Duplicate student number."), {
-        code: "student/duplicate-number",
-      });
-    }
-
-    const matchedProfile = studentMatches.docs[0].data();
-    const email = String(matchedProfile.email || "").trim().toLowerCase();
-    if (!email) {
-      throw Object.assign(new Error("Student profile email is missing."), {
-        code: "student/missing-email",
-      });
-    }
-
-    const persistence = document.getElementById("remember").checked
-      ? browserLocalPersistence
-      : browserSessionPersistence;
-    await setPersistence(auth, persistence);
+    await authReady;
     const credential = await signInWithEmailAndPassword(auth, email, password);
     const profileSnapshot = await getDoc(
-      doc(db, "studentUser", credential.user.uid),
+      doc(db, "users", credential.user.uid),
     );
 
     if (!profileSnapshot.exists()) {
@@ -136,9 +101,12 @@ async function signIn() {
     }
 
     const profile = profileSnapshot.data();
+    const profileRole = String(profile.role || "").trim().toLowerCase();
     if (
-      profile.studentNumber !== studentNumber ||
-      (profile.uid && profile.uid !== credential.user.uid)
+      String(profile.email || "").trim().toLowerCase() !==
+        String(credential.user.email || email).trim().toLowerCase() ||
+      (profile.uid && profile.uid !== credential.user.uid) ||
+      (profileRole && profileRole !== "student")
     ) {
       await signOut(auth);
       throw Object.assign(new Error("Student profile identity mismatch."), {
@@ -149,12 +117,15 @@ async function signIn() {
       ...profile,
       uid: credential.user.uid,
       email: profile.email || credential.user.email || email,
-      studentId: profile.studentNumber || studentNumber,
+      studentId: profile.studentNumber || profile.studentId || "",
     };
     localStorage.setItem(currentUserStorageKey, JSON.stringify(currentUser));
     window.location.assign("Dashboard.html");
   } catch (error) {
-    console.error("Student sign-in error:", error);
+    console.error("[StudentLogin] Sign-in/profile lookup failed:", {
+      code: error?.code || "unknown",
+      message: error?.message || String(error),
+    });
     if (
       error?.code === "auth/invalid-credential" ||
       error?.code === "auth/wrong-password"

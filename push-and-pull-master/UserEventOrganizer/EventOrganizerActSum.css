@@ -515,6 +515,12 @@ body {
     overflow: visible !important;
     width: 100% !important;
   }
+  .report-table-scroll {
+    overflow: visible !important;
+  }
+  .report-table thead {
+    display: table-header-group;
+  }
   .report-table {
     page-break-inside: auto;
   }
@@ -523,7 +529,16 @@ body {
     page-break-after: auto;
   }
   .report-section {
-    page-break-inside: avoid;
+    page-break-inside: auto;
+  }
+  .report-section-title,
+  .report-section-subtitle,
+  .report-section-header-flex {
+    break-after: avoid-page;
+    page-break-after: avoid;
+  }
+  .report-loading-state,
+  .report-error-state {
+    display: none !important;
   }
 }
-

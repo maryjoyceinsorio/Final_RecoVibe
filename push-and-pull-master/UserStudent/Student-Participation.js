@@ -1,5 +1,12 @@
-import { auth, rtdb, functions, isFirebaseConfigured, isRtdbConfigured } from "./firebaseConfig.js";
+import { auth, db, rtdb, functions, isFirebaseConfigured, isRtdbConfigured } from "./firebaseConfig.js";
 import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {
+  collection,
+  doc,
+  onSnapshot as onFirestoreSnapshot,
+  query as firestoreQuery,
+  where,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {
   ref,
   onValue,
@@ -10,6 +17,7 @@ import {
   endAt,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 import { httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
+import { isEventVisibleToStudent } from "./eventAudience.js";
 
 /* ---------------------------------------------------------
    COMMON SIDEBAR & USER PROFILE INITIALIZATION
@@ -48,14 +56,19 @@ const studentProfile = {
   lastName: "",
   fullName: "Student",
   studentNo: "2025-00790-BN-1",
-  organization: "IBITS",
-  department: "BSIT",
+  organization: "",
+  department: "",
+  departmentCode: "",
 };
 
 const rawEventsMap = new Map(); // id -> normalized event
 const userRegistrationsMap = new Map(); // id -> { status, at }
+const localRegistrationsMap = new Map();
+const rtdbRegistrationsMap = new Map();
+const firestoreRegistrationsMap = new Map();
 const attendanceMap = new Map(); // id -> { scannedAt, scannedBy, walkIn }
 const attendanceListeners = new Map(); // id -> unsub
+const firestoreEventListeners = new Map(); // id -> unsub
 
 const filterState = {
   search: "",
@@ -74,6 +87,9 @@ const datePickerState = {
 
 let activePublicEventsRef = null;
 let activePublicEventsListener = null;
+let firestoreEventsUnsubscribe = null;
+let rtdbRegistrationsUnsubscribe = null;
+let firestoreParticipationError = false;
 
 /* ---------------------------------------------------------
    TIME & DATE UTILITIES (Philippine Time Asia/Manila)
@@ -164,8 +180,10 @@ function hydrateUserProfile() {
   studentProfile.studentNo = String(
     user.studentNumber || user.studentId || user.username || "2025-00790-BN-1",
   ).trim();
-  studentProfile.organization = String(user.organization || "IBITS").trim();
-  studentProfile.department = String(user.department || "BSIT").trim();
+  studentProfile.organization = String(user.organization || "").trim();
+  studentProfile.courseOrganization = String(user.courseOrganization || "").trim();
+  studentProfile.department = String(user.department || "").trim();
+  studentProfile.departmentCode = String(user.departmentCode || "").trim();
 
   const avatarFallback = [
     user.username,
@@ -200,17 +218,10 @@ function hydrateUserProfile() {
 /* ---------------------------------------------------------
    URL QUERY PARAMS & DEFAULT RANGE ("This month")
 --------------------------------------------------------- */
-function setDefaultMonthRange() {
-  const now = new Date(getNow());
-  const year = now.getFullYear();
-  const month = now.getMonth();
-  const firstDay = `${year}-${String(month + 1).padStart(2, "0")}-01`;
-  const lastDate = new Date(year, month + 1, 0).getDate();
-  const lastDay = `${year}-${String(month + 1).padStart(2, "0")}-${String(lastDate).padStart(2, "0")}`;
-
-  filterState.from = firstDay;
-  filterState.to = lastDay;
-  filterState.quickPreset = "this_month";
+function setDefaultDateRange() {
+  filterState.from = "";
+  filterState.to = "";
+  filterState.quickPreset = "all";
 }
 
 function readUrlParams() {
@@ -224,7 +235,7 @@ function readUrlParams() {
     filterState.to = toParam;
     filterState.quickPreset = "";
   } else {
-    setDefaultMonthRange();
+    setDefaultDateRange();
   }
 
   if (statusParam && ["participating", "completed", "absent", "rescheduled", "cancelled", "attended", "registered", "all"].includes(statusParam)) {
@@ -259,16 +270,39 @@ function syncUrlParams() {
    DATA NORMALIZATION & STATUS RESOLUTION
 --------------------------------------------------------- */
 function normalizeEventData(id, raw) {
-  let startAt = raw.startAt || 0;
-  let endAt = raw.endAt || 0;
+  const toMillis = (value) => {
+    if (typeof value === "number") return value;
+    if (value?.toMillis) return value.toMillis();
+    if (value?.toDate) return value.toDate().getTime();
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+  const rawDate =
+    raw.eventDate ||
+    raw.dateISO ||
+    raw.date ||
+    raw.dateStart ||
+    raw.schedule?.date ||
+    raw.schedule?.startDate ||
+    "";
+  const dateISO = rawDate?.toDate
+    ? rawDate.toDate().toISOString().slice(0, 10)
+    : String(rawDate).slice(0, 10);
+  const timeStr =
+    raw.time ||
+    [raw.timeStart || raw.startTime, raw.timeEnd || raw.endTime]
+      .filter(Boolean)
+      .join(" - ") ||
+    "08:00 AM";
+  let startAt = toMillis(raw.startAt);
+  let endAt = toMillis(raw.endAt);
 
-  if (!startAt && raw.dateISO) {
-    const timeStr = raw.time || "08:00 AM";
-    const [tPart, meridiem] = timeStr.split(" ");
+  if (!startAt && dateISO) {
+    const [tPart, meridiem] = timeStr.split(/\s+/);
     let [hh, mm] = (tPart || "08:00").split(":").map(Number);
     if (meridiem === "PM" && hh < 12) hh += 12;
     if (meridiem === "AM" && hh === 12) hh = 0;
-    const [y, m, d] = String(raw.dateISO).split("-").map(Number);
+    const [y, m, d] = dateISO.split("-").map(Number);
     startAt = Date.UTC(y, m - 1, d, hh - 8, mm || 0, 0, 0);
     endAt = startAt + 2 * 3600 * 1000;
   }
@@ -278,9 +312,10 @@ function normalizeEventData(id, raw) {
   const registeredCount = Number(raw.registeredCount || 0);
 
   return {
+    ...raw,
     id: String(id),
-    title: raw.name || raw.title || "Untitled Event",
-    location: raw.venue || raw.location || "PUP Biñan Campus",
+    title: raw.name || raw.title || raw.eventName || "Untitled Event",
+    location: raw.venue || raw.location || raw.venueOther || "PUP Biñan Campus",
     room: raw.room || "",
     category: raw.category || "Academic & Learning",
     source: raw.source || "PUP Official",
@@ -331,6 +366,99 @@ function computeEventParticipationStatus(event) {
   return "participating";
 }
 
+function refreshUserRegistrations() {
+  userRegistrationsMap.clear();
+  for (const [eventId, registration] of localRegistrationsMap) {
+    userRegistrationsMap.set(eventId, registration);
+  }
+  for (const [eventId, registration] of rtdbRegistrationsMap) {
+    userRegistrationsMap.set(eventId, registration);
+  }
+  for (const [eventId, registration] of firestoreRegistrationsMap) {
+    userRegistrationsMap.set(eventId, registration);
+  }
+  syncAttendanceListeners();
+  render();
+}
+
+function stopFirestoreRegistrationListeners() {
+  if (firestoreEventsUnsubscribe) {
+    firestoreEventsUnsubscribe();
+    firestoreEventsUnsubscribe = null;
+  }
+  firestoreEventListeners.forEach((unsubscribe) => unsubscribe());
+  firestoreEventListeners.clear();
+  firestoreRegistrationsMap.clear();
+}
+
+function listenForFirestoreRegistrations(uid) {
+  stopFirestoreRegistrationListeners();
+  if (!db || !isFirebaseConfigured || !uid) return;
+
+  firestoreEventsUnsubscribe = onFirestoreSnapshot(
+    firestoreQuery(
+      collection(db, "events"),
+      where("status", "in", [
+        "approved", "Approved", "APPROVED",
+        "published", "Published", "PUBLISHED",
+        "completed", "Completed", "COMPLETED",
+        "rescheduled", "Rescheduled", "RESCHEDULED",
+      ]),
+    ),
+    (snapshot) => {
+      const eventIds = new Set();
+      firestoreParticipationError = false;
+      snapshot.forEach((eventSnapshot) => {
+        const eventId = eventSnapshot.id;
+        const eventData = eventSnapshot.data();
+        rawEventsMap.set(eventId, normalizeEventData(eventId, eventData));
+        eventIds.add(eventId);
+
+        if (!firestoreEventListeners.has(eventId)) {
+          const unsubscribe = onFirestoreSnapshot(
+            doc(db, "events", eventId, "registrations", uid),
+            (registrationSnapshot) => {
+              firestoreParticipationError = false;
+              if (!registrationSnapshot.exists()) {
+                firestoreRegistrationsMap.delete(eventId);
+              } else {
+                const registration = registrationSnapshot.data();
+                firestoreRegistrationsMap.set(eventId, {
+                  ...registration,
+                  status: registration.status || "registered",
+                  at: registration.registeredAt || registration.at || 0,
+                });
+              }
+              refreshUserRegistrations();
+            },
+            (error) => {
+              console.error(`Could not load registration for event ${eventId}:`, error);
+              firestoreParticipationError = true;
+              render();
+            },
+          );
+          firestoreEventListeners.set(eventId, unsubscribe);
+        }
+      });
+
+      firestoreEventListeners.forEach((unsubscribe, eventId) => {
+        if (!eventIds.has(eventId)) {
+          unsubscribe();
+          firestoreEventListeners.delete(eventId);
+          firestoreRegistrationsMap.delete(eventId);
+          rawEventsMap.delete(eventId);
+        }
+      });
+      refreshUserRegistrations();
+    },
+    (error) => {
+      console.error("Could not load Firestore events for participation:", error);
+      firestoreParticipationError = true;
+      render();
+    },
+  );
+}
+
 /* ---------------------------------------------------------
    ATTENDANCE REAL-TIME LISTENERS
 --------------------------------------------------------- */
@@ -370,6 +498,18 @@ function syncAttendanceListeners() {
    LOAD EVENTS & REGISTRATIONS
 --------------------------------------------------------- */
 function loadParticipationData() {
+  try {
+    const cachedEvents = JSON.parse(localStorage.getItem("recovibeEventsCache") || "[]");
+    if (Array.isArray(cachedEvents)) {
+      cachedEvents.forEach((event) => {
+        const id = event?.id || event?.eventId;
+        if (id) rawEventsMap.set(String(id), normalizeEventData(id, event));
+      });
+    }
+  } catch (error) {
+    console.warn("Cached event data read notice:", error);
+  }
+
   // Offline fallback from window.RECOVIBE_EVENTS
   if (Array.isArray(window.RECOVIBE_EVENTS)) {
     window.RECOVIBE_EVENTS.forEach((raw) => {
@@ -384,14 +524,15 @@ function loadParticipationData() {
     const saved = JSON.parse(localStorage.getItem("recovibeParticipations") || "[]");
     if (Array.isArray(saved)) {
       saved.forEach((id) => {
-        if (!userRegistrationsMap.has(String(id))) {
-          userRegistrationsMap.set(String(id), { status: "registered", at: Date.now() });
+        if (!localRegistrationsMap.has(String(id))) {
+          localRegistrationsMap.set(String(id), { status: "registered", at: Date.now() });
         }
       });
     }
   } catch (err) {
     console.warn("Local participations read notice:", err);
   }
+  refreshUserRegistrations();
 
   // RTDB Public Events Query
   if (isRtdbConfigured) {
@@ -440,7 +581,21 @@ function render() {
   const registeredIds = new Set(userRegistrationsMap.keys());
 
   // Find all events associated with this user
-  const userEvents = allEvents.filter((ev) => registeredIds.has(ev.id));
+  const userEvents = allEvents.filter((ev) => {
+    if (!registeredIds.has(ev.id)) return false;
+    const registration = userRegistrationsMap.get(ev.id);
+    const registrationStatus = String(registration?.status || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[\s_-]+/g, "");
+    const hasApprovedOrAttendedParticipation =
+      ["approved", "attended", "completed", "checkedin"].includes(registrationStatus) ||
+      Boolean(attendanceMap.get(ev.id)?.scannedAt);
+    return (
+      hasApprovedOrAttendedParticipation ||
+      isEventVisibleToStudent(ev, studentProfile)
+    );
+  });
 
   // Range-matching events for summary metrics
   const rangeMatchedEvents = userEvents.filter((ev) => {
@@ -524,6 +679,15 @@ function render() {
   if (!listEl) return;
 
   if (visibleEvents.length === 0) {
+    if (firestoreParticipationError) {
+      listEl.innerHTML = `
+        <div class="empty-participation">
+          <p style="margin:0 0 6px; font-weight:600; color:var(--ink-700);">Could not sync participation records.</p>
+          <span style="font-size:12.5px; color:var(--ink-500);">Check your connection and reload this page. If the problem continues, contact support.</span>
+        </div>`;
+      renderActiveChips(userEvents.length, visibleEvents.length);
+      return;
+    }
     listEl.innerHTML = `
       <div class="empty-participation">
         <p style="margin:0 0 6px; font-weight:600; color:var(--ink-700);">No participation records match your filters.</p>
@@ -763,7 +927,7 @@ function updateDateRangeButtonLabel() {
       btn.textContent = `${formatPhDatePretty(filterState.from)} - ${formatPhDatePretty(filterState.to)}`;
     }
   } else {
-    btn.textContent = "Date range";
+    btn.textContent = "All time";
   }
 }
 
@@ -1714,25 +1878,38 @@ function setupModalEventListeners() {
   if (auth) {
     onAuthStateChanged(auth, (user) => {
       if (user) {
+        if (rtdbRegistrationsUnsubscribe) {
+          rtdbRegistrationsUnsubscribe();
+          rtdbRegistrationsUnsubscribe = null;
+        }
+        stopFirestoreRegistrationListeners();
+        rtdbRegistrationsMap.clear();
+        refreshUserRegistrations();
         currentUid = user.uid;
+        listenForFirestoreRegistrations(currentUid);
 
         // Listen to userRegistrations
         if (isRtdbConfigured) {
           const regRef = ref(rtdb, `userRegistrations/${currentUid}`);
-          onValue(regRef, (snap) => {
-            userRegistrationsMap.clear();
+          rtdbRegistrationsUnsubscribe = onValue(regRef, (snap) => {
+            rtdbRegistrationsMap.clear();
             const data = snap.val() || {};
             Object.entries(data).forEach(([evId, reg]) => {
               if (reg) {
-                userRegistrationsMap.set(evId, reg);
+                rtdbRegistrationsMap.set(evId, reg);
               }
             });
-            syncAttendanceListeners();
-            render();
+            refreshUserRegistrations();
           });
         }
       } else {
         currentUid = null;
+        if (rtdbRegistrationsUnsubscribe) {
+          rtdbRegistrationsUnsubscribe();
+          rtdbRegistrationsUnsubscribe = null;
+        }
+        stopFirestoreRegistrationListeners();
+        rtdbRegistrationsMap.clear();
         userRegistrationsMap.clear();
         attendanceMap.clear();
         render();

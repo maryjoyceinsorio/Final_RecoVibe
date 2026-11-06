@@ -1,15 +1,10 @@
 import {
   createUserWithEmailAndPassword,
-  deleteUser,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
-  collection,
   doc,
-  getDocs,
-  query,
   serverTimestamp,
   setDoc,
-  where,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { auth, db, isFirebaseConfigured } from "./firebaseConfig.js";
 
@@ -24,13 +19,14 @@ const fields = {
   contact: document.getElementById("reg-contact"),
   year: document.getElementById("reg-year"),
   department: document.getElementById("reg-department"),
-  organization: document.getElementById("reg-organization"),
+  courseOrganization: document.getElementById("reg-course-organization"),
+  gender: document.getElementById("reg-gender"),
   password: document.getElementById("reg-pass"),
   confirmation: document.getElementById("reg-confirm"),
 };
 
 window.enhanceDropdownSelects?.(
-  "#reg-department, #reg-organization",
+  "#reg-department, #reg-course-organization, #reg-gender",
 );
 const noMiddleNameBox = document.getElementById("no-middle-name");
 const namePattern = /^[\p{L}\p{M}]+(?:[ .'-][\p{L}\p{M}]+)*\.?$/u;
@@ -249,10 +245,15 @@ function validateField(name) {
     return valid;
   }
 
-  if (name === "department" || name === "organization") {
-    const fieldId = `field-reg-${name}`;
+  if (["department", "courseOrganization", "gender"].includes(name)) {
+    const fieldIds = {
+      department: "field-reg-department",
+      courseOrganization: "field-reg-course-organization",
+      gender: "field-reg-gender",
+    };
     const valid = Boolean(fields[name].value);
-    setInvalid(fieldId, !valid, `Select your ${name}.`);
+    const label = name === "courseOrganization" ? "course organization" : name;
+    setInvalid(fieldIds[name], !valid, `Select your ${label}.`);
     return valid;
   }
 
@@ -291,7 +292,8 @@ const fieldOrder = [
   "contact",
   "department",
   "year",
-  "organization",
+  "courseOrganization",
+  "gender",
   "password",
   "confirmation",
 ];
@@ -530,10 +532,8 @@ function registrationErrorMessage(error) {
   switch (error.code) {
     case "auth/email-already-in-use":
       return "This email is already registered.";
-    case "registration/student-number-already-in-use":
-      return "Make sure the Student Number is valid.";
     case "auth/weak-password":
-      return "";
+      return "Use a stronger password that meets the listed requirements.";
     case "auth/invalid-email":
       return "Enter a valid email address.";
     case "auth/operation-not-allowed":
@@ -542,7 +542,7 @@ function registrationErrorMessage(error) {
       return "A network error occurred. Check your connection and try again.";
     case "permission-denied":
     case "firestore/permission-denied":
-      return "We couldn't save your account. Please try again or contact support.";
+      return "Your sign-in account was created, but Firestore denied saving users/{uid}. Do not create another account. Ask an administrator to allow the signed-in user to create their own student profile, then submit this form again.";
     default:
       return "We couldn't create your account right now. Please try again.";
   }
@@ -578,8 +578,10 @@ form.addEventListener("submit", async (event) => {
   const studentNumber = valueOf(fields.studentId);
   const contactNumber = valueOf(fields.contact);
   const department = fields.department.selectedOptions?.[0]?.textContent.trim() || valueOf(fields.department);
+  const departmentCode = fields.department.value;
   const year = valueOf(fields.year);
-  const organization = fields.organization.value;
+  const organization = String(fields.courseOrganization.value || "").trim();
+  const gender = fields.gender.value;
 
   // 1:1 Form Layout mapping
   const profile = {
@@ -595,8 +597,11 @@ form.addEventListener("submit", async (event) => {
 
     // Row 3
     department,
+    departmentCode,
     year,
     organization,
+    courseOrganization: organization,
+    gender,
     preferences: defaultPreferences,
 
     // Metadata
@@ -612,62 +617,35 @@ form.addEventListener("submit", async (event) => {
   submitButton.setAttribute("aria-busy", "true");
   submitButton.textContent = "Creating account...";
 
-  let user;
   try {
-    const matchingStudents = await getDocs(
-      query(
-        collection(db, "studentUser"),
-        where("studentNumber", "==", studentNumber),
-      ),
-    );
-    if (!matchingStudents.empty) {
-      const duplicateError = Object.assign(new Error(), {
-        code: "registration/student-number-already-in-use",
-      });
-      setInvalid(
-        "field-reg-student-id",
-        true,
-        registrationErrorMessage(duplicateError),
-      );
-      fields.studentId.scrollIntoView({ behavior: "smooth", block: "center" });
-      fields.studentId.focus();
-      return;
-    }
-
-    const credential = await createUserWithEmailAndPassword(
-      auth,
-      email,
-      fields.password.value,
-    );
-    user = credential.user;
+    const user =
+      auth.currentUser?.email?.toLowerCase() === email
+        ? auth.currentUser
+        : (
+            await createUserWithEmailAndPassword(
+              auth,
+              email,
+              fields.password.value,
+            )
+          ).user;
     profile.uid = user.uid;
-
-    await setDoc(doc(db, "studentUser", user.uid), profile);
+    await setDoc(doc(db, "users", user.uid), profile);
 
     alert("Your student account has been created! Redirecting...");
     window.location.assign("StudentLogin.html");
   } catch (error) {
-    console.error("Registration error:", error);
-    if (user) {
-      try {
-        await deleteUser(user);
-      } catch (delError) {
-        console.error("Cleanup error:", delError);
-      }
-    }
+    console.error("[StudentRegistration] Account/profile write failed:", {
+      code: error?.code || "unknown",
+      message: error?.message || String(error),
+      uid: auth.currentUser?.uid || null,
+      profilePath: auth.currentUser?.uid
+        ? `users/${auth.currentUser.uid}`
+        : null,
+    });
     const message = registrationErrorMessage(error);
     if (error.code === "auth/email-already-in-use") {
       setInvalid("field-reg-email", true, message);
       fields.email.focus();
-    } else if (
-      error.code === "registration/student-number-already-in-use"
-    ) {
-      setInvalid(
-        "field-reg-student-id",
-        true,
-        "Make sure the Student Number is valid.",
-      );
-      fields.studentId.focus();
     } else if (error.code === "auth/weak-password") {
       setInvalid("field-reg-pass", true, message);
       fields.password.focus();

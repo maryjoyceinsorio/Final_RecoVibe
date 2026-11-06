@@ -856,13 +856,11 @@ body {
   color: #57534e;
 }
 
-.approver-role-switcher select {
+.approver-role-switcher strong {
   border: none;
   background: transparent;
   font-weight: 600;
   color: #7a1f2e;
-  outline: none;
-  cursor: pointer;
   font-size: 13px;
 }
 
@@ -899,7 +897,8 @@ body {
 .queue-card-header {
   display: flex;
   align-items: flex-start;
-  justify-content: space-between;
+  justify-content: flex-start;
+  flex-wrap: wrap;
   gap: 12px;
 }
 
@@ -936,7 +935,10 @@ body {
   font-size: 11.5px;
   font-weight: 700;
   letter-spacing: 0.3px;
-  white-space: nowrap;
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .queue-card-footer {
@@ -958,6 +960,81 @@ body {
   border-radius: 6px;
   font-size: 12px;
   font-weight: 600;
+}
+
+.queue-pipeline-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 9px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.queue-pipeline-status--action {
+  background: #e8f5ed;
+  color: #17643b;
+}
+
+.queue-pipeline-status--incoming {
+  background: #fff4d6;
+  color: #80530b;
+}
+
+.queue-card--incoming {
+  border-left-color: #d6ae4a;
+}
+
+.queue-card--incoming:hover {
+  border-left-color: #b98516;
+}
+
+.approval-pipeline-group {
+  margin-top: 20px;
+}
+
+.approval-pipeline-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.approval-pipeline-heading h4 {
+  margin: 0;
+  color: #17643b;
+  font-size: 14px;
+}
+
+.approval-pipeline-heading p {
+  margin: 4px 0 0;
+  color: var(--admin-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.approval-pipeline-count {
+  display: grid;
+  place-items: center;
+  min-width: 27px;
+  height: 27px;
+  padding: 0 7px;
+  border-radius: 14px;
+  background: #e8f5ed;
+  color: #17643b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.approval-pipeline-group--incoming .approval-pipeline-heading h4 {
+  color: #80530b;
+}
+
+.approval-pipeline-group--incoming .approval-pipeline-count {
+  background: #fff4d6;
+  color: #80530b;
 }
 
 .btn-queue-review {
@@ -1315,30 +1392,33 @@ body {
 
 /* Tracker Notes List */
 .admin-notes-wrap {
-  background: #fafaf9;
-  border: 1px solid #f0edea;
-  border-radius: 10px;
-  padding: 14px 18px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: 10px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
 }
 
 .admin-note-row {
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  padding: 8px 0;
-  border-bottom: 1px solid #f5f5f4;
-}
-
-.admin-note-row:last-child {
-  border-bottom: none;
+  padding: 12px;
+  background: #ffffff;
+  border: 1px solid #e6e0d3;
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(36, 26, 23, 0.05), 0 4px 12px rgba(36, 26, 23, 0.04);
 }
 
 .admin-note-avatar {
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  background: #7a1f2e;
-  color: #ffffff;
+  background: #faf7f1;
+  border: 1px solid #e6e0d3;
+  color: #7a6d66;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1347,10 +1427,42 @@ body {
   flex-shrink: 0;
 }
 
+.admin-note-row.is-approved .admin-note-avatar {
+  color: #26734d;
+  background: #e6f4eb;
+  border-color: #b9ddc7;
+}
+
+.admin-note-row.is-reviewing .admin-note-avatar {
+  color: #7a1f2e;
+  background: #f1e7d8;
+  border-color: #dfc7a6;
+}
+
+.admin-note-row.is-revision .admin-note-avatar {
+  color: #8a5a16;
+  background: #fff7e6;
+  border-color: #f0d8a8;
+}
+
+.admin-note-row.is-rejected .admin-note-avatar {
+  color: #b42318;
+  background: #fff0ef;
+  border-color: #edc3bf;
+}
+
 .admin-note-body strong {
   display: block;
   font-size: 13px;
   color: #20191a;
+}
+
+.admin-stage-status {
+  display: block;
+  margin-top: 3px;
+  color: #786f70;
+  font-size: 11.5px;
+  font-weight: 600;
 }
 
 .admin-note-body p {
@@ -1360,6 +1472,7 @@ body {
 }
 
 .next-approver-line {
+  grid-column: 1 / -1;
   margin-top: 10px;
   padding-top: 10px;
   border-top: 1px dashed #e7e5e4;
@@ -1648,4 +1761,3 @@ body {
     height: 100%;
   }
 }
-

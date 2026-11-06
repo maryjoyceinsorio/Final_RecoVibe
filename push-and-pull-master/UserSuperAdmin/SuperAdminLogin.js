@@ -1,27 +1,106 @@
-(function () {
-  document
-    .querySelector('.link-btn[href*="ForgetPassword"]')
-    ?.setAttribute("href", "SuperAdminForgetPassword.html");
-  const email = document.getElementById("login-email");
-  const password = document.getElementById("login-pass");
+import { signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { auth, authReady, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
+
+(() => {
+  const emailInput = document.getElementById("login-email");
+  const passwordInput = document.getElementById("login-pass");
+  const loginButton = document.getElementById("login-submit");
+  const banner = document.getElementById("login-banner");
   const setInvalid = (id, invalid) =>
     document.getElementById(id).classList.toggle("invalid", invalid);
-  document
-    .getElementById("login-submit")
-    .addEventListener("click", function () {
-      const validEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.value.trim());
-      setInvalid("field-email", !validEmail);
-      setInvalid("field-pass", !password.value);
-      if (validEmail && password.value)
-        window.location.href = "../FirstPage.html";
-    });
+
+  async function handleSignIn() {
+    const email = emailInput.value.trim().toLowerCase();
+    const password = passwordInput.value;
+    const validEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+    setInvalid("field-email", !validEmail);
+    setInvalid("field-pass", !password);
+    banner.classList.remove("show");
+    if (!validEmail || !password) return;
+
+    if (!isFirebaseConfigured || !auth || !db) {
+      banner.textContent = "Sign in is unavailable. Please contact support.";
+      banner.classList.add("show");
+      return;
+    }
+
+    loginButton.disabled = true;
+    loginButton.textContent = "Signing in...";
+    let authenticated = false;
+    try {
+      await authReady;
+      const credential = await signInWithEmailAndPassword(auth, email, password);
+      authenticated = true;
+      let profileSnapshot = await getDoc(doc(db, "adminUser", credential.user.uid));
+      if (!profileSnapshot.exists()) {
+        profileSnapshot = await getDoc(doc(db, "users", credential.user.uid));
+      }
+      if (!profileSnapshot.exists()) {
+        throw Object.assign(new Error("Super administrator profile was not found."), {
+          code: "profile/not-found",
+        });
+      }
+
+      const profile = profileSnapshot.data();
+      const role = String(profile.role || profile.userRole || "")
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, "");
+      if (role !== "superadmin") {
+        throw Object.assign(new Error("Account is not a super administrator."), {
+          code: "profile/role-mismatch",
+        });
+      }
+
+      const authenticatedProfile = {
+        ...profile,
+        uid: credential.user.uid,
+        email: credential.user.email || email,
+        role: "Super Admin",
+      };
+      localStorage.setItem(
+        "recovibeAdminProfile",
+        JSON.stringify(authenticatedProfile),
+      );
+      localStorage.setItem("recovibeAdminId", email);
+      window.location.assign("SuperAdminDashboard.html");
+    } catch (error) {
+      if (authenticated) {
+        try {
+          await signOut(auth);
+        } catch (signOutError) {
+          console.error("[SuperAdminLogin] Unable to clear unverified session:", {
+            code: signOutError?.code || "unknown",
+            message: signOutError?.message || String(signOutError),
+          });
+        }
+      }
+      console.error("[SuperAdminLogin] Sign-in/profile verification failed:", {
+        code: error?.code || "unknown",
+        message: error?.message || String(error),
+      });
+      banner.textContent =
+        error?.code?.startsWith("auth/")
+          ? ["auth/invalid-credential", "auth/wrong-password", "auth/user-not-found"].includes(error.code)
+            ? "Incorrect email or password."
+            : "Unable to sign in right now. Please try again."
+          : "Your account could not be verified for the super administrator portal.";
+      banner.classList.add("show");
+    } finally {
+      loginButton.disabled = false;
+      loginButton.textContent = "Sign in";
+    }
+  }
+
+  loginButton.addEventListener("click", handleSignIn);
+  passwordInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") handleSignIn();
+  });
   document.getElementById("pass-toggle").addEventListener("click", function () {
-    const visible = password.type === "password";
-    password.type = visible ? "text" : "password";
-    this.setAttribute(
-      "aria-label",
-      visible ? "Hide password" : "Show password",
-    );
+    const visible = passwordInput.type === "password";
+    passwordInput.type = visible ? "text" : "password";
+    this.setAttribute("aria-label", visible ? "Hide password" : "Show password");
     this.setAttribute("aria-pressed", String(visible));
   });
 })();

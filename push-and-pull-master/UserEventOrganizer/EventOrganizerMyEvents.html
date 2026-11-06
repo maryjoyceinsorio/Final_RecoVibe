@@ -261,18 +261,6 @@
               />
             </label>
             <label class="my-events-filter">
-              <span class="visually-hidden">Filter by status</span>
-              <select id="eventStatusFilter">
-                <option value="all">All Statuses</option>
-                <option value="Draft">Draft</option>
-                <option value="Pending Approval">Pending Approval</option>
-                <option value="Approved">Approved</option>
-                <option value="Needs Revision">Needs Revision</option>
-                <option value="Published">Published</option>
-                <option value="Cancelled">Cancelled</option>
-              </select>
-            </label>
-            <label class="my-events-filter">
               <span class="visually-hidden">Filter by date</span>
               <select id="eventDateFilter">
                 <option value="all">Select date range</option>
@@ -316,14 +304,14 @@
             <span class="event-results-count" id="eventResultsCount"></span>
           </div>
           <div class="organizer-table-wrap">
-            <table class="organizer-table" id="eventTable">
+            <table class="organizer-table" id="eventTable" aria-label="Your created events">
               <thead>
                 <tr>
-                  <th>Event</th>
-                  <th>Approval</th>
-                  <th>Schedule</th>
-                  <th>Status</th>
-                  <th>Actions</th>
+                  <th scope="col">Event</th>
+                  <th scope="col">Approval progress</th>
+                  <th scope="col">Date &amp; time</th>
+                  <th scope="col">Current status</th>
+                  <th scope="col">Actions</th>
                 </tr>
               </thead>
               <tbody id="eventTableBody"></tbody>
@@ -355,13 +343,20 @@
             </div>
           </div>
 
-          <!-- Middle Section: Notes list & Next step -->
+          <!-- Approval stages and history -->
           <section class="tracker-section tracker-notes-section">
-            <h3>Review Activity</h3>
+            <h3>Approval stages</h3>
             <div class="tracker-notes-list" id="trackerNotesList">
-              <!-- Review notes with initials, step, date, and note -->
+              <!-- One live status card for each configured approver -->
             </div>
             <div class="tracker-next-line" id="trackerNextLine"></div>
+          </section>
+
+          <section class="tracker-section tracker-history-section">
+            <h3>Approval history</h3>
+            <div class="tracker-history-list" id="trackerHistoryList">
+              <!-- Chronological approval actions -->
+            </div>
           </section>
 
           <!-- Documents Section -->
@@ -370,7 +365,15 @@
             <div class="tracker-docs-list" id="trackerDocsList">
               <!-- File rows with note and 'Replace file' button on flagged files -->
             </div>
-            <input type="file" id="trackerReplaceFileInput" hidden accept=".pdf,.doc,.docx,.jpg,.jpeg,.png">
+            <div class="tracker-replace-form" id="trackerReplaceForm" hidden>
+              <label for="trackerReplaceDriveLink">Replacement Google Drive link</label>
+              <input type="url" id="trackerReplaceDriveLink" placeholder="https://drive.google.com/..." aria-describedby="trackerReplaceDriveError" required>
+              <p class="tracker-replace-error" id="trackerReplaceDriveError" role="alert" hidden></p>
+              <div>
+                <button type="button" class="tracker-btn-replace" id="btnTrackerReplaceConfirm">Save link</button>
+                <button type="button" class="tracker-btn tracker-btn-outline" id="btnTrackerReplaceCancel">Cancel</button>
+              </div>
+            </div>
           </section>
         </div>
 
@@ -441,5 +444,6 @@
     <script src="OrganizerNotificationBadge.js"></script>
     <script src="../EventDetailsModal.js"></script>
     <script type="module" src="EventOrganizerMyEvents.js"></script>
+    <script type="module" src="OrganizerSidebarProfile.js"></script>
   </body>
 </html>

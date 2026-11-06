@@ -10,11 +10,18 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 import { httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
 import {
+  collection,
+  doc,
+  getDoc,
+  onSnapshot,
+  updateDoc,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import {
   auth,
+  authReady,
+  db,
   rtdb,
   functions,
-  isFirebaseConfigured,
-  isRtdbConfigured,
 } from "../UserStudent/firebaseConfig.js";
 
 (() => {
@@ -25,20 +32,24 @@ import {
   let organizerId = "";
   let organizerEvents = [];
   let eventDataById = new Map();
+  let firestoreEventsById = new Map();
   let draftsById = new Map();
+  const firestoreEventUnsubscribers = [];
   let activeIndexListenerRef = null;
   let activeDraftsListenerRef = null;
   let indexLoaded = false;
   let draftsLoaded = false;
+  let firestoreEventsLoaded = false;
   let loadErrorOccurred = false;
   let missingEventTimeout = null;
   const activeEventListeners = new Map();
   const approvalsMap = new Map();
+  const firestoreApprovalsById = new Map();
   const activeApprovalListeners = new Map();
   let activeEventsListenerRef = null;
+  const realtimeDatabaseConfigured = Boolean(rtdb?.app?.options?.databaseURL);
 
   const searchInput = document.getElementById("eventSearch");
-  const statusFilter = document.getElementById("eventStatusFilter");
   const dateFilter = document.getElementById("eventDateFilter");
   const eventResultsCount = document.getElementById("eventResultsCount");
 
@@ -50,9 +61,14 @@ import {
   const trackerSubmittedDate = document.getElementById("trackerSubmittedDate");
   const trackerTimeline = document.getElementById("trackerTimeline");
   const trackerNotesList = document.getElementById("trackerNotesList");
+  const trackerHistoryList = document.getElementById("trackerHistoryList");
   const trackerNextLine = document.getElementById("trackerNextLine");
   const trackerDocsList = document.getElementById("trackerDocsList");
-  const trackerReplaceFileInput = document.getElementById("trackerReplaceFileInput");
+  const trackerReplaceForm = document.getElementById("trackerReplaceForm");
+  const trackerReplaceDriveLink = document.getElementById("trackerReplaceDriveLink");
+  const trackerReplaceDriveError = document.getElementById("trackerReplaceDriveError");
+  const btnTrackerReplaceConfirm = document.getElementById("btnTrackerReplaceConfirm");
+  const btnTrackerReplaceCancel = document.getElementById("btnTrackerReplaceCancel");
   const btnTrackerRemind = document.getElementById("btnTrackerRemind");
   const btnTrackerCancel = document.getElementById("btnTrackerCancel");
   const btnTrackerResubmit = document.getElementById("btnTrackerResubmit");
@@ -76,9 +92,136 @@ import {
 
   function normalizeStatus(status) {
     const raw = String(status ?? "").trim().toLowerCase().replace(/[\s_-]+/g, " ");
-    if (raw === "pending approval") return "pending";
-    if (raw === "needs revision") return "revision";
+    if (["pending approval", "under review", "in review", "reviewing", "submitted"].includes(raw)) return "pending";
+    if (["needs revision", "revision requested", "changes requested", "revision", "rev"].includes(raw)) return "revision";
+    if (["rejected", "reject", "rej"].includes(raw)) return "rejected";
+    if (["approve", "fully approved", "ready to publish", "ok", "complete", "completed", "done"].includes(raw)) return "approved";
+    if (["live", "published live"].includes(raw)) return "published";
+    if (raw === "canceled") return "cancelled";
     return raw;
+  }
+
+  function isGoogleDriveLink(value) {
+    try {
+      const url = new URL(String(value || "").trim());
+      return url.protocol === "https:" &&
+        ["drive.google.com", "docs.google.com"].includes(url.hostname.toLowerCase()) &&
+        url.pathname !== "/";
+    } catch {
+      return false;
+    }
+  }
+
+  function hasTrueFlag(value) {
+    return value === true || value === 1 || ["true", "yes", "1"].includes(String(value ?? "").trim().toLowerCase());
+  }
+
+  function getEventStatusValues(event) {
+    return [
+      event.status,
+      event.approvalStatus,
+      event.approval_status,
+      event.adminStatus,
+      event.admin_status,
+      event.adminApprovalStatus,
+      event.approvalState,
+      event.approval_state,
+      event.reviewStatus,
+      event.publicationStatus,
+      event.moderationStatus,
+      event.eventStatus,
+      event.isApproved,
+      event.approved,
+      event.published,
+      event.approval?.approvalStatus,
+      event.approval?.status,
+      event.approval?.state,
+      event.admin?.status,
+      event.review?.status,
+      event.moderation?.status,
+      event.approvalData?.status,
+    ]
+      .filter((status) => status !== null && status !== undefined && status !== "")
+      .map(normalizeStatus);
+  }
+
+  function buildFirestoreApproval(event) {
+    const standardStages = [
+      { key: "org_adv", label: "Organization Adviser", aliases: ["org_adv", "org adviser", "organization adviser", "organization adviser review", "migs", "michael anjelo miguel"] },
+      { key: "sir_abelida", label: "Laboratory Head, Property Custodian, Administrative Officer", aliases: ["sir_abelida", "abelidads", "abelida", "sir abelida", "gerino abelida", "gerino abelida jr", "laboratory head", "property custodian", "administrative officer", "laboratory head property custodian administrative officer"] },
+      { key: "hap", label: "Head of Academic Programs, QAC Coordinator", aliases: ["hap", "archong", "archie", "archie arevalo", "head of academic programs", "qac coordinator", "head of academic programs qac coordinator"] },
+      { key: "osas", label: "OSAS", aliases: ["osas", "cheryl joyce jurado", "joyce"] },
+    ];
+    const sourceStages = event.approvalStages;
+    const stageEntries = Array.isArray(sourceStages)
+      ? sourceStages.map((stage, index) => [String(stage?.id || index), stage || {}])
+      : Object.entries(sourceStages || {});
+    const normalizeKey = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const overallStatusValues = getEventStatusValues(event);
+    const isOverallApproved = overallStatusValues.includes("approved");
+    const members = {};
+
+    standardStages.forEach((stage, index) => {
+      const source = stageEntries.find(([id, candidate]) =>
+        [id, candidate?.id, candidate?.key, candidate?.label, candidate?.name, candidate?.reviewer]
+          .some((value) => stage.aliases.some((alias) => normalizeKey(alias) === normalizeKey(value)) ||
+            normalizeKey(value) === normalizeKey(stage.key) ||
+            normalizeKey(value) === normalizeKey(stage.label)),
+      )?.[1];
+      const sourceStatus = normalizeStatus(
+        source?.status || source?.approvalStatus || source?.state || source?.decision,
+      );
+      const status = sourceStatus === "approved"
+        ? "ok"
+        : ["review", "reviewing", "in review", "pending"].includes(sourceStatus)
+          ? "review"
+          : sourceStatus === "revision"
+            ? "rev"
+            : sourceStatus === "rejected"
+              ? "rej"
+              : ["wait", "waiting"].includes(sourceStatus)
+                ? "wait"
+                : isOverallApproved ? "ok" : index === 0 ? "review" : "wait";
+      members[stage.key] = {
+        key: stage.key,
+        label: stage.label,
+        step: index + 1,
+        status,
+        note: source?.note || "",
+        updatedAt: source?.updatedAt || source?.approvedAt || null,
+        approvedByName: source?.approvedByName || source?.decidedBy || "",
+      };
+    });
+
+    const files = {};
+    (Array.isArray(event.approvalDocuments) ? event.approvalDocuments : []).forEach((file, index) => {
+      files[file.id || `firestore-file-${index}`] = {
+        ...file,
+        id: file.id || `firestore-file-${index}`,
+        name: file.name || "Attached document",
+        status: file.status || "ok",
+      };
+    });
+    if (event.adminDocuments) {
+      files.adminDocuments = {
+        id: "adminDocuments",
+        name: "Admin documents",
+        path: event.adminDocuments,
+        status: "ok",
+      };
+    }
+
+    const status = overallStatusValues.find((value) =>
+      ["published", "completed", "cancelled", "rejected", "revision", "approved"].includes(value),
+    ) || overallStatusValues.find(Boolean) || "pending";
+
+    return {
+      submittedAt: event.approvalSubmittedAt || event.createdAt,
+      members,
+      files,
+      history: Array.isArray(event.approvalHistory) ? event.approvalHistory : [],
+      status,
+    };
   }
 
   function formatDisplayStatus(status) {
@@ -90,19 +233,63 @@ import {
     if (norm === "completed") return "Completed";
     if (norm === "cancelled") return "Cancelled";
     if (norm === "rejected") return "Rejected";
+    if (norm === "draft") return "Draft";
     return status || "Draft";
   }
 
   function getStatusClass(status) {
     const norm = normalizeStatus(status);
     if (norm === "pending") return "pending";
-    if (norm === "revision") return "revision";
+    if (norm === "revision") return "needs-revision";
     if (norm === "approved") return "approved";
     if (norm === "published") return "published";
     if (norm === "completed") return "completed";
     if (norm === "cancelled") return "cancelled";
     if (norm === "rejected") return "rejected";
-    return "draft";
+    return norm === "draft" ? "draft" : "pending";
+  }
+
+  function normalizeDateValue(value) {
+    if (value?.toDate) return value.toDate().toISOString();
+    if (value instanceof Date) return value.toISOString();
+    return value || "";
+  }
+
+  function getEventDate(event) {
+    return normalizeDateValue(
+      event.dateISO ||
+        event.eventDate ||
+        event.date ||
+        event.dateStart ||
+        event.schedule?.date ||
+        event.schedule?.startDate ||
+        event.startAt,
+    );
+  }
+
+  function getScheduleDisplay(event) {
+    const schedule = event.schedule;
+    const scheduleText = typeof schedule === "string" ? schedule : "";
+    const timeText = typeof event.time === "string" ? event.time : "";
+    const startTime =
+      event.timeStart ||
+      event.startTime ||
+      schedule?.timeStart ||
+      schedule?.startTime ||
+      schedule?.start;
+    const endTime =
+      event.timeEnd ||
+      event.endTime ||
+      schedule?.timeEnd ||
+      schedule?.endTime ||
+      schedule?.end;
+    return (
+      timeText ||
+      scheduleText ||
+      [startTime, endTime].filter(Boolean).join(" - ") ||
+      (typeof schedule?.time === "string" ? schedule.time : "") ||
+      "Time TBA"
+    );
   }
 
   function formatDate(dateValue, fallback = "Date TBA") {
@@ -130,67 +317,103 @@ import {
     });
   }
 
-  function updateOrganizerAccount() {
-    const storedProfile = localStorage.getItem("recovibeOrganizerProfile");
-    if (!storedProfile) return;
-    try {
-      const profile = JSON.parse(storedProfile);
-      const name = String(profile.name || "Event Organizer");
-      const organization = String(profile.organization || "IBITS");
-      const initials =
-        name
-          .split(/\s+/)
-          .filter(Boolean)
-          .slice(0, 2)
-          .map((part) => part[0].toUpperCase())
-          .join("") || "EO";
+  function getEffectiveStatus(event) {
+    const firestoreStatuses = getEventStatusValues(event);
+    const eventStatus = firestoreStatuses[0] || "";
+    if (eventStatus === "draft") return "draft";
 
-      const nameEl = document.getElementById("userName");
-      const roleEl = document.getElementById("userRole");
-      const avatarEl = document.getElementById("userAvatar");
-      if (nameEl) nameEl.textContent = name;
-      if (roleEl) roleEl.textContent = `${organization} account`;
-      if (avatarEl) avatarEl.textContent = initials;
-    } catch (error) {
-      console.warn("Unable to read organizer profile:", error);
+    const eventKey = String(event.eventId || event.id);
+    const approval = getApprovalForEvent(event);
+
+    const isPublished = ["published", "completed", "cancelled"].find((status) =>
+      firestoreStatuses.includes(status),
+    );
+    if (isPublished) return isPublished;
+    if ([event.published, event.isPublished, event.isLive].some(hasTrueFlag)) {
+      return "published";
     }
+
+    const stageEntries = Array.isArray(event.approvalStages)
+      ? event.approvalStages
+      : Object.values(event.approvalStages || {});
+    const requiredStageStatuses = stageEntries
+      .filter((stage) => !stage || typeof stage !== "object" || (stage.required !== false && stage.enabled !== false))
+      .map((stage) =>
+        normalizeStatus(
+          typeof stage === "string"
+            ? stage
+            : stage?.status || stage?.approvalStatus || stage?.state || stage?.decision,
+        ),
+      );
+    if (firestoreStatuses.includes("rejected")) return "rejected";
+    if (firestoreStatuses.includes("revision")) return "revision";
+    if (firestoreStatuses.includes("approved")) return "approved";
+    if ([event.isApproved, event.approved].some(hasTrueFlag)) return "approved";
+
+    const members = Object.values(approval?.members || {});
+    const approvalStatus = normalizeStatus(approval?.status);
+    if (approvalStatus === "rejected") return "rejected";
+    if (approvalStatus === "revision") return "revision";
+    if (approvalStatus === "approved") return "approved";
+    if (members.length > 0 && members.every((member) => normalizeStatus(member.status) === "approved" || normalizeStatus(member.status) === "ok")) {
+      return "approved";
+    }
+    if (requiredStageStatuses.includes("rejected")) return "rejected";
+    if (requiredStageStatuses.includes("revision")) return "revision";
+    if (
+      requiredStageStatuses.length > 0 &&
+      requiredStageStatuses.every((status) => status === "approved")
+    ) {
+      return "approved";
+    }
+    if (
+      typeof isOrganizerEventHapApproved === "function" &&
+      [1, 2, 3].every((stage) => isOrganizerEventHapApproved(event, stage))
+    ) {
+      return "approved";
+    }
+
+    return firestoreStatuses.find((status) => status === "pending") || eventStatus || "pending";
   }
 
-  function getEffectiveStatus(event) {
-    if (event.status === "draft") return "draft";
-    const approval = approvalsMap.get(String(event.eventId || event.id));
-    if (approval && approval.status) {
-      return approval.status;
-    }
-    return event.status || "pending";
+  function findOrganizerEvent(eventId) {
+    return organizerEvents.find((event) =>
+      [event.eventId, event.id, event.sourceEventId]
+        .filter((id) => id !== null && id !== undefined)
+        .some((id) => String(id) === String(eventId)),
+    );
+  }
+
+  function getApprovalForEvent(event) {
+    const eventId = String(event?.eventId || event?.id || "");
+    return firestoreApprovalsById.get(eventId) || approvalsMap.get(eventId);
+  }
+
+  function isFullyApproved(event) {
+    return normalizeStatus(getEffectiveStatus(event)) === "approved";
   }
 
   function getFilteredEvents() {
     const query = searchInput?.value.trim().toLowerCase() || "";
-    const selectedStatus = statusFilter?.value || "all";
     const selectedDate = dateFilter?.value || "all";
     const currentDate = new Date();
     currentDate.setHours(0, 0, 0, 0);
 
     return organizerEvents.filter((event) => {
-      const searchableText = `${event.title || event.name || ""} ${event.location || event.venue || ""} ${event.category || ""}`.toLowerCase();
-      const eventDateValue = event.dateISO || event.eventDate || event.startAt;
+      const searchableText = `${event.title || event.eventName || event.name || ""} ${event.location || event.venue || ""} ${event.category || ""}`.toLowerCase();
+      const eventDateValue = getEventDate(event);
       const eventDate = eventDateValue
         ? new Date(`${String(eventDateValue).substring(0, 10)}T00:00:00`)
         : null;
 
       const matchesSearch = !query || searchableText.includes(query);
-      const effStatus = getEffectiveStatus(event);
-      const matchesStatus =
-        selectedStatus === "all" ||
-        normalizeStatus(effStatus) === normalizeStatus(selectedStatus);
       const matchesDate =
         selectedDate === "all" ||
         (eventDate &&
           !Number.isNaN(eventDate.getTime()) &&
           (selectedDate === "upcoming" ? eventDate >= currentDate : eventDate < currentDate));
 
-      return matchesSearch && matchesStatus && matchesDate;
+      return matchesSearch && matchesDate;
     });
   }
 
@@ -202,9 +425,9 @@ import {
 
     events.forEach((ev) => {
       const st = normalizeStatus(getEffectiveStatus(ev));
-      if (st === "pending") pending++;
-      else if (["approved", "published", "completed"].includes(st)) approved++;
-      else if (st === "revision") needsRevision++;
+      if (["pending", "revision"].includes(st)) pending++;
+      if (st === "approved") approved++;
+      if (st === "revision") needsRevision++;
     });
 
     const totalEl = document.getElementById("totalEventsCount");
@@ -223,7 +446,7 @@ import {
    */
   function buildApprovalColumnMarkup(event) {
     const eventId = String(event.eventId || event.id);
-    const approval = approvalsMap.get(eventId);
+    const approval = getApprovalForEvent(event);
     const effStatus = normalizeStatus(getEffectiveStatus(event));
 
     if (effStatus === "cancelled") {
@@ -237,13 +460,19 @@ import {
     }
 
     if (!approval || !approval.members) {
-      // Fallback for draft or legacy events without approval chain
+      const approvalText = ["approved", "published", "completed"].includes(effStatus)
+        ? "All approval steps approved"
+        : effStatus === "revision"
+          ? "Changes requested"
+          : effStatus === "rejected"
+            ? "Rejected"
+            : "Review pending";
       return `
         <div class="approval-progress-wrap">
           <div class="approval-bar">
             <span class="approval-segment is-current"></span>
           </div>
-          <span class="approval-text">Review pending</span>
+          <span class="approval-text">${escapeHtml(approvalText)}</span>
         </div>`;
     }
 
@@ -305,10 +534,17 @@ import {
   function getActionMarkup(event) {
     const eventId = escapeHtml(event.eventId || event.id);
     const effStatus = normalizeStatus(getEffectiveStatus(event));
-    const isApproved = ["approved", "published", "completed"].includes(effStatus);
+    const isApproved = isFullyApproved(event);
     const isPublished = effStatus === "published";
     const isCompleted = effStatus === "completed";
     const isCancelled = effStatus === "cancelled";
+    const scanParams = new URLSearchParams({
+      eventId: String(event.eventId || event.id),
+      eventName: String(event.title || event.eventName || event.name || "Untitled Event"),
+      eventDate: String(getEventDate(event) || ""),
+      eventTime: String(getScheduleDisplay(event) || ""),
+      eventVenue: String(event.venue || event.location || "Venue TBA"),
+    });
 
     return `
       <div class="event-actions">
@@ -318,16 +554,19 @@ import {
         ${
           !isPublished && !isCompleted && !isCancelled
             ? `
-          <button
+          ${
+            isApproved
+              ? `<button
             type="button"
-            class="event-action event-action-primary ${!isApproved ? "is-muted" : ""}"
+            class="event-action event-action-primary"
             data-action="publish"
             data-event-id="${eventId}"
-            data-approved="${String(isApproved)}"
-            title="${isApproved ? "Publish this event to students" : "Publish unlocks after every approver signs off"}"
+            title="Publish this event to students"
           >
             Publish
-          </button>
+          </button>`
+              : ""
+          }
           <button type="button" class="event-action event-action-danger" data-action="cancel" data-event-id="${eventId}">
             Cancel
           </button>
@@ -337,7 +576,7 @@ import {
         ${
           isPublished || isCompleted
             ? `
-          <a class="event-action" href="EventOrganizerScanAttendance.html?eventId=${eventId}">
+          <a class="event-action" href="EventOrganizerScanAttendance.html?${scanParams.toString()}">
             Scan attendance
           </a>
         `
@@ -347,6 +586,19 @@ import {
   }
 
   function renderEmptyState() {
+    const loadingEvents =
+      !firestoreEventsLoaded ||
+      (realtimeDatabaseConfigured && (!indexLoaded || !draftsLoaded));
+    if (loadingEvents && !loadErrorOccurred) {
+      if (eventTableBody) {
+        eventTableBody.innerHTML = `
+          <tr>
+            <td colspan="5"><div class="event-table-empty"><span>Loading your event submissions…</span></div></td>
+          </tr>`;
+      }
+      return;
+    }
+
     if (loadErrorOccurred) {
       if (eventTableBody) {
         eventTableBody.innerHTML = `
@@ -364,12 +616,9 @@ import {
     }
 
     const hasEvents = organizerEvents.length > 0;
-    const selectedStatus = statusFilter?.value || "all";
     const heading = !hasEvents
       ? "You haven't created any events yet."
-      : selectedStatus !== "all"
-        ? `No events found with status: ${statusFilter?.selectedOptions[0]?.textContent.trim() || selectedStatus}`
-        : "No events match your filters.";
+      : "No events match your filters.";
     const message = hasEvents
       ? "Try changing or clearing your search or filters."
       : "Click '+ Create Event' to submit your first event proposal.";
@@ -409,34 +658,45 @@ import {
           const effStatus = getEffectiveStatus(event);
           const statusDisplay = formatDisplayStatus(effStatus);
           const statusClass = getStatusClass(effStatus);
-          const eventDate = event.dateISO || event.eventDate || event.startAt;
-          const schedule =
-            event.time ||
-            [event.startTime, event.endTime].filter(Boolean).join(" - ") ||
-            "Time TBA";
+          const eventDate = getEventDate(event);
+          const schedule = getScheduleDisplay(event);
           const category = event.category || "Academic & Learning";
 
-          const isDraft = event.status === "draft";
+          const isDraft = normalizeStatus(event.status) === "draft";
+          const canPublish = effStatus === "approved";
+          const showAttendanceAction = ["published", "completed"].includes(
+            normalizeStatus(effStatus),
+          );
+          const scanParams = new URLSearchParams({
+            eventId: String(event.eventId || event.id),
+            eventName: String(event.title || event.eventName || event.name || "Untitled Event"),
+            eventDate: String(eventDate || ""),
+            eventTime: String(schedule || ""),
+            eventVenue: String(event.venue || event.location || "Venue TBA"),
+          });
           return `
-            <tr data-event-id="${eventId}"${new URLSearchParams(location.search).get("new") === String(eventId) ? ' class="new-event-highlight"' : ""}>
+            <tr data-event-id="${eventId}" data-draft="${String(isDraft)}"${new URLSearchParams(location.search).get("new") === String(eventId) ? ' class="new-event-highlight"' : ""}>
               <td data-label="Event">
-                <strong>${escapeHtml(event.title || event.name || "Untitled Event")}</strong>
+                <strong>${escapeHtml(event.title || event.eventName || event.name || "Untitled Event")}</strong>
                 <small class="event-category-badge">${escapeHtml(category)}</small>
               </td>
-              <td data-label="Approval">${isDraft ? '<span class="event-approval-progress">Not submitted</span>' : buildApprovalColumnMarkup(event)}</td>
-              <td data-label="Schedule">
+              <td data-label="Approval progress">${isDraft ? '<span class="event-approval-progress">Not submitted</span>' : buildApprovalColumnMarkup(event)}</td>
+              <td data-label="Date &amp; time">
                 ${escapeHtml(formatDate(eventDate))}
+                <small>${escapeHtml(event.venue || event.location || "Venue TBA")}</small>
                 <small>${escapeHtml(schedule)}</small>
               </td>
               <td data-label="Status">
-                <span class="organizer-status ${statusClass}">
+                <span class="organizer-status ${statusClass}" aria-label="Status: ${escapeHtml(statusDisplay)}">
                   ${escapeHtml(statusDisplay)}
                 </span>
               </td>
               <td data-label="Actions">
-                ${isDraft
-                  ? `<div class="event-actions"><a class="event-action" href="EventOrganizerCreateEvent.html?draft=${eventId}">Continue editing</a><button type="button" class="event-action event-action-danger" data-action="delete-draft" data-event-id="${eventId}">Delete</button></div>`
-                  : getActionMarkup(event)}
+                ${event.firestoreSubmission
+                  ? `<div class="event-actions"><button type="button" class="event-action" data-action="view" data-event-id="${eventId}">View tracker</button>${canPublish ? `<button type="button" class="event-action event-action-primary" data-action="publish" data-event-id="${eventId}" title="Publish this event to students">Publish</button>` : ""}${showAttendanceAction ? `<a class="event-action" href="EventOrganizerScanAttendance.html?${scanParams.toString()}">Scan attendance</a>` : ""}</div>`
+                  : isDraft
+                    ? `<div class="event-actions"><a class="event-action" href="EventOrganizerCreateEvent.html?draft=${eventId}">Continue editing</a><button type="button" class="event-action event-action-danger" data-action="delete-draft" data-event-id="${eventId}">Delete</button></div>`
+                    : getActionMarkup(event)}
               </td>
             </tr>`;
         })
@@ -449,17 +709,12 @@ import {
      -------------------------------------------------------------------------- */
 
   function openApprovalTracker(eventId) {
-    const event = organizerEvents.find((e) => String(e.eventId || e.id) === String(eventId));
+    const event = findOrganizerEvent(eventId);
     if (!event) return;
 
-    activeTrackingEventId = eventId;
-    const approval = approvalsMap.get(eventId) || {
-      submittedAt: event.createdAt,
-      members: {},
-      files: {},
-      history: [],
-      status: event.status || "pending",
-    };
+    const activeEventId = String(event.eventId || event.id);
+    activeTrackingEventId = activeEventId;
+    const approval = getApprovalForEvent(event) || buildFirestoreApproval(event);
 
     if (trackerSubmittedDate) {
       const subDate = approval.submittedAt || event.createdAt;
@@ -490,7 +745,7 @@ import {
     const membersList = Object.values(members).sort((a, b) => (a.step || 0) - (b.step || 0));
     const files = approval.files || {};
     const history = Array.isArray(approval.history) ? approval.history : Object.values(approval.history || {});
-    const effStatus = normalizeStatus(approval.status || event.status || "pending");
+    const effStatus = normalizeStatus(getEffectiveStatus(event));
 
     // 1. Horizontal Timeline Track
     let hasEncounteredReview = false;
@@ -595,29 +850,65 @@ import {
     }
 
     const notesMarkup = membersList
-      .filter((m) => m.status === "ok" || m.status === "review" || m.status === "rev" || m.status === "rej" || m.note)
-      .map((m) => {
-        const initials = m.label.split(/\s+/).filter(Boolean).map((p) => p[0]).slice(0, 2).join("").toUpperCase() || "RV";
-        let noteText = m.note || (m.status === "ok" ? "Approved." : m.status === "review" ? "Reviewing now." : "Under review.");
-        if (m.status === "rev" && !noteText.toLowerCase().includes("changes")) {
-          noteText = `Asked for changes: ${noteText}`;
+      .map((member) => {
+        const status = member.status || "wait";
+        const statusDetails = {
+          ok: { label: "Approved", icon: "✓", className: "is-approved" },
+          review: { label: "Reviewing now", icon: "◷", className: "is-reviewing" },
+          rev: { label: "Changes requested", icon: "!", className: "is-revision" },
+          rej: { label: "Rejected", icon: "×", className: "is-rejected" },
+          wait: { label: "Waiting", icon: "–", className: "is-waiting" },
+        }[status] || { label: "Waiting", icon: "–", className: "is-waiting" };
+        const timestamp = status !== "wait" && member.updatedAt
+          ? formatDateTime(member.updatedAt)
+          : status === "wait" ? "Not started" : "";
+        let detail = status === "ok" && member.approvedByName
+          ? `Approved by ${member.approvedByName}.`
+          : member.note || statusDetails.label;
+        if (status === "rev" && !detail.toLowerCase().includes("change")) {
+          detail = `Changes requested: ${detail}`;
         }
+
         return `
-          <div class="tracker-note-item">
-            <div class="tracker-note-avatar">${escapeHtml(initials)}</div>
+          <article class="tracker-note-item ${statusDetails.className}">
+            <div class="tracker-note-avatar" aria-hidden="true">${statusDetails.icon}</div>
             <div class="tracker-note-body">
               <div class="tracker-note-header">
-                <span class="tracker-note-title">Step ${m.step} · ${escapeHtml(m.label)}</span>
-                <span class="tracker-note-date">${formatDateTime(m.updatedAt)}</span>
+                <span class="tracker-note-title">Step ${member.step} · ${escapeHtml(member.label)}</span>
+                <span class="tracker-note-date">${escapeHtml(timestamp)}</span>
               </div>
-              <p class="tracker-note-text">${escapeHtml(noteText)}</p>
+              <p class="tracker-note-text">${escapeHtml(detail)}</p>
             </div>
-          </div>`;
+          </article>`;
       })
       .join("");
 
     if (trackerNotesList) {
-      trackerNotesList.innerHTML = notesMarkup || `<p class="tracker-note-text" style="color:#78716c;">No approver actions recorded yet.</p>`;
+      trackerNotesList.innerHTML = notesMarkup || `<p class="tracker-note-text">No approval stages are configured.</p>`;
+    }
+
+    const historyEntries = history
+      .map((entry, index) => ({ ...entry, _index: index }))
+      .sort((first, second) => {
+        const firstAt = Number(first.at) || 0;
+        const secondAt = Number(second.at) || 0;
+        return firstAt - secondAt || first._index - second._index;
+      });
+    if (trackerHistoryList) {
+      trackerHistoryList.innerHTML = historyEntries.length
+        ? historyEntries.map((entry) => `
+            <article class="tracker-history-item">
+              <div class="tracker-history-marker" aria-hidden="true"></div>
+              <div class="tracker-history-body">
+                <div class="tracker-note-header">
+                  <span class="tracker-note-title">${escapeHtml(entry.label || entry.action || "Proposal update")}</span>
+                  <span class="tracker-note-date">${escapeHtml(formatDateTime(entry.at))}</span>
+                </div>
+                <p class="tracker-note-text">${escapeHtml(entry.note || entry.by || "Status updated.")}</p>
+              </div>
+            </article>`)
+          .join("")
+        : `<p class="tracker-note-text">No approval history yet.</p>`;
     }
 
     if (trackerNextLine) {
@@ -661,7 +952,7 @@ import {
                 <div class="tracker-doc-right">
                   ${
                     isFlagged
-                      ? `<button type="button" class="tracker-btn-replace" data-file-id="${escapeHtml(f.id)}">Replace file</button>`
+                      ? `<button type="button" class="tracker-btn-replace" data-file-id="${escapeHtml(f.id)}">Replace link</button>`
                       : '<span style="font-size:12px; color:#16a34a; font-weight:600;">✓ Ready</span>'
                   }
                 </div>
@@ -697,8 +988,9 @@ import {
     }
 
     if (btnTrackerPublish) {
-      btnTrackerPublish.disabled = !allFinished && effStatus !== "approved";
-      if (!allFinished) {
+      const canPublish = isFullyApproved(event);
+      btnTrackerPublish.disabled = !canPublish;
+      if (!canPublish) {
         btnTrackerPublish.title = "Publish unlocks after every approver signs off.";
       } else {
         btnTrackerPublish.title = "Publish this event to students";
@@ -711,15 +1003,18 @@ import {
      -------------------------------------------------------------------------- */
 
   async function handlePublishEvent(eventId) {
-    const event = organizerEvents.find((e) => String(e.eventId || e.id) === String(eventId));
+    const event = findOrganizerEvent(eventId);
+    if (!event) {
+      window.alert("This event is no longer available. Refresh your submissions and try again.");
+      return;
+    }
     const effStatus = normalizeStatus(getEffectiveStatus(event));
-
-    if (!["approved", "published"].includes(effStatus)) {
+    if (!isFullyApproved(event) && effStatus !== "published") {
       window.alert("Publish unlocks after every approver signs off.");
       return;
     }
 
-    if (effStatus === "published") {
+    if (effStatus === "published" || normalizeStatus(event?.status) === "published") {
       window.alert("This event has already been published.");
       return;
     }
@@ -728,26 +1023,63 @@ import {
     if (!confirmed) return;
 
     try {
-      if (functions) {
-        const publishFn = httpsCallable(functions, "publishEvent");
-        await publishFn({ eventId });
+      const activeUser = auth?.currentUser;
+      const activeEventId = String(event.eventId || event.id);
+      if (!db || !activeUser || activeUser.uid !== organizerId) {
+        throw new Error("Your sign-in session is unavailable. Please sign in again and retry.");
       }
-      // Update local cache
-      if (event) {
-        event.status = "published";
+
+      const eventRef = doc(db, "events", activeEventId);
+      const latestSnapshot = await getDoc(eventRef);
+      if (!latestSnapshot.exists()) {
+        throw new Error("This event is no longer available. Refresh your submissions and try again.");
       }
-      const approval = approvalsMap.get(eventId);
+
+      const latestEvent = {
+        ...event,
+        ...latestSnapshot.data(),
+        id: activeEventId,
+        eventId: activeEventId,
+      };
+      if (!isFullyApproved(latestEvent)) {
+        throw new Error("Publish unlocks after every approver signs off.");
+      }
+
+      const publishedAt = Date.now();
+      await updateDoc(eventRef, {
+        status: "published",
+        approvalStatus: "approved",
+        publicationStatus: "published",
+        published: true,
+        isPublished: true,
+        publishedAt,
+        updatedAt: publishedAt,
+      });
+
+      Object.assign(event, {
+        status: "published",
+        approvalStatus: "approved",
+        publicationStatus: "published",
+        published: true,
+        isPublished: true,
+        publishedAt,
+      });
+      const approval = getApprovalForEvent(event);
       if (approval) {
         approval.status = "published";
       }
       renderEvents();
-      if (activeTrackingEventId === eventId) {
+      if (activeTrackingEventId === activeEventId) {
         renderTrackerContent(event, approval);
       }
       window.alert("Event published successfully!");
     } catch (err) {
       console.error("Publish error:", err);
-      window.alert(err.message || "Could not publish event. Please ensure all approvers have signed off.");
+      const message =
+        err?.code === "permission-denied"
+          ? "You don't have permission to publish this event. Refresh the page and sign in again."
+          : err.message || "Could not publish event. Please ensure all approvers have signed off.";
+      window.alert(message);
     }
   }
 
@@ -762,7 +1094,7 @@ import {
       }
       const event = organizerEvents.find((e) => String(e.eventId || e.id) === String(eventId));
       if (event) event.status = "cancelled";
-      const approval = approvalsMap.get(eventId);
+      const approval = getApprovalForEvent(event);
       if (approval) approval.status = "cancelled";
 
       renderEvents();
@@ -787,7 +1119,7 @@ import {
       }
       const event = organizerEvents.find((e) => String(e.eventId || e.id) === String(eventId));
       if (event) event.status = "pending";
-      const approval = approvalsMap.get(eventId);
+      const approval = getApprovalForEvent(event);
       if (approval) {
         approval.status = "pending";
         if (approval.members) {
@@ -820,35 +1152,41 @@ import {
     }
   }
 
-  async function handleReplaceFile(eventId, fileId, file) {
-    if (!file) return;
+  async function handleReplaceFile(eventId, fileId, driveUrl) {
+    if (!isGoogleDriveLink(driveUrl)) {
+      throw new Error("Provide a valid Google Drive link.");
+    }
     try {
-      const dummyPath = `uploads/events/${eventId}/${file.name}`;
+      const event = organizerEvents.find((item) => String(item.eventId || item.id) === String(eventId));
+      if (!event) throw new Error("This event is no longer available.");
+      const approval = getApprovalForEvent(event);
+      const currentFile = approval?.files?.[fileId];
+      if (!currentFile) throw new Error("This approval document could not be found.");
+      const fileName = currentFile.name || "Attached document";
       if (functions) {
         const replaceFn = httpsCallable(functions, "replaceFile");
         await replaceFn({
           eventId,
           fileId,
-          path: dummyPath,
-          name: file.name,
+          path: driveUrl,
+          name: fileName,
         });
       }
 
       // Update local memory map
-      const approval = approvalsMap.get(eventId);
       if (approval && approval.files && approval.files[fileId]) {
         approval.files[fileId].status = "ok";
-        approval.files[fileId].name = file.name;
-        approval.files[fileId].path = dummyPath;
+        approval.files[fileId].path = driveUrl;
         approval.files[fileId].note = "";
       }
 
-      const event = organizerEvents.find((e) => String(e.eventId || e.id) === String(eventId));
       renderTrackerContent(event, approval);
-      window.alert(`Document "${file.name}" has replaced the flagged file.`);
+      trackerReplaceForm.hidden = true;
+      trackerReplaceDriveLink.value = "";
+      window.alert(`The Google Drive link for "${fileName}" has replaced the flagged document.`);
     } catch (err) {
       console.error("Replace file error:", err);
-      window.alert(err.message || "Could not replace document.");
+      throw err;
     }
   }
 
@@ -859,7 +1197,6 @@ import {
   function setupEventListeners() {
     // Search & Filter listeners
     searchInput?.addEventListener("input", renderEvents);
-    statusFilter?.addEventListener("change", renderEvents);
     dateFilter?.addEventListener("change", renderEvents);
 
     // Table action clicks
@@ -871,7 +1208,14 @@ import {
       }
 
       const btn = e.target.closest("[data-action]");
-      if (!btn) return;
+      if (!btn) {
+        if (e.target.closest("a")) return;
+        const row = e.target.closest("tr[data-event-id]");
+        if (row && row.dataset.draft !== "true") {
+          openApprovalTracker(row.dataset.eventId);
+        }
+        return;
+      }
       const action = btn.dataset.action;
       const eventId = btn.dataset.eventId;
       if (!eventId) return;
@@ -917,23 +1261,43 @@ import {
       if (activeTrackingEventId) handleRemindApprovers(activeTrackingEventId);
     });
 
-    // Replace file button inside tracker documents list
+    // Replace the flagged document with a validated Google Drive link.
     trackerDocsList?.addEventListener("click", (e) => {
       const replaceBtn = e.target.closest(".tracker-btn-replace");
       if (!replaceBtn) return;
       const fileId = replaceBtn.dataset.fileId;
       if (!fileId) return;
       activeReplacingFileId = fileId;
-      if (trackerReplaceFileInput) {
-        trackerReplaceFileInput.value = "";
-        trackerReplaceFileInput.click();
-      }
+      trackerReplaceDriveLink.value = "";
+      trackerReplaceDriveError.textContent = "";
+      trackerReplaceDriveError.hidden = true;
+      trackerReplaceForm.hidden = false;
+      trackerReplaceDriveLink.focus();
     });
 
-    trackerReplaceFileInput?.addEventListener("change", (e) => {
-      const file = e.target.files?.[0];
-      if (file && activeTrackingEventId && activeReplacingFileId) {
-        handleReplaceFile(activeTrackingEventId, activeReplacingFileId, file);
+    btnTrackerReplaceCancel?.addEventListener("click", () => {
+      trackerReplaceForm.hidden = true;
+      activeReplacingFileId = null;
+    });
+
+    btnTrackerReplaceConfirm?.addEventListener("click", async () => {
+      const driveUrl = trackerReplaceDriveLink.value.trim();
+      if (!isGoogleDriveLink(driveUrl)) {
+        trackerReplaceDriveError.textContent = "Enter a valid Google Drive link.";
+        trackerReplaceDriveError.hidden = false;
+        trackerReplaceDriveLink.focus();
+        return;
+      }
+      if (!activeTrackingEventId || !activeReplacingFileId) return;
+      btnTrackerReplaceConfirm.disabled = true;
+      try {
+        await handleReplaceFile(activeTrackingEventId, activeReplacingFileId, driveUrl);
+        activeReplacingFileId = null;
+      } catch (error) {
+        trackerReplaceDriveError.textContent = error.message || "Could not replace the document link.";
+        trackerReplaceDriveError.hidden = false;
+      } finally {
+        btnTrackerReplaceConfirm.disabled = false;
       }
     });
 
@@ -952,7 +1316,7 @@ import {
   }
 
   function subscribeEventApprovals(eventId) {
-    if (activeApprovalListeners.has(eventId) || !rtdb) return;
+    if (activeApprovalListeners.has(eventId) || !realtimeDatabaseConfigured) return;
 
     const approvalRef = ref(rtdb, `approvals/${eventId}`);
     onValue(approvalRef, (snapshot) => {
@@ -962,11 +1326,323 @@ import {
         renderEvents();
         if (activeTrackingEventId === eventId) {
           const event = organizerEvents.find((e) => String(e.eventId || e.id) === String(eventId));
-          if (event) renderTrackerContent(event, data);
+          if (event) renderTrackerContent(event, getApprovalForEvent(event) || data);
         }
       }
     });
     activeApprovalListeners.set(eventId, approvalRef);
+  }
+
+  function getDashboardOwnedEvents() {
+    let events;
+    try {
+      const storedEvents = localStorage.getItem("recovibeOrganizerEvents");
+      events = storedEvents ? JSON.parse(storedEvents) : null;
+    } catch (error) {
+      console.error("Unable to read organizer event list:", error);
+    }
+
+    if (!Array.isArray(events) && typeof window.getOrganizerEvents === "function") {
+      events = window.getOrganizerEvents();
+    }
+    if (!Array.isArray(events)) {
+      console.error("Organizer event list must be an array.");
+      return [];
+    }
+
+    const ownerIdentifiers = getCurrentOwnerIdentifiers();
+    if (!ownerIdentifiers.ownerIds.size && !ownerIdentifiers.ownerEmails.size) {
+      return [];
+    }
+
+    return events
+      .filter(
+        (event) =>
+          event &&
+          [
+            event.organizerId,
+            event.organizerUid,
+            event.createdBy,
+            event.createdByUid,
+            event.authorId,
+            event.uid,
+          ].some((owner) => isCurrentOwner(owner, ownerIdentifiers)),
+      )
+      .map((event) => {
+        const eventId = String(event.eventId || event.id || "");
+        return {
+          ...event,
+          id: event.id || eventId,
+          eventId: event.eventId || eventId,
+          title: event.title || event.eventName || event.name || "Untitled Event",
+          eventName:
+            event.eventName || event.title || event.name || "Untitled Event",
+          dateISO: getEventDate(event),
+        };
+      });
+  }
+
+  function getCurrentOwnerIdentifiers(currentUserId = auth.currentUser?.uid) {
+    const profile = (() => {
+      try {
+        const storedProfile = JSON.parse(
+          localStorage.getItem("recovibeOrganizerProfile") || "{}",
+        );
+        return storedProfile && typeof storedProfile === "object"
+          ? storedProfile
+          : {};
+      } catch (error) {
+        console.error("Unable to read organizer profile for event ownership:", error);
+        return {};
+      }
+    })();
+    const organizerIdentifier =
+      localStorage.getItem("recovibeOrganizerId") || "";
+    return {
+      ownerIds: new Set(
+        [
+          currentUserId,
+          profile.uid,
+          profile.id,
+          profile.userId,
+          profile.organizerId,
+          organizerIdentifier,
+        ]
+          .filter(Boolean)
+          .map(String),
+      ),
+      ownerEmails: new Set(
+        [
+          auth.currentUser?.email,
+          profile.email,
+          profile.username,
+          organizerIdentifier,
+        ]
+          .filter(Boolean)
+          .map((email) => String(email).trim().toLowerCase()),
+      ),
+    };
+  }
+
+  function isCurrentOwner(value, ownership) {
+    if (value === null || value === undefined) return false;
+    const owner = String(value).trim();
+    return (
+      ownership.ownerIds.has(owner) ||
+      ownership.ownerEmails.has(owner.toLowerCase())
+    );
+  }
+
+  function getEventMatchKey(event) {
+    const title = String(event.title || event.eventName || event.name || "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+    const date = String(getEventDate(event) || "").slice(0, 10);
+    return title && !["untitled", "untitled event"].includes(title) && date
+      ? `${title}|${date}`
+      : "";
+  }
+
+  function hasOwnedEventMatch(eventData) {
+    const matchKey = getEventMatchKey(eventData);
+    if (!matchKey) return false;
+    const candidates = new Map();
+    [
+      ...getDashboardOwnedEvents(),
+      ...eventDataById.values(),
+    ]
+      .filter((event) => getEventMatchKey(event) === matchKey)
+      .forEach((event) => {
+        const eventId = [event.sourceEventId, event.eventId, event.id]
+          .find((id) => id !== null && id !== undefined && String(id));
+        candidates.set(String(eventId || matchKey), event);
+      });
+    return candidates.size === 1;
+  }
+
+  function getEventOwnershipContext(currentUserId) {
+    const identifiers = getCurrentOwnerIdentifiers(currentUserId);
+    return {
+      ...identifiers,
+      dashboardEventIds: new Set(
+        getDashboardOwnedEvents().flatMap((event) =>
+          [event.id, event.eventId, event.sourceEventId]
+            .filter(Boolean)
+            .map(String),
+        ),
+      ),
+    };
+  }
+
+  function isOwnedFirestoreEvent(eventData, documentId, ownership) {
+    const ownerFields = [
+      eventData.createdBy,
+      eventData.createdByUid,
+      eventData.organizerUid,
+      eventData.organizerId,
+      eventData.authorId,
+      eventData.uid,
+      eventData.ownerUid,
+      eventData.userId,
+    ].flatMap((value) => {
+      if (Array.isArray(value)) return value;
+      if (value && typeof value === "object") {
+        return [value.uid, value.email, value.id, value.userId].filter(Boolean);
+      }
+      return [value];
+    });
+
+    if (ownerFields.some((value) => isCurrentOwner(value, ownership))) {
+      return true;
+    }
+
+    return [documentId, eventData.id, eventData.eventId]
+      .filter(Boolean)
+      .some((eventId) => ownership.dashboardEventIds.has(String(eventId)));
+  }
+
+  function subscribeFirestoreEvents() {
+    const currentUserId = auth.currentUser?.uid;
+    if (!db || !currentUserId) {
+      loadErrorOccurred = true;
+      firestoreEventsLoaded = true;
+      renderOwnedEvents();
+      return;
+    }
+
+    const unsubscribe = onSnapshot(
+      collection(db, "events"),
+      (snapshot) => {
+        const events = new Map();
+        const ownership = getEventOwnershipContext(currentUserId);
+        const eventSnapshots = [];
+        snapshot.forEach((eventSnapshot) => eventSnapshots.push(eventSnapshot));
+        const matchKeyCounts = new Map();
+        eventSnapshots.forEach((eventSnapshot) => {
+          const matchKey = getEventMatchKey(eventSnapshot.data());
+          if (matchKey) matchKeyCounts.set(matchKey, (matchKeyCounts.get(matchKey) || 0) + 1);
+        });
+        eventSnapshots.forEach((eventSnapshot) => {
+          const eventData = eventSnapshot.data();
+          const eventId = eventSnapshot.id;
+          const matchKey = getEventMatchKey(eventData);
+          const hasUniqueOwnedMatch =
+            matchKeyCounts.get(matchKey) === 1 && hasOwnedEventMatch(eventData);
+          if (!isOwnedFirestoreEvent(eventData, eventId, ownership) && !hasUniqueOwnedMatch) return;
+          const createdAt = eventData.createdAt?.toDate
+            ? eventData.createdAt.toDate().toISOString()
+            : eventData.createdAt || "";
+          const dateISO = normalizeDateValue(
+            eventData.eventDate ||
+              eventData.dateISO ||
+              eventData.date ||
+              eventData.dateStart ||
+              eventData.schedule?.date ||
+              eventData.schedule?.startDate ||
+              eventData.startAt,
+          );
+          const startTime =
+            eventData.timeStart ||
+            eventData.startTime ||
+            eventData.schedule?.timeStart ||
+            eventData.schedule?.startTime ||
+            eventData.schedule?.start ||
+            "";
+          const endTime =
+            eventData.timeEnd ||
+            eventData.endTime ||
+            eventData.schedule?.timeEnd ||
+            eventData.schedule?.endTime ||
+            eventData.schedule?.end ||
+            "";
+          const schedule =
+            eventData.time ||
+            (typeof eventData.schedule === "string" ? eventData.schedule : "") ||
+            [startTime, endTime].filter(Boolean).join(" - ");
+          const approvalStatus =
+            eventData.approvalStatus ||
+            eventData.approval_status ||
+            eventData.adminStatus ||
+            eventData.admin_status ||
+            eventData.adminApprovalStatus ||
+            eventData.approval?.approvalStatus ||
+            eventData.approval?.status ||
+            eventData.reviewStatus ||
+            eventData.publicationStatus ||
+            eventData.moderationStatus ||
+            eventData.eventStatus ||
+            eventData.admin?.status ||
+            eventData.review?.status ||
+            eventData.moderation?.status ||
+            eventData.approvalData?.status ||
+            "";
+          const event = {
+            ...eventData,
+            id: eventId,
+            eventId,
+            sourceEventId: eventData.eventId || eventData.id || eventId,
+            organizerUid:
+              eventData.organizerUid ||
+              eventData.organizerId ||
+              eventData.createdBy ||
+              eventData.authorId ||
+              eventData.uid ||
+              currentUserId,
+            title: eventData.eventName || eventData.title || "Untitled",
+            eventName: eventData.eventName || eventData.title || eventData.name || "Untitled",
+            name: eventData.name || eventData.eventName || eventData.title || "Untitled Event",
+            dateISO,
+            time: schedule,
+            startTime,
+            endTime,
+            venue: eventData.venue || eventData.location || eventData.venueOther || "Location TBA",
+            location: eventData.venue || eventData.location || eventData.venueOther || "Location TBA",
+            category: eventData.category || eventData.eventType || "General",
+            source:
+              eventData.source ||
+              eventData.eventSource ||
+              (eventData.organizerId
+                ? "Organizational"
+                : eventData.organization || eventData.organizerName || "Others / External"),
+            description: eventData.eventDescription || eventData.description || "",
+            firestoreSubmission: true,
+            createdAt,
+            updatedAt: eventData.updatedAt?.toDate
+              ? eventData.updatedAt.toDate().toISOString()
+              : eventData.updatedAt || "",
+            approvalStatus,
+            status: eventData.status || approvalStatus || "pending",
+          };
+          events.set(eventId, event);
+          firestoreApprovalsById.set(eventId, buildFirestoreApproval(event));
+          if (activeTrackingEventId === eventId) {
+            renderTrackerContent(event, getApprovalForEvent(event));
+          }
+        });
+
+        firestoreEventsById = events;
+        const retainedEventIds = new Set(events.keys());
+        firestoreApprovalsById.forEach((_, eventId) => {
+          if (!retainedEventIds.has(eventId)) firestoreApprovalsById.delete(eventId);
+        });
+        approvalsMap.forEach((_, eventId) => {
+          if (!retainedEventIds.has(eventId) && !eventDataById.has(eventId) && !draftsById.has(eventId)) {
+            approvalsMap.delete(eventId);
+          }
+        });
+        firestoreEventsLoaded = true;
+        loadErrorOccurred = false;
+        renderOwnedEvents();
+      },
+      (error) => {
+        console.error("Couldn't load Firestore events:", error);
+        firestoreEventsLoaded = true;
+        loadErrorOccurred = true;
+        renderOwnedEvents();
+      },
+    );
+    firestoreEventUnsubscribers.push(unsubscribe);
   }
 
   function cleanupListeners() {
@@ -981,18 +1657,39 @@ import {
       off(approvalRef);
     });
     activeApprovalListeners.clear();
+    firestoreEventUnsubscribers.splice(0).forEach((unsubscribe) => unsubscribe());
+    firestoreEventsById.clear();
+    firestoreApprovalsById.clear();
+    eventDataById.clear();
+    draftsById.clear();
+    approvalsMap.clear();
+    indexLoaded = false;
+    draftsLoaded = false;
+    firestoreEventsLoaded = false;
   }
 
   window.addEventListener("beforeunload", cleanupListeners);
+  window.addEventListener("recovibeOrganizerEventsChanged", renderOwnedEvents);
+  window.addEventListener("storage", (event) => {
+    if (event.key === "recovibeOrganizerEvents") renderOwnedEvents();
+  });
 
   function listenToMyEvents(uid) {
     cleanupListeners();
     loadErrorOccurred = false;
 
-    if (!rtdb) {
-      loadErrorOccurred = true;
-      showEventNotice("Couldn't load your events.");
-      renderEvents();
+    subscribeFirestoreEvents();
+    renderOwnedEvents();
+
+    if (!realtimeDatabaseConfigured) {
+      indexLoaded = true;
+      draftsLoaded = true;
+      firestoreEventsLoaded = true;
+      if (!db) {
+        loadErrorOccurred = true;
+        showEventNotice("Couldn't load your events.");
+      }
+      renderOwnedEvents();
       return;
     }
 
@@ -1030,8 +1727,9 @@ import {
                 ...event,
                 id,
                 eventId: id,
-                title: event.name || event.title || "Untitled Event",
-                dateISO: event.dateISO || event.date || (event.startAt ? String(event.startAt).substring(0, 10) : ""),
+                title: event.title || event.eventName || event.name || "Untitled Event",
+                eventName: event.eventName || event.title || event.name || "Untitled Event",
+                dateISO: getEventDate(event),
               });
               subscribeEventApprovals(id);
               renderOwnedEvents();
@@ -1089,7 +1787,7 @@ import {
   }
 
   // Authentication & Realtime Load
-  onAuthStateChanged(auth, async (user) => {
+  authReady.then(() => onAuthStateChanged(auth, async (user) => {
     cleanupListeners();
 
     if (!user) {
@@ -1098,8 +1796,45 @@ import {
     }
 
     try {
-      const roleSnapshot = await get(ref(rtdb, `roles/${user.uid}`));
-      if (roleSnapshot.val() !== "event_organizer") {
+      if (!realtimeDatabaseConfigured && !db) {
+        throw new Error("Firebase is not configured.");
+      }
+
+      let isOrganizer = false;
+      if (realtimeDatabaseConfigured) {
+        try {
+          const roleSnapshot = await get(ref(rtdb, `roles/${user.uid}`));
+          isOrganizer = roleSnapshot.val() === "event_organizer";
+        } catch (error) {
+          console.warn("Could not verify organizer role in Realtime Database; trying Firestore.", error);
+        }
+      }
+
+      if (!isOrganizer && db) {
+        const [adminProfileResult, userProfileResult] = await Promise.allSettled([
+          getDoc(doc(db, "adminUser", user.uid)),
+          getDoc(doc(db, "users", user.uid)),
+        ]);
+        const profiles = [adminProfileResult, userProfileResult]
+          .filter((result) => result.status === "fulfilled" && result.value.exists())
+          .map((result) => result.value.data());
+        const roleAliases = new Set(["eo", "organizer", "eventorganizer"]);
+        isOrganizer = profiles.some((profile) => {
+          const role = String(profile.role || profile.userRole || "")
+            .trim()
+            .toLowerCase()
+            .replace(/[\s_-]+/g, "");
+          return roleAliases.has(role);
+        });
+        if (!profiles.length) {
+          const profileError = [adminProfileResult, userProfileResult].find(
+            (result) => result.status === "rejected",
+          );
+          if (profileError) throw profileError.reason;
+        }
+      }
+
+      if (!isOrganizer) {
         window.location.replace("EventOrganizerLogin.html");
         return;
       }
@@ -1108,10 +1843,11 @@ import {
       showEventNotice("Couldn't verify your account. Please sign in again.");
       return;
     }
-
     organizerId = user.uid;
-    updateOrganizerAccount();
     listenToMyEvents(organizerId);
+  })).catch((error) => {
+    console.error("Could not restore organizer authentication state:", error);
+    showEventNotice("Couldn't verify your account. Please refresh and try again.");
   });
 
   function showEventNotice(message) {
@@ -1127,19 +1863,52 @@ import {
   }
 
   function renderOwnedEvents() {
-    organizerEvents = [
+    const mergedEvents = new Map();
+    [
+      ...getDashboardOwnedEvents(),
       ...draftsById.values(),
       ...eventDataById.values(),
-    ].sort((a, b) => {
-      if ((a.status === "draft") !== (b.status === "draft")) return a.status === "draft" ? -1 : 1;
+      ...firestoreEventsById.values(),
+    ].forEach((event) => {
+      const eventIds = [event.sourceEventId, event.eventId, event.id]
+        .filter((id) => id !== null && id !== undefined && String(id))
+        .map(String);
+      let existingEntry = [...mergedEvents.entries()].find(([, existing]) =>
+        [existing.sourceEventId, existing.eventId, existing.id]
+          .filter((id) => id !== null && id !== undefined && String(id))
+          .some((id) => eventIds.includes(String(id))),
+      );
+      if (!existingEntry && event.firestoreSubmission) {
+        const matchKey = getEventMatchKey(event);
+        const matches = matchKey
+          ? [...mergedEvents.entries()].filter(([, existing]) => getEventMatchKey(existing) === matchKey)
+          : [];
+        if (matches.length === 1) existingEntry = matches[0];
+      }
+      const eventId = existingEntry?.[0] || eventIds[0];
+      if (eventId) {
+        mergedEvents.set(eventId, {
+          ...(existingEntry?.[1] || {}),
+          ...event,
+        });
+      }
+    });
+    organizerEvents = [...mergedEvents.values()].sort((a, b) => {
+      const aIsDraft = normalizeStatus(a.status) === "draft";
+      const bIsDraft = normalizeStatus(b.status) === "draft";
+      if (aIsDraft !== bIsDraft) return aIsDraft ? -1 : 1;
       return new Date(b.createdAt || b.updatedAt || 0).getTime() - new Date(a.createdAt || a.updatedAt || 0).getTime();
     });
     renderEvents();
     const params = new URLSearchParams(location.search);
     const eventId = params.get("event") || params.get("openEvent");
     if (eventId && indexLoaded && !activeTrackingEventId) {
-      const event = eventDataById.get(eventId);
-      if (event && event.organizerUid === organizerId) openApprovalTracker(eventId);
+      const event = organizerEvents.find((item) =>
+        String(item.eventId || item.id) === eventId || String(item.sourceEventId || "") === eventId,
+      );
+      if (event && event.organizerUid === organizerId) {
+        openApprovalTracker(String(event.eventId || event.id));
+      }
       else if (draftsLoaded && !document.getElementById("myEventMissingNotice")) {
         const notice = document.createElement("div");
         notice.id = "myEventMissingNotice";
@@ -1149,13 +1918,17 @@ import {
       }
     }
     const newId = params.get("new");
-    if (newId && eventDataById.has(newId)) {
+    if (newId && organizerEvents.some((event) =>
+      String(event.eventId || event.id) === newId || String(event.sourceEventId || "") === newId,
+    )) {
       const notice = document.getElementById("myEventsNotice");
       if (notice) notice.textContent = sessionStorage.getItem("recovibeEventNotice") || "";
       if (missingEventTimeout) clearTimeout(missingEventTimeout);
-    } else if (newId && !missingEventTimeout) {
+    } else if (newId && firestoreEventsLoaded && !missingEventTimeout) {
       missingEventTimeout = setTimeout(() => {
-        if (!eventDataById.has(newId)) {
+        if (!organizerEvents.some((event) =>
+          String(event.eventId || event.id) === newId || String(event.sourceEventId || "") === newId,
+        )) {
           showEventNotice("Your event was submitted but is taking a moment to appear. Refresh to check.");
           const refresh = document.createElement("button");
           refresh.type = "button";
@@ -1168,7 +1941,7 @@ import {
   }
 
   // Initialization
-  document.addEventListener("DOMContentLoaded", () => {
+  function initializeMyEventsPage() {
     if (todayElement) {
       todayElement.textContent = new Date().toLocaleDateString("en-US", {
         month: "long",
@@ -1177,7 +1950,16 @@ import {
       });
     }
 
-    window.enhanceDropdownSelects?.("#eventStatusFilter, #eventDateFilter");
+    window.enhanceDropdownSelects?.("#eventDateFilter");
     setupEventListeners();
-  });
+    renderOwnedEvents();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initializeMyEventsPage, {
+      once: true,
+    });
+  } else {
+    initializeMyEventsPage();
+  }
 })();

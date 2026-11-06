@@ -37,20 +37,23 @@
             >
             <h2 id="loginHeading">Sign in</h2>
             <p class="sub" id="loginDescription">
-              Use your student ID and portal password.
+              Use your email address and portal password.
             </p>
 
             <div class="banner" id="login-banner"></div>
 
             <div class="field" id="field-id">
-              <label for="student-id">Student ID</label>
+              <label for="student-id">Email</label>
               <input
-                type="text"
+                type="email"
                 id="student-id"
-                placeholder="Enter Student Number"
-                autocomplete="username"
+                placeholder="Enter your email address"
+                autocomplete="email"
+                inputmode="email"
+                autocapitalize="none"
+                spellcheck="false"
               />
-              <div class="error-msg">Enter your student ID.</div>
+              <div class="error-msg">Enter a valid email address.</div>
             </div>
 
             <div class="field password-field" id="field-pass">
@@ -87,9 +90,7 @@
             </div>
 
             <div class="row-between">
-              <label class="remember"
-                ><input type="checkbox" id="remember" /> Stay signed in</label
-              >
+              <span class="remember">Your session will be remembered on this device.</span>
               <a href="ForgetPassword.html" class="link-btn"
                 >Forgot password?</a
               >

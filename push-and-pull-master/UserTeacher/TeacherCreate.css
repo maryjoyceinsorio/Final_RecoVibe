@@ -3430,6 +3430,26 @@ input[readonly].ce-input--readonly {
   border-color: #ded6c8 !important;
 }
 
+.ce-input--auto-linked {
+  background-color: #fff2bf !important;
+  color: #5a4d46 !important;
+  border-color: #dfc76d !important;
+  cursor: not-allowed;
+}
+
+.ce-audience-options {
+  display: grid;
+  gap: 7px;
+  margin-top: 6px;
+}
+
+.ce-audience-options label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
 .ce-badge-readonly {
   background: #ede6da;
   color: #5a504b;
@@ -5117,5 +5137,3 @@ body:has(#createEventRoot) main {
 .ce-approver-checkbox:disabled {
   cursor: not-allowed;
 }
-
-

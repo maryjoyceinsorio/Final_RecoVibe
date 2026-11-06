@@ -1,0 +1,227 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function accountRole() {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role
+        : "";
+    }
+
+    function isAdmin() {
+      return signedIn() && (
+        exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role
+          in ["admin", "Admin", "superadmin", "Super Admin"]
+      );
+    }
+
+    function isSuperAdmin() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == "superadmin";
+    }
+
+    match /users/{userId} {
+      function validFirstSuperAdminProfile() {
+        return request.auth.token.email == "REPLACE_WITH_FIRST_SUPERADMIN_EMAIL"
+          && request.auth.token.email_verified == true
+          && request.resource.data.keys().hasOnly([
+            "displayName", "email", "role", "uid", "createdAt"
+          ])
+          && request.resource.data.keys().hasAll([
+            "displayName", "email", "role", "uid", "createdAt"
+          ])
+          && request.resource.data.displayName is string
+          && request.resource.data.email == request.auth.token.email
+          && request.resource.data.role == "superadmin"
+          && request.resource.data.uid == userId
+          && request.resource.data.createdAt == request.time
+          && getAfter(/databases/$(database)/documents/system/bootstrap).data.uid == userId
+          && getAfter(/databases/$(database)/documents/system/bootstrap).data.email
+            == request.auth.token.email;
+      }
+
+      function validManagedUserProfile() {
+        return isSuperAdmin()
+          && request.resource.data.keys().hasOnly([
+            "displayName", "email", "role", "uid", "status",
+            "createdBy", "createdAt"
+          ])
+          && request.resource.data.keys().hasAll([
+            "displayName", "email", "role", "uid", "status",
+            "createdBy", "createdAt"
+          ])
+          && request.resource.data.displayName is string
+          && request.resource.data.email is string
+          && request.resource.data.role in ["admin", "organizer", "teacher"]
+          && request.resource.data.uid == userId
+          && request.resource.data.status == "Active"
+          && request.resource.data.createdBy == request.auth.uid
+          && request.resource.data.createdAt == request.time;
+      }
+
+      function validStudentProfile() {
+        return request.resource.data.keys().hasOnly([
+            "lastName", "firstName", "middleName", "email",
+            "studentNumber", "contactNumber", "department", "year",
+            "organization", "preferences", "fullName", "name",
+            "uid", "role", "status", "createdAt", "studentNo",
+            "accountNo", "accountNumber", "roleSuffix", "isActive",
+            "updatedAt", "phone"
+          ])
+          && request.resource.data.keys().hasAll([
+            "lastName", "firstName", "middleName", "email",
+            "studentNumber", "contactNumber", "department", "year",
+            "organization", "fullName", "name",
+            "uid", "role", "status", "createdAt"
+          ])
+          && request.resource.data.uid == userId
+          && request.resource.data.role == "student"
+          && request.resource.data.status == "Active"
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.lastName is string
+          && request.resource.data.firstName is string
+          && request.resource.data.middleName is string
+          && request.resource.data.studentNumber is string
+          && request.resource.data.contactNumber is string
+          && request.resource.data.department is string
+          && request.resource.data.year is string
+          && request.resource.data.organization is string
+          && (
+            !request.resource.data.keys().hasAny(["preferences"])
+            || request.resource.data.preferences is map
+          )
+          && request.resource.data.fullName is string
+          && request.resource.data.name is string;
+      }
+
+      allow create: if signedIn() && (
+          (
+            request.auth.uid == userId
+            && request.resource.data.keys().hasOnly(["displayName", "email", "role", "createdAt"])
+            && request.resource.data.keys().hasAll(["displayName", "email", "role", "createdAt"])
+            && request.resource.data.displayName is string
+            && request.resource.data.email == request.auth.token.email
+            && request.resource.data.role in ["user", "organizer"]
+            && request.resource.data.createdAt == request.time
+          )
+          || validFirstSuperAdminProfile()
+          || validManagedUserProfile()
+          || (
+            validStudentProfile()
+            && (
+              request.auth.uid == userId
+                ? request.resource.data.email == request.auth.token.email
+                : isAdmin()
+            )
+          )
+        );
+
+      allow get: if signedIn() && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+      allow update: if signedIn()
+        && (
+          (
+            request.auth.uid == userId
+            && request.resource.data.role == resource.data.role
+            && request.resource.data.uid == resource.data.uid
+            && request.resource.data.createdAt == resource.data.createdAt
+            && (
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(["displayName"])
+              || (
+                resource.data.role == "student"
+                && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                  "firstName", "middleName", "lastName", "fullName", "name",
+                  "contactNumber", "contact", "preferences", "email"
+                ])
+              )
+            )
+          )
+          || (
+            isAdmin()
+            && (
+              !request.resource.data.diff(resource.data).affectedKeys().hasAny(["role"])
+              || isSuperAdmin()
+            )
+            && request.resource.data.uid == resource.data.uid
+            && request.resource.data.createdAt == resource.data.createdAt
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              "displayName", "firstName", "middleName", "lastName", "fullName",
+              "name", "email", "contactNumber", "contact", "phone", "department",
+              "course", "program", "yearSection", "section", "organization", "org",
+              "role", "status", "isActive", "studentNumber", "studentNo",
+              "accountNo", "accountNumber", "roleSuffix", "updatedAt"
+            ])
+          )
+        );
+      allow delete: if isAdmin();
+    }
+
+    match /system/bootstrap {
+      allow get: if signedIn()
+        && request.auth.token.email == "REPLACE_WITH_FIRST_SUPERADMIN_EMAIL";
+      allow list, update, delete: if false;
+      allow create: if signedIn()
+        && request.auth.token.email == "REPLACE_WITH_FIRST_SUPERADMIN_EMAIL"
+        && request.auth.token.email_verified == true
+        && request.resource.data.keys().hasOnly(["uid", "email", "createdAt"])
+        && request.resource.data.keys().hasAll(["uid", "email", "createdAt"])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.createdAt == request.time
+        && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.role
+          == "superadmin";
+    }
+
+    match /events/{eventId} {
+      allow create: if signedIn()
+        && accountRole() in ["user", "organizer"]
+        && request.resource.data.keys().hasOnly([
+          "title", "description", "category", "date", "location", "status",
+          "createdBy", "createdByName", "createdAt", "updatedAt"
+        ])
+        && request.resource.data.keys().hasAll([
+          "title", "description", "category", "date", "location", "status",
+          "createdBy", "createdAt", "updatedAt"
+        ])
+        && request.resource.data.title is string
+        && request.resource.data.title.size() >= 3
+        && request.resource.data.title.size() <= 120
+        && request.resource.data.description is string
+        && request.resource.data.description.size() <= 3000
+        && request.resource.data.category in [
+          "Academic", "Arts & Culture", "Career", "Community", "Sports", "Other"
+        ]
+        && request.resource.data.date is string
+        && request.resource.data.date.matches("\\d{4}-\\d{2}-\\d{2}")
+        && request.resource.data.location is string
+        && request.resource.data.location.size() > 0
+        && request.resource.data.location.size() <= 200
+        && request.resource.data.status == "pending"
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+
+      allow read: if resource.data.status == "approved"
+        || (signedIn() && resource.data.createdBy == request.auth.uid)
+        || isAdmin();
+
+      allow update: if isAdmin()
+        && resource.data.status == "pending"
+        && request.resource.data.status == "approved"
+        && request.resource.data.approvedBy == request.auth.uid
+        && request.resource.data.approvedAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "status", "approvedBy", "approvedAt", "updatedAt"
+        ]);
+
+      allow delete: if isAdmin();
+    }
+  }
+}

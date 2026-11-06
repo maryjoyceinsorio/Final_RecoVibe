@@ -204,10 +204,29 @@ export function loadApprovedFirestoreEvents() {
 
         if (!isFirebaseConfigured || !db) return [];
 
-        const snapshot = await firestore.getDocs(
-          firestore.collection(db, "events"),
-        );
-        return snapshot.docs
+        const eventsRef = firestore.collection(db, "events");
+        const publicSnapshots = await Promise.all([
+          firestore.getDocs(
+            firestore.query(
+              eventsRef,
+              firestore.where("status", "in", [
+                "approved", "Approved", "APPROVED",
+                "published", "Published", "PUBLISHED",
+                "rescheduled", "Rescheduled", "RESCHEDULED",
+              ]),
+            ),
+          ),
+          firestore.getDocs(
+            firestore.query(eventsRef, firestore.where("published", "==", true)),
+          ),
+        ]);
+        const publicDocuments = new Map();
+        publicSnapshots.forEach((snapshot) => {
+          snapshot.docs.forEach((eventDocument) => {
+            publicDocuments.set(eventDocument.id, eventDocument);
+          });
+        });
+        return Array.from(publicDocuments.values())
           .map((eventDocument) => {
             const data = eventDocument.data();
             if (!isPublicCalendarEvent(data)) return null;

@@ -13,20 +13,33 @@
  * - Live screen reader announcements and offline support
  */
 
-import { auth, rtdb, functions, isFirebaseConfigured, isRtdbConfigured } from "./firebaseConfig.js";
+import {
+  auth,
+  db,
+  rtdb,
+  functions,
+  isFirebaseConfigured,
+  isRtdbConfigured,
+} from "./firebaseConfig.js";
 import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {
+  collection,
+  doc,
+  onSnapshot,
+  query,
+  runTransaction,
+  where,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {
   ref,
   onValue,
   off,
   set,
   remove,
-  query,
-  orderByChild,
-  startAt,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 import { httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
 import { fetchMonthHolidays } from "../holidayService.js";
+import { isEventVisibleToStudent } from "./eventAudience.js";
 
 /* ---------------------------------------------------------
    STATE
@@ -41,8 +54,9 @@ const studentProfile = {
   lastName: "",
   fullName: "Student",
   studentNo: "2025-00790-BN-1",
-  organization: "IBITS",
-  department: "BSIT",
+  organization: "",
+  department: "",
+  departmentCode: "",
 };
 
 const studentPreferences = {
@@ -51,9 +65,14 @@ const studentPreferences = {
 };
 
 let rawEventsMap = new Map(); // id -> normalized event
+let realtimeEventsMap = new Map();
+let firestoreEventsMap = new Map();
+let unsubscribeFirestoreEvents = null;
 let registeredEventIds = new Set();
 const attendanceMap = new Map(); // eventId -> { scannedAt, scannedBy, walkIn }
 const attendanceListeners = new Map(); // eventId -> unsub function
+const registrationSyncIds = new Set();
+const pendingRegistrationIds = new Set();
 let openQrEventId = null; // Event ID whose inline QR is displayed
 const openDetailsEventIds = new Set(); // Set of event IDs whose details are open
 
@@ -173,6 +192,57 @@ function escapeHtml(str) {
     .replace(/'/g, "&#39;");
 }
 
+function getPublicDocumentLinks(event) {
+  const documents = [];
+  const addDocument = (entry, fallbackName) => {
+    if (typeof entry === "string") {
+      documents.push({ name: fallbackName, url: entry });
+      return;
+    }
+    if (!entry || typeof entry !== "object") return;
+    const url = entry.url || entry.downloadURL || entry.downloadUrl || entry.fileUrl || entry.path;
+    if (url) documents.push({ name: entry.name || entry.fileName || fallbackName, url });
+  };
+
+  if (event.adminDocuments && typeof event.adminDocuments === "object") {
+    const adminDocument = event.adminDocuments;
+    if (adminDocument.url || adminDocument.downloadURL || adminDocument.downloadUrl || adminDocument.fileUrl || adminDocument.path) {
+      addDocument(adminDocument, "Proposal documents");
+    } else {
+      Object.values(adminDocument).forEach((entry, index) => addDocument(entry, `Proposal document ${index + 1}`));
+    }
+  } else {
+    addDocument(event.adminDocuments, "Proposal documents");
+  }
+  [event.approvalDocuments, event.participantDocuments, event.attachments].forEach((list) => {
+    if (Array.isArray(list)) list.forEach((entry, index) => addDocument(entry, `Event document ${index + 1}`));
+  });
+  const seen = new Set();
+  return documents.filter(({ url }) => {
+    try {
+      const parsed = new URL(String(url));
+      if (parsed.protocol !== "https:" || seen.has(parsed.href)) return false;
+      seen.add(parsed.href);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
+function renderPublicDocumentLinks(event) {
+  const documents = getPublicDocumentLinks(event);
+  if (!documents.length) return "";
+  return `
+    <div class="inline-details-row">
+      <span class="inline-details-label">Attached documents</span>
+      <div class="inline-details-desc">${documents.map((document) =>
+        `<a href="${escapeHtml(document.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(document.name)}</a>`,
+      ).join("<br>")}</div>
+    </div>
+  `;
+}
+
 function highlightMatch(text, query) {
   if (!query || !text) return escapeHtml(text);
   const q = query.trim();
@@ -212,7 +282,7 @@ function eventMetaIconPin() {
    EVENT NORMALIZATION & CLASSIFICATION
 --------------------------------------------------------- */
 function normalizeEvent(id, data) {
-  const name = data.name || data.title || "Untitled Event";
+  const name = data.name || data.title || data.eventName || "Untitled Event";
   let startMs = 0;
   if (data.startAt) {
     startMs = typeof data.startAt === "number" ? data.startAt : new Date(data.startAt).getTime();
@@ -244,14 +314,100 @@ function normalizeEvent(id, data) {
     endAt: data.endAt || new Date(endMs).toISOString(),
     startMs: startMs,
     endMs: endMs,
-    status: data.status || "published",
+    status: String(data.status || "").trim().toLowerCase(),
     organizerUid: data.organizerUid || "",
     organizerName: data.organizerName || data.organizer || "Event Organizer",
+    targetAudience: data.targetAudience || "",
+    targetDepartments: data.targetDepartments || data.targetDepartment || data.departments || [],
+    targetOrganizations: data.targetOrganizations || data.targetOrganization || data.audienceOrganizations || [],
+    audienceOrganizations: data.audienceOrganizations || [],
+    organizationCode: data.organizationCode || "",
+    organizerOrganization: data.organizerOrganization || "",
+    orgCode: data.orgCode || "",
+    organization: data.organization || "",
+    organizationName: data.organizationName || "",
+    orgName: data.orgName || "",
+    creatorRole: data.creatorRole || data.createdByRole || "",
+    eventSource: data.eventSource || "",
+    organizer: data.organizer || "",
     capacity: Number(data.capacity ?? data.maxCapacity ?? data.maxSlots ?? 0),
     registeredCount: Number(data.registeredCount ?? 0),
     checkedInCount: Number(data.checkedInCount ?? 0),
     description: data.description || data.desc || "No additional description provided.",
+    adminDocuments: data.adminDocuments || "",
+    approvalDocuments: Array.isArray(data.approvalDocuments) ? data.approvalDocuments : [],
+    participantDocuments: Array.isArray(data.participantDocuments) ? data.participantDocuments : [],
+    attachments: Array.isArray(data.attachments) ? data.attachments : [],
   };
+}
+
+function rebuildStudentEvents() {
+  const allEventsMap = new Map([...realtimeEventsMap, ...firestoreEventsMap]);
+  try {
+    localStorage.setItem(
+      "recovibeEventsCache",
+      JSON.stringify(Array.from(allEventsMap.values())),
+    );
+  } catch (error) {
+    console.warn("Could not cache public events:", error);
+  }
+
+  rawEventsMap = new Map(
+    [...allEventsMap].filter(([, event]) =>
+      isEventVisibleToStudent(event, studentProfile),
+    ),
+  );
+  const eventsList = Array.from(rawEventsMap.values());
+  syncRegistrationsFromRtdb(eventsList);
+  renderHappeningNow();
+  renderUpcoming();
+  renderRecommended();
+  renderCalendar();
+}
+
+function isFirestorePublishedEvent(data) {
+  const status = String(data.status || data.publicationStatus || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[ _-]+/g, " ");
+  return status === "published" || data.isPublished === true || data.published === true;
+}
+
+function normalizeFirestoreStudentEvent(documentSnapshot) {
+  const data = documentSnapshot.data();
+  if (!isFirestorePublishedEvent(data)) return null;
+
+  const rawDate =
+    data.eventDate ||
+    data.dateISO ||
+    data.date ||
+    data.dateStart ||
+    data.schedule?.date ||
+    data.schedule?.startDate ||
+    "";
+  const dateISO = rawDate?.toDate
+    ? rawDate.toDate().toISOString().slice(0, 10)
+    : rawDate;
+  const timestampToIso = (value) =>
+    value?.toDate ? value.toDate().toISOString() : value;
+  const time =
+    data.time ||
+    [data.timeStart || data.startTime, data.timeEnd || data.endTime]
+      .filter(Boolean)
+      .join(" - ") ||
+    "Time TBA";
+  return normalizeEvent(documentSnapshot.id, {
+    ...data,
+    name: data.eventName || data.title || data.name || "Untitled Event",
+    dateISO,
+    time,
+    startAt: timestampToIso(data.startAt),
+    endAt: timestampToIso(data.endAt),
+    venue: data.venue || data.location || data.venueOther,
+    description: data.eventDescription || data.description || data.desc,
+    status: "published",
+    organizerUid: data.organizerUid || data.organizerId || data.createdBy || "",
+  });
 }
 
 function getEventClassification(ev, now) {
@@ -288,8 +444,10 @@ function loadStudentProfileFromStorage() {
           "Student";
         studentProfile.studentNo =
           u.studentNumber || u.studentNo || u.studentId || "2025-00790-BN-1";
-        studentProfile.organization = u.organization || "IBITS";
-        studentProfile.department = u.department || "BSIT";
+        studentProfile.organization = u.organization || "";
+        studentProfile.courseOrganization = u.courseOrganization || "";
+        studentProfile.department = u.department || "";
+        studentProfile.departmentCode = u.departmentCode || "";
       }
     }
   } catch (e) {
@@ -343,9 +501,11 @@ function loadFallbackEvents() {
       const list = JSON.parse(cached);
       if (Array.isArray(list) && list.length > 0) {
         list.forEach((item) => {
+          if (String(item?.status || "").trim().toLowerCase() !== "published") return;
           const ev = normalizeEvent(item.id || item.eventId, item);
-          rawEventsMap.set(ev.id, ev);
+          realtimeEventsMap.set(ev.id, ev);
         });
+        rebuildStudentEvents();
         return;
       }
     }
@@ -353,10 +513,12 @@ function loadFallbackEvents() {
 
   if (Array.isArray(window.RECOVIBE_EVENTS) && window.RECOVIBE_EVENTS.length > 0) {
     window.RECOVIBE_EVENTS.forEach((item) => {
+      if (String(item?.status || "").trim().toLowerCase() !== "published") return;
       const ev = normalizeEvent(item.id || item.eventId, item);
-      rawEventsMap.set(ev.id, ev);
+      realtimeEventsMap.set(ev.id, ev);
     });
   }
+  rebuildStudentEvents();
 }
 
 /* ---------------------------------------------------------
@@ -564,7 +726,8 @@ function renderRecommended() {
         if (ev.capacity > 0 && ev.registeredCount >= ev.capacity) {
           actionBtn = `<span class="btn-disabled-sm">Full</span>`;
         } else {
-          actionBtn = `<button type="button" class="btn-primary-sm btn-register" data-event-id="${ev.id}">Register</button>`;
+          const isRegistering = pendingRegistrationIds.has(ev.id);
+          actionBtn = `<button type="button" class="btn-primary-sm btn-register" data-event-id="${ev.id}" ${isRegistering ? "disabled aria-busy=\"true\"" : ""}>${isRegistering ? "Registering..." : "Register"}</button>`;
         }
       }
 
@@ -682,7 +845,8 @@ function renderHappeningNow() {
         if (ev.capacity > 0 && ev.registeredCount >= ev.capacity) {
           actionHtml = `<span class="btn-disabled-sm">Full</span>`;
         } else {
-          actionHtml = `<button type="button" class="btn-primary-sm btn-register" data-event-id="${ev.id}">Register</button>`;
+          const isRegistering = pendingRegistrationIds.has(ev.id);
+          actionHtml = `<button type="button" class="btn-primary-sm btn-register" data-event-id="${ev.id}" ${isRegistering ? "disabled aria-busy=\"true\"" : ""}>${isRegistering ? "Registering..." : "Register"}</button>`;
         }
       }
 
@@ -715,6 +879,7 @@ function renderHappeningNow() {
               <span class="inline-details-label">Organizer</span>
               <div>${escapeHtml(ev.organizerName || "PUP Biñan Campus")} (${escapeHtml(ev.source || "Official")})</div>
             </div>
+            ${renderPublicDocumentLinks(ev)}
             ${ev.capacity > 0 ? `<div class="inline-details-row"><span class="inline-details-label">Capacity</span><div>${ev.capacity} attendees (${ev.registeredCount} registered)</div></div>` : ""}
           </div>
         `;
@@ -834,7 +999,8 @@ function renderUpcoming() {
         if (ev.capacity > 0 && ev.registeredCount >= ev.capacity) {
           actionBtn = `<span class="btn-disabled-sm">Full</span>`;
         } else {
-          actionBtn = `<button type="button" class="btn-primary-sm btn-register" data-event-id="${ev.id}">Register</button>`;
+          const isRegistering = pendingRegistrationIds.has(ev.id);
+          actionBtn = `<button type="button" class="btn-primary-sm btn-register" data-event-id="${ev.id}" ${isRegistering ? "disabled aria-busy=\"true\"" : ""}>${isRegistering ? "Registering..." : "Register"}</button>`;
         }
       }
 
@@ -850,6 +1016,7 @@ function renderUpcoming() {
               <span class="inline-details-label">Organizer</span>
               <div>${escapeHtml(ev.organizerName || "PUP Biñan Campus")} (${escapeHtml(ev.source || "Official")})</div>
             </div>
+            ${renderPublicDocumentLinks(ev)}
             ${ev.capacity > 0 ? `<div class="inline-details-row"><span class="inline-details-label">Capacity</span><div>${ev.capacity} attendees (${ev.registeredCount} registered)</div></div>` : ""}
           </div>
         `;
@@ -1066,7 +1233,8 @@ function renderCalendarDayEvents() {
         if (isRegistered) {
           actionBtn = `<button type="button" class="btn-cancel-sm btn-cancel-reg" data-event-id="${ev.id}" style="padding: 3px 8px; font-size: 11px;">Cancel</button>`;
         } else {
-          actionBtn = `<button type="button" class="btn-primary-sm btn-register" data-event-id="${ev.id}" style="padding: 3px 8px; font-size: 11px;">Register</button>`;
+          const isRegistering = pendingRegistrationIds.has(ev.id);
+          actionBtn = `<button type="button" class="btn-primary-sm btn-register" data-event-id="${ev.id}" ${isRegistering ? "disabled aria-busy=\"true\"" : ""} style="padding: 3px 8px; font-size: 11px;">${isRegistering ? "Registering..." : "Register"}</button>`;
         }
       }
 
@@ -1107,6 +1275,8 @@ function renderCalendarDayEvents() {
    USER ACTIONS: Register & Cancel Registration
 --------------------------------------------------------- */
 async function handleRegister(eventId) {
+  if (!eventId || pendingRegistrationIds.has(eventId)) return;
+
   try {
     const sys = JSON.parse(localStorage.getItem("recovibeSystemSettings") || "{}");
     if (sys && sys.registrationEnabled === false) {
@@ -1117,43 +1287,115 @@ async function handleRegister(eventId) {
   } catch (_) {}
 
   const ev = rawEventsMap.get(eventId);
-  const evName = ev ? ev.name : "event";
-
-  // Optimistic update
-  registeredEventIds.add(eventId);
-  saveParticipationsToStorage();
-
-  const now = getNow();
-  if (ev && getEventClassification(ev, now) === "live") {
-    syncAttendanceListeners([ev]);
+  if (!ev) {
+    showToast("This event is no longer available. Refresh and try again.");
+    return;
+  }
+  if (!auth?.currentUser) {
+    showToast("Please sign in again before registering.");
+    announce("Sign in is required to register for events.");
+    return;
+  }
+  if (!isFirebaseConfigured || (!functions && !firestoreEventsMap.has(eventId))) {
+    showToast("Registration is unavailable right now. Please try again later.");
+    announce("Registration is unavailable.");
+    return;
   }
 
+  pendingRegistrationIds.add(eventId);
   renderHappeningNow();
   renderUpcoming();
   renderRecommended();
   renderCalendar();
+  announce(`Registering for ${ev.name}...`);
 
-  announce(`Registered for ${evName}.`);
-  showToast(`Registered for ${evName}`);
+  try {
+    let registeredCount;
+    if (firestoreEventsMap.has(eventId) && db) {
+      const eventRef = doc(db, "events", eventId);
+      const registrationRef = doc(db, "events", eventId, "registrations", auth.currentUser.uid);
+      registeredCount = await runTransaction(db, async (transaction) => {
+        const [eventSnapshot, registrationSnapshot] = await Promise.all([
+          transaction.get(eventRef),
+          transaction.get(registrationRef),
+        ]);
+        if (!eventSnapshot.exists()) {
+          throw new Error("This event is no longer available.");
+        }
 
-  // Server-enforced registration via Cloud Function
-  if (functions && isFirebaseConfigured) {
-    try {
+        const eventData = eventSnapshot.data();
+        const status = String(eventData.status || eventData.publicationStatus || "")
+          .trim()
+          .toLowerCase()
+          .replace(/[ _-]+/g, " ");
+        if (
+          status !== "published" &&
+          eventData.published !== true &&
+          eventData.isPublished !== true
+        ) {
+          throw new Error("Registration is closed because this event is not published.");
+        }
+        if (ev.endMs && getNow() >= ev.endMs) {
+          throw new Error("Registration is closed because this event has ended.");
+        }
+        if (
+          registrationSnapshot.exists() &&
+          registrationSnapshot.data().status === "registered"
+        ) {
+          return Number(eventData.registeredCount) || 0;
+        }
+
+        const capacity = Number(eventData.capacity ?? eventData.maxCapacity);
+        const count = Math.max(0, Number(eventData.registeredCount) || 0);
+        if (capacity > 0 && count >= capacity) {
+          throw new Error("This event is full.");
+        }
+
+        const nextCount = count + 1;
+        const now = Date.now();
+        transaction.update(eventRef, {
+          registeredCount: nextCount,
+          updatedAt: now,
+        });
+        transaction.set(registrationRef, {
+          uid: auth.currentUser.uid,
+          status: "registered",
+          registeredAt: now,
+          at: now,
+        });
+        return nextCount;
+      });
+    } else {
       const registerFn = httpsCallable(functions, "registerForEvent");
-      await registerFn({ eventId });
-    } catch (err) {
-      console.warn("registerForEvent notice:", err);
-      // Revert optimistic update
-      registeredEventIds.delete(eventId);
-      saveParticipationsToStorage();
-      renderHappeningNow();
-      renderUpcoming();
-      renderRecommended();
-      renderCalendar();
-      const msg = err.message || "This event is full.";
-      showToast(msg);
-      announce(msg);
+      const response = await registerFn({ eventId });
+      if (response.data?.success !== true) {
+        throw new Error("The registration could not be completed. Please try again.");
+      }
+      registeredCount = response.data.registeredCount;
     }
+
+    registeredEventIds.add(eventId);
+    if (Number.isFinite(Number(registeredCount))) {
+      ev.registeredCount = Number(registeredCount);
+    }
+    saveParticipationsToStorage();
+    const now = getNow();
+    if (getEventClassification(ev, now) === "live") {
+      syncAttendanceListeners([ev]);
+    }
+    announce(`Registered for ${ev.name}.`);
+    showToast(`Registered for ${ev.name}`);
+  } catch (err) {
+    console.error("registerForEvent failed:", err);
+    const message = err?.message || "Could not register for this event. Please try again.";
+    showToast(message);
+    announce(message);
+  } finally {
+    pendingRegistrationIds.delete(eventId);
+    renderHappeningNow();
+    renderUpcoming();
+    renderRecommended();
+    renderCalendar();
   }
 }
 
@@ -1185,10 +1427,57 @@ async function handleCancelRegistration(eventId) {
   showToast(`Cancelled registration for ${evName}`);
 
   // Server-enforced cancellation via Cloud Function
-  if (functions && isFirebaseConfigured) {
+  if (isFirebaseConfigured && (functions || firestoreEventsMap.has(eventId))) {
     try {
-      const cancelFn = httpsCallable(functions, "cancelRegistration");
-      await cancelFn({ eventId });
+      if (firestoreEventsMap.has(eventId) && db && auth?.currentUser) {
+        const eventRef = doc(db, "events", eventId);
+        const registrationRef = doc(
+          db,
+          "events",
+          eventId,
+          "registrations",
+          auth.currentUser.uid,
+        );
+        const registeredCount = await runTransaction(db, async (transaction) => {
+          const [eventSnapshot, registrationSnapshot] = await Promise.all([
+            transaction.get(eventRef),
+            transaction.get(registrationRef),
+          ]);
+          if (!eventSnapshot.exists()) {
+            throw new Error("This event is no longer available.");
+          }
+
+          const eventData = eventSnapshot.data();
+          const registrationData = registrationSnapshot.exists()
+            ? registrationSnapshot.data()
+            : null;
+          if (registrationData?.status !== "registered") {
+            return Math.max(0, Number(eventData.registeredCount) || 0);
+          }
+          if (ev?.endMs && getNow() >= ev.endMs) {
+            throw new Error("Registration can't be cancelled after the event ends.");
+          }
+
+          const nextCount = Math.max(0, Number(eventData.registeredCount) || 0) - 1;
+          const now = Date.now();
+          transaction.update(eventRef, {
+            registeredCount: nextCount,
+            updatedAt: now,
+          });
+          transaction.set(registrationRef, {
+            ...registrationData,
+            uid: auth.currentUser.uid,
+            status: "cancelled",
+            cancelledAt: now,
+            at: now,
+          });
+          return nextCount;
+        });
+        if (ev) ev.registeredCount = registeredCount;
+      } else {
+        const cancelFn = httpsCallable(functions, "cancelRegistration");
+        await cancelFn({ eventId });
+      }
     } catch (err) {
       console.warn("cancelRegistration notice:", err);
       // Revert optimistic update
@@ -1214,6 +1503,8 @@ window.recovibeCancelRegistration = handleCancelRegistration;
 function syncRegistrationsFromRtdb(eventsList) {
   if (!currentUid || !isRtdbConfigured) return;
   eventsList.forEach((ev) => {
+    if (registrationSyncIds.has(ev.id)) return;
+    registrationSyncIds.add(ev.id);
     const regRef = ref(rtdb, `registrations/${ev.id}/${currentUid}`);
     onValue(
       regRef,
@@ -1235,6 +1526,42 @@ function syncRegistrationsFromRtdb(eventsList) {
 }
 
 function initDataListeners() {
+  unsubscribeFirestoreEvents?.();
+  unsubscribeFirestoreEvents = null;
+  if (isFirebaseConfigured && db) {
+    unsubscribeFirestoreEvents = onSnapshot(
+      query(
+        collection(db, "events"),
+        where("status", "in", [
+          "approved", "Approved", "APPROVED",
+          "published", "Published", "PUBLISHED",
+          "completed", "Completed", "COMPLETED",
+          "rescheduled", "Rescheduled", "RESCHEDULED",
+        ]),
+      ),
+      (snapshot) => {
+        const publishedEvents = new Map();
+        snapshot.docs.forEach((eventDocument) => {
+          const event = normalizeFirestoreStudentEvent(eventDocument);
+          if (!event) return;
+          const realtimeEvent = realtimeEventsMap.get(event.id);
+          if (realtimeEvent) {
+            event.registeredCount = realtimeEvent.registeredCount ?? event.registeredCount;
+            event.checkedInCount = realtimeEvent.checkedInCount ?? event.checkedInCount;
+          }
+          publishedEvents.set(event.id, event);
+        });
+        firestoreEventsMap = publishedEvents;
+        rebuildStudentEvents();
+      },
+      (error) => {
+        console.error("Could not listen to published Firestore events:", error);
+        showToast("Live published events are unavailable right now.");
+      },
+    );
+    activeCleanups.push(() => unsubscribeFirestoreEvents?.());
+  }
+
   // 1. Server time offset
   if (isRtdbConfigured) {
     const offsetRef = ref(rtdb, ".info/serverTimeOffset");
@@ -1252,44 +1579,19 @@ function initDataListeners() {
 
   // 2. Public Events query
   if (isRtdbConfigured) {
-    const oneDayAgoIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    const eventsQuery = query(
-      ref(rtdb, "publicEvents"),
-      orderByChild("startAt"),
-      startAt(oneDayAgoIso)
-    );
+    const eventsQuery = ref(rtdb, "publicEvents");
 
     const onEvents = (snap) => {
-      if (snap.exists()) {
-        const data = snap.val();
-        const newMap = new Map();
-        Object.keys(data).forEach((id) => {
-          const item = data[id];
-          if (item && (item.status === "published" || item.status === "completed")) {
-            newMap.set(id, normalizeEvent(id, item));
-          }
-        });
-
-        if (newMap.size > 0) {
-          rawEventsMap = newMap;
-          try {
-            localStorage.setItem(
-              "recovibeEventsCache",
-              JSON.stringify(Array.from(newMap.values()))
-            );
-          } catch (e) {}
+      const data = snap.val() || {};
+      const newMap = new Map();
+      Object.entries(data).forEach(([id, item]) => {
+        const status = String(item?.status || "").trim().toLowerCase();
+        if (item && status === "published") {
+          newMap.set(id, normalizeEvent(id, item));
         }
-      } else {
-        loadFallbackEvents();
-      }
-
-      const eventsList = Array.from(rawEventsMap.values());
-      syncRegistrationsFromRtdb(eventsList);
-
-      renderHappeningNow();
-      renderUpcoming();
-      renderRecommended();
-      renderCalendar();
+      });
+      realtimeEventsMap = newMap;
+      rebuildStudentEvents();
     };
 
     onValue(eventsQuery, onEvents);

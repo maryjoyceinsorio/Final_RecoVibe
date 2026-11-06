@@ -2,7 +2,7 @@
   "rules": {
     "roles": {
       ".read": "auth != null",
-      ".write": "auth != null && root.child('roles').child(auth.uid).val() === 'admin'",
+      ".write": "auth != null && root.child('roles').child(auth.uid).val() === 'admin' && root.child('approverOrganizations').child(auth.uid).val() === '*'",
       "$uid": {
         ".validate": "newData.isString() && (newData.val() === 'event_organizer' || newData.val() === 'teacher' || newData.val() === 'admin')"
       }
@@ -13,13 +13,14 @@
     },
     "events": {
       "$eventId": {
-        ".read": "data.child('status').val() === 'published' || data.child('status').val() === 'completed' || data.child('status').val() === 'Published' || data.child('status').val() === 'Completed' || (auth != null && (root.child('roles').child(auth.uid).val() === 'admin' || data.child('organizerUid').val() === auth.uid || data.child('organizerId').val() === auth.uid || root.child('approverQueue').child(auth.uid).child($eventId).exists()))",
-        ".write": false
+        ".read": "data.child('status').val() === 'published' || data.child('status').val() === 'completed' || data.child('status').val() === 'Published' || data.child('status').val() === 'Completed' || (auth != null && ((root.child('roles').child(auth.uid).val() === 'admin' && root.child('approverOrganizations').child(auth.uid).exists() && (root.child('approverOrganizations').child(auth.uid).val() === '*' || data.child('organizationCode').val() === root.child('approverOrganizations').child(auth.uid).val() || data.child('organizerOrganization').val() === root.child('approverOrganizations').child(auth.uid).val() || data.child('organization').val() === root.child('approverOrganizations').child(auth.uid).val())) || ((data.child('organizerUid').val() === auth.uid || data.child('organizerId').val() === auth.uid) && (root.child('roles').child(auth.uid).val() !== 'admin' || (root.child('approverOrganizations').child(auth.uid).exists() && (root.child('approverOrganizations').child(auth.uid).val() === '*' || data.child('organizationCode').val() === root.child('approverOrganizations').child(auth.uid).val() || data.child('organizerOrganization').val() === root.child('approverOrganizations').child(auth.uid).val() || data.child('organization').val() === root.child('approverOrganizations').child(auth.uid).val())))) || (root.child('approverQueue').child(auth.uid).child($eventId).exists() && root.child('approverOrganizations').child(auth.uid).exists() && (root.child('approverOrganizations').child(auth.uid).val() === '*' || data.child('organizationCode').val() === root.child('approverOrganizations').child(auth.uid).val() || data.child('organizerOrganization').val() === root.child('approverOrganizations').child(auth.uid).val() || data.child('organization').val() === root.child('approverOrganizations').child(auth.uid).val()))))",
+        ".write": "auth != null && (root.child('roles').child(auth.uid).val() === 'event_organizer' || root.child('roles').child(auth.uid).val() === 'teacher') && ((newData.exists() && newData.child('organizerUid').val() === auth.uid && newData.child('status').val() === 'pending' && (!data.exists() || (data.child('organizerUid').val() === auth.uid && data.child('status').val() === 'pending' && !root.child('approvals').child($eventId).exists() && !root.child('organizerEvents').child(auth.uid).child($eventId).exists()))) || (!newData.exists() && data.child('organizerUid').val() === auth.uid && data.child('status').val() === 'pending' && !root.child('approvals').child($eventId).exists() && !root.child('organizerEvents').child(auth.uid).child($eventId).exists()))",
+        ".validate": "newData.hasChildren(['id', 'eventId', 'name', 'date', 'dateEnd', 'venue', 'organizerUid', 'status', 'approvalStages', 'clientRequestId']) && newData.child('id').val() === $eventId && newData.child('eventId').val() === $eventId && newData.child('name').isString() && newData.child('name').val().length >= 3 && newData.child('date').isString() && newData.child('dateEnd').isString() && newData.child('venue').isString() && newData.child('organizerUid').isString() && newData.child('status').val() === 'pending' && newData.child('approvalStages').exists() && newData.child('clientRequestId').isString() && newData.child('clientRequestId').val().length <= 120"
       }
     },
     "registrations": {
       "$eventId": {
-        ".read": "auth != null && (root.child('roles').child(auth.uid).val() === 'admin' || root.child('events').child($eventId).child('organizerUid').val() === auth.uid || root.child('events').child($eventId).child('organizerId').val() === auth.uid)",
+        ".read": "auth != null && ((root.child('roles').child(auth.uid).val() === 'admin' && root.child('approverOrganizations').child(auth.uid).exists() && (root.child('approverOrganizations').child(auth.uid).val() === '*' || root.child('events').child($eventId).child('organizationCode').val() === root.child('approverOrganizations').child(auth.uid).val() || root.child('events').child($eventId).child('organizerOrganization').val() === root.child('approverOrganizations').child(auth.uid).val() || root.child('events').child($eventId).child('organization').val() === root.child('approverOrganizations').child(auth.uid).val())) || ((root.child('events').child($eventId).child('organizerUid').val() === auth.uid || root.child('events').child($eventId).child('organizerId').val() === auth.uid) && (root.child('roles').child(auth.uid).val() !== 'admin' || (root.child('approverOrganizations').child(auth.uid).exists() && (root.child('approverOrganizations').child(auth.uid).val() === '*' || root.child('events').child($eventId).child('organizationCode').val() === root.child('approverOrganizations').child(auth.uid).val() || root.child('events').child($eventId).child('organizerOrganization').val() === root.child('approverOrganizations').child(auth.uid).val() || root.child('events').child($eventId).child('organization').val() === root.child('approverOrganizations').child(auth.uid).val())))))",
         "$uid": {
           ".read": "auth != null && auth.uid === $uid",
           ".write": false
@@ -34,26 +35,26 @@
     },
     "attendance": {
       "$eventId": {
-        ".read": "auth != null && (root.child('roles').child(auth.uid).val() === 'admin' || root.child('events').child($eventId).child('organizerUid').val() === auth.uid || root.child('events').child($eventId).child('organizerId').val() === auth.uid)",
+        ".read": "auth != null && ((root.child('roles').child(auth.uid).val() === 'admin' && root.child('approverOrganizations').child(auth.uid).exists() && (root.child('approverOrganizations').child(auth.uid).val() === '*' || root.child('events').child($eventId).child('organizationCode').val() === root.child('approverOrganizations').child(auth.uid).val() || root.child('events').child($eventId).child('organizerOrganization').val() === root.child('approverOrganizations').child(auth.uid).val() || root.child('events').child($eventId).child('organization').val() === root.child('approverOrganizations').child(auth.uid).val())) || ((root.child('events').child($eventId).child('organizerUid').val() === auth.uid || root.child('events').child($eventId).child('organizerId').val() === auth.uid) && (root.child('roles').child(auth.uid).val() !== 'admin' || (root.child('approverOrganizations').child(auth.uid).exists() && (root.child('approverOrganizations').child(auth.uid).val() === '*' || root.child('events').child($eventId).child('organizationCode').val() === root.child('approverOrganizations').child(auth.uid).val() || root.child('events').child($eventId).child('organizerOrganization').val() === root.child('approverOrganizations').child(auth.uid).val() || root.child('events').child($eventId).child('organization').val() === root.child('approverOrganizations').child(auth.uid).val())))))",
         "$uid": {
-          ".read": "auth != null && (auth.uid === $uid || root.child('roles').child(auth.uid).val() === 'admin' || root.child('events').child($eventId).child('organizerUid').val() === auth.uid || root.child('events').child($eventId).child('organizerId').val() === auth.uid)",
+          ".read": "auth != null && (auth.uid === $uid || (root.child('roles').child(auth.uid).val() === 'admin' && root.child('approverOrganizations').child(auth.uid).exists() && (root.child('approverOrganizations').child(auth.uid).val() === '*' || root.child('events').child($eventId).child('organizationCode').val() === root.child('approverOrganizations').child(auth.uid).val() || root.child('events').child($eventId).child('organizerOrganization').val() === root.child('approverOrganizations').child(auth.uid).val() || root.child('events').child($eventId).child('organization').val() === root.child('approverOrganizations').child(auth.uid).val())) || ((root.child('events').child($eventId).child('organizerUid').val() === auth.uid || root.child('events').child($eventId).child('organizerId').val() === auth.uid) && root.child('roles').child(auth.uid).val() !== 'admin'))",
           ".write": false
         }
       }
     },
     "approverDirectory": {
       ".read": "auth != null",
-      ".write": "auth != null && root.child('roles').child(auth.uid).val() === 'admin'"
+      ".write": "auth != null && root.child('roles').child(auth.uid).val() === 'admin' && root.child('approverOrganizations').child(auth.uid).val() === '*'"
     },
     "approvals": {
       "$eventId": {
-        ".read": "auth != null && (root.child('roles').child(auth.uid).val() === 'admin' || root.child('events').child($eventId).child('organizerUid').val() === auth.uid || root.child('events').child($eventId).child('organizerId').val() === auth.uid || root.child('approverQueue').child(auth.uid).child($eventId).exists())",
+        ".read": "auth != null && ((root.child('roles').child(auth.uid).val() === 'admin' && root.child('approverOrganizations').child(auth.uid).exists() && (root.child('approverOrganizations').child(auth.uid).val() === '*' || root.child('events').child($eventId).child('organizationCode').val() === root.child('approverOrganizations').child(auth.uid).val() || root.child('events').child($eventId).child('organizerOrganization').val() === root.child('approverOrganizations').child(auth.uid).val() || root.child('events').child($eventId).child('organization').val() === root.child('approverOrganizations').child(auth.uid).val())) || ((root.child('events').child($eventId).child('organizerUid').val() === auth.uid || root.child('events').child($eventId).child('organizerId').val() === auth.uid) && (root.child('roles').child(auth.uid).val() !== 'admin' || (root.child('approverOrganizations').child(auth.uid).exists() && (root.child('approverOrganizations').child(auth.uid).val() === '*' || root.child('events').child($eventId).child('organizationCode').val() === root.child('approverOrganizations').child(auth.uid).val() || root.child('events').child($eventId).child('organizerOrganization').val() === root.child('approverOrganizations').child(auth.uid).val() || root.child('events').child($eventId).child('organization').val() === root.child('approverOrganizations').child(auth.uid).val())))) || (root.child('approverQueue').child(auth.uid).child($eventId).exists() && root.child('approverOrganizations').child(auth.uid).exists() && (root.child('approverOrganizations').child(auth.uid).val() === '*' || root.child('events').child($eventId).child('organizationCode').val() === root.child('approverOrganizations').child(auth.uid).val() || root.child('events').child($eventId).child('organizerOrganization').val() === root.child('approverOrganizations').child(auth.uid).val() || root.child('events').child($eventId).child('organization').val() === root.child('approverOrganizations').child(auth.uid).val())))",
         ".write": false
       }
     },
     "organizerEvents": {
       "$uid": {
-        ".read": "auth != null && (auth.uid === $uid || root.child('roles').child(auth.uid).val() === 'admin')",
+        ".read": "auth != null && (auth.uid === $uid || (root.child('roles').child(auth.uid).val() === 'admin' && root.child('approverOrganizations').child(auth.uid).val() === '*'))",
         ".write": false
       }
     },
@@ -90,31 +91,37 @@
     },
     "publicEvents": {
       ".read": true,
-      ".write": "auth != null && (root.child('roles').child(auth.uid).val() === 'event_organizer' || root.child('roles').child(auth.uid).val() === 'teacher' || root.child('roles').child(auth.uid).val() === 'admin')",
+      ".write": "auth != null && (root.child('roles').child(auth.uid).val() === 'event_organizer' || root.child('roles').child(auth.uid).val() === 'teacher' || (root.child('roles').child(auth.uid).val() === 'admin' && root.child('approverOrganizations').child(auth.uid).val() === '*'))",
       ".indexOn": ["startAt"]
     },
     "notifications": {
       "$uid": {
         ".read": "auth != null && auth.uid === $uid",
-        ".write": "auth != null && (auth.uid === $uid || root.child('roles').child(auth.uid).val() === 'admin' || root.child('roles').child(auth.uid).val() === 'event_organizer' || root.child('roles').child(auth.uid).val() === 'teacher')"
+        ".write": "auth != null && (auth.uid === $uid || root.child('roles').child(auth.uid).val() === 'event_organizer' || root.child('roles').child(auth.uid).val() === 'teacher' || (root.child('roles').child(auth.uid).val() === 'admin' && root.child('approverOrganizations').child(auth.uid).val() === '*'))"
       }
     },
     "absences": {
       "$eventId": {
-        ".read": "auth != null && (root.child('roles').child(auth.uid).val() === 'event_organizer' || root.child('roles').child(auth.uid).val() === 'teacher' || root.child('roles').child(auth.uid).val() === 'admin')",
+        ".read": "auth != null && ((root.child('roles').child(auth.uid).val() === 'event_organizer' && (root.child('events').child($eventId).child('organizerUid').val() === auth.uid || root.child('events').child($eventId).child('organizerId').val() === auth.uid)) || root.child('roles').child(auth.uid).val() === 'teacher' || (root.child('roles').child(auth.uid).val() === 'admin' && root.child('approverOrganizations').child(auth.uid).exists() && (root.child('approverOrganizations').child(auth.uid).val() === '*' || root.child('events').child($eventId).child('organizationCode').val() === root.child('approverOrganizations').child(auth.uid).val() || root.child('events').child($eventId).child('organizerOrganization').val() === root.child('approverOrganizations').child(auth.uid).val() || root.child('events').child($eventId).child('organization').val() === root.child('approverOrganizations').child(auth.uid).val())))",
         ".write": false
       }
     },
     "approverQueue": {
       "$uid": {
-        ".read": "auth != null && (auth.uid === $uid || root.child('roles').child(auth.uid).val() === 'admin')",
-        ".write": "auth != null && root.child('roles').child(auth.uid).val() === 'admin'"
+        ".read": "auth != null && (auth.uid === $uid || (root.child('roles').child(auth.uid).val() === 'admin' && root.child('approverOrganizations').child(auth.uid).val() === '*'))",
+        ".write": "auth != null && root.child('roles').child(auth.uid).val() === 'admin' && root.child('approverOrganizations').child(auth.uid).val() === '*'"
       }
     },
     "approverDecisions": {
       "$uid": {
-        ".read": "auth != null && (auth.uid === $uid || root.child('roles').child(auth.uid).val() === 'admin')",
-        ".write": "auth != null && root.child('roles').child(auth.uid).val() === 'admin'"
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && root.child('roles').child(auth.uid).val() === 'admin' && root.child('approverOrganizations').child(auth.uid).val() === '*'"
+      }
+    },
+    "approverOrganizations": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": false
       }
     },
     "users": {

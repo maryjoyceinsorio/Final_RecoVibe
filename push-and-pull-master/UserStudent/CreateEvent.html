@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Create Event · RecoVibe</title>
+    <style>
+      :root {
+        color: #202534;
+        background: #f3f5fa;
+        font-family: Inter, "Segoe UI", Arial, sans-serif;
+        font-synthesis: none;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        display: grid;
+        min-height: 100vh;
+        margin: 0;
+        padding: 24px;
+        place-items: center;
+      }
+
+      main {
+        width: min(100%, 620px);
+        padding: 30px;
+        border: 1px solid #e1e5ef;
+        border-radius: 16px;
+        background: #fff;
+        box-shadow: 0 16px 48px rgb(34 46 78 / 8%);
+      }
+
+      h1 { margin-top: 0; }
+      p { line-height: 1.5; }
+      .muted { color: #5e6678; }
+      form { display: grid; gap: 16px; margin-top: 24px; }
+      label { display: grid; gap: 7px; font-size: 0.94rem; font-weight: 600; }
+      input, textarea {
+        width: 100%;
+        padding: 11px 12px;
+        border: 1px solid #cbd1de;
+        border-radius: 8px;
+        color: inherit;
+        font: inherit;
+      }
+      textarea { min-height: 120px; resize: vertical; }
+      input:focus, textarea:focus {
+        border-color: #4359a8;
+        outline: 3px solid rgb(67 89 168 / 16%);
+      }
+      button {
+        min-height: 44px;
+        padding: 10px 14px;
+        border: 0;
+        border-radius: 8px;
+        background: #304894;
+        color: #fff;
+        cursor: pointer;
+        font: inherit;
+        font-weight: 650;
+      }
+      button:disabled { cursor: wait; opacity: 0.65; }
+      #form-message { min-height: 1.5em; }
+      #form-message.error { color: #a32132; }
+      #form-message.success { color: #17653b; }
+      @media (max-width: 520px) {
+        body { padding: 12px; }
+        main { padding: 22px; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="muted">RecoVibe · Event management</p>
+      <h1>Create Event</h1>
+      <p id="account-status" class="muted" role="status">Checking your account…</p>
+
+      <form id="create-event-form">
+        <label for="event-name">
+          Event name
+          <input id="event-name" name="eventName" type="text" maxlength="150" required />
+        </label>
+        <label for="event-date">
+          Date
+          <input id="event-date" name="date" type="date" required />
+        </label>
+        <label for="event-time">
+          Time
+          <input id="event-time" name="time" type="time" required />
+        </label>
+        <label for="event-location">
+          Location
+          <input id="event-location" name="location" type="text" maxlength="200" required />
+        </label>
+        <label for="event-description">
+          Description
+          <textarea id="event-description" name="description" maxlength="3000" required></textarea>
+        </label>
+        <label for="adminDocsLink">
+          Admin documents Google Drive link
+          <input
+            id="adminDocsLink"
+            name="adminDocsLink"
+            type="url"
+            pattern="^https:\/\/(drive|docs)\.google\.com\/.*$"
+            required
+          />
+          <small class="muted">Set the file permission to "Anyone with the link can view".</small>
+        </label>
+        <button id="submit-event" type="submit" disabled>Save event</button>
+      </form>
+      <p id="form-message" role="status" aria-live="polite"></p>
+    </main>
+
+    <script type="module">
+      import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+      import {
+        addDoc,
+        collection,
+        doc,
+        getDoc,
+        serverTimestamp,
+      } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+      import { auth, db, isFirebaseConfigured } from "./firebaseConfig.js";
+
+      const allowedRoles = new Set(["superadmin", "admin", "eo"]);
+      const form = document.getElementById("create-event-form");
+      const submitButton = document.getElementById("submit-event");
+      const accountStatus = document.getElementById("account-status");
+      const formMessage = document.getElementById("form-message");
+      let currentUser = null;
+      let canCreateEvents = false;
+      let saving = false;
+
+      function showMessage(text, kind = "") {
+        formMessage.textContent = text;
+        formMessage.className = kind;
+      }
+
+      if (!isFirebaseConfigured || !auth || !db) {
+        accountStatus.textContent = "Firebase is not configured for this page.";
+      } else {
+        onAuthStateChanged(auth, async (user) => {
+          currentUser = user;
+          canCreateEvents = false;
+          submitButton.disabled = true;
+
+          if (!user) {
+            accountStatus.textContent = "Sign in before creating an event.";
+            showMessage("You must be signed in to create events.", "error");
+            return;
+          }
+
+          try {
+            const profileSnapshot = await getDoc(doc(db, "users", user.uid));
+            if (auth.currentUser?.uid !== user.uid) return;
+            const role = profileSnapshot.exists()
+              ? String(profileSnapshot.data().role || "").toLowerCase()
+              : "";
+            canCreateEvents = allowedRoles.has(role);
+            accountStatus.textContent = canCreateEvents
+              ? `Signed in as ${user.email || user.uid} (${role}).`
+              : "Your account does not have permission to create events.";
+            if (canCreateEvents) showMessage("");
+            else showMessage("Only superadmin, admin, and eo accounts can create events.", "error");
+            submitButton.disabled = !canCreateEvents;
+          } catch (error) {
+            console.error("[CreateEvent] Could not verify account role:", {
+              code: error?.code || "unknown",
+              message: error?.message || String(error),
+            });
+            accountStatus.textContent = "Could not verify your account permissions.";
+            showMessage(error.message || "Could not verify account permissions.", "error");
+          }
+        });
+      }
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (saving) return;
+        if (!currentUser || !canCreateEvents) {
+          showMessage("You must be signed in with an event-creator role.", "error");
+          return;
+        }
+
+        const formData = new FormData(form);
+        const eventName = String(formData.get("eventName") || "").trim();
+        const date = String(formData.get("date") || "");
+        const time = String(formData.get("time") || "");
+        const location = String(formData.get("location") || "").trim();
+        const description = String(formData.get("description") || "").trim();
+        const adminDocsLink = document.getElementById("adminDocsLink").value.trim();
+        if (!eventName || !date || !time || !location || !description || !adminDocsLink) {
+          showMessage("Complete all event fields before saving.", "error");
+          return;
+        }
+        if (
+          !adminDocsLink.startsWith("https://drive.google.com/") &&
+          !adminDocsLink.startsWith("https://docs.google.com/")
+        ) {
+          showMessage("Enter a valid Google Drive or Google Docs link.", "error");
+          return;
+        }
+
+        saving = true;
+        submitButton.disabled = true;
+        showMessage("");
+        try {
+          const eventRef = await addDoc(collection(db, "events"), {
+            eventName,
+            date,
+            time,
+            location,
+            description,
+            adminDocuments: adminDocsLink,
+            createdBy: currentUser.uid,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+          form.reset();
+          showMessage(`Event saved successfully (ID: ${eventRef.id}).`, "success");
+        } catch (error) {
+          console.error("[CreateEvent] Could not save event:", {
+            code: error?.code || "unknown",
+            message: error?.message || String(error),
+          });
+          showMessage(
+            error.code === "permission-denied"
+              ? "Firestore denied this write. Check your published rules and your users/{uid} role."
+              : error.message || "Could not save the event. Please try again.",
+            "error",
+          );
+        } finally {
+          saving = false;
+          submitButton.disabled = !canCreateEvents;
+        }
+      });
+    </script>
+  </body>
+</html>

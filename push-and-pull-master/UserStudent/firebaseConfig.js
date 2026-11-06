@@ -1,18 +1,21 @@
 import { getApp, getApps, initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getAuth } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {
+  browserLocalPersistence,
+  getAuth,
+  setPersistence,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { getFirestore } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { getDatabase } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 import { getFunctions } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyBtWyBsV5RG9nAehlIE5Sz-6NgwwfFbwA0",
-  authDomain: "recovibe-fad79.firebaseapp.com",
-  databaseURL: "https://recovibe-fad79-default-rtdb.asia-southeast1.firebasedatabase.app",
-  projectId: "recovibe-fad79",
-  storageBucket: "recovibe-fad79.firebasestorage.app",
-  messagingSenderId: "735898141986",
-  appId: "1:735898141986:web:27afe3c09e9fa30dc8917b",
-  measurementId: "G-NPG0PZMLB8"
+  apiKey: "AIzaSyDKozGFtnSiE6EzmSzpxe8-dZv7aH1HfnE",
+  authDomain: "recovibe-v1.firebaseapp.com",
+  projectId: "recovibe-v1",
+  databaseURL: "https://recovibe-v1-default-rtdb.firebaseio.com/",
+  storageBucket: "recovibe-v1.firebasestorage.app",
+  messagingSenderId: "79140044760",
+  appId: "1:79140044760:web:8523fc92592e3555fefcad",
 };
 
 export const isFirebaseConfigured = Object.values(firebaseConfig).every(
@@ -26,18 +29,30 @@ export const app = isFirebaseConfigured
   : null;
 
 export const auth = app ? getAuth(app) : null;
+const authPersistenceReady = auth
+  ? setPersistence(auth, browserLocalPersistence).catch((error) => {
+    console.error("[Firebase] Could not enable browser-local auth persistence:", {
+      code: error?.code || "unknown",
+      message: error?.message || String(error),
+    });
+  })
+  : Promise.resolve();
+export const authReady = auth
+  ? Promise.all([auth.authStateReady(), authPersistenceReady]).then(() => undefined)
+  : Promise.resolve();
 export const db = app ? getFirestore(app) : null;
 
 let rtdbInstance = null;
 if (app) {
   try {
-    rtdbInstance = getDatabase(app, firebaseConfig.databaseURL);
-  } catch (err) {
-    try {
-      rtdbInstance = getDatabase(app);
-    } catch (e) {
-      console.warn("RTDB initialization error:", e);
-    }
+    rtdbInstance = firebaseConfig.databaseURL
+      ? getDatabase(app, firebaseConfig.databaseURL)
+      : getDatabase(app);
+  } catch (error) {
+    console.error("[Firebase] Realtime Database initialization failed:", {
+      code: error?.code || "unknown",
+      message: error?.message || String(error),
+    });
   }
 }
 export const rtdb = rtdbInstance;

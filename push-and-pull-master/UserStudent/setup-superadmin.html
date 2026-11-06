@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>RecoVibe — First Super Admin Setup</title>
+    <style>
+      :root {
+        color: #202534;
+        background: #f3f5fa;
+        font-family: Inter, "Segoe UI", Arial, sans-serif;
+        font-synthesis: none;
+        text-rendering: optimizeLegibility;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        display: grid;
+        min-height: 100vh;
+        margin: 0;
+        padding: 24px;
+        place-items: center;
+      }
+
+      main {
+        width: min(100%, 480px);
+        padding: 32px;
+        border: 1px solid #e1e5ef;
+        border-radius: 16px;
+        background: #fff;
+        box-shadow: 0 16px 48px rgb(34 46 78 / 8%);
+      }
+
+      h1 {
+        margin: 0 0 10px;
+        font-size: 1.65rem;
+      }
+
+      p {
+        line-height: 1.55;
+      }
+
+      .muted {
+        color: #5e6678;
+      }
+
+      form,
+      #verification-step {
+        display: grid;
+        gap: 16px;
+        margin-top: 24px;
+      }
+
+      label {
+        display: grid;
+        gap: 7px;
+        font-size: 0.92rem;
+        font-weight: 600;
+      }
+
+      input {
+        width: 100%;
+        padding: 11px 12px;
+        border: 1px solid #cbd1de;
+        border-radius: 8px;
+        color: inherit;
+        font: inherit;
+      }
+
+      input:focus {
+        border-color: #4359a8;
+        outline: 3px solid rgb(67 89 168 / 16%);
+      }
+
+      button {
+        min-height: 44px;
+        padding: 10px 14px;
+        border: 0;
+        border-radius: 8px;
+        background: #304894;
+        color: #fff;
+        cursor: pointer;
+        font: inherit;
+        font-weight: 650;
+      }
+
+      button.secondary {
+        border: 1px solid #cbd1de;
+        background: #fff;
+        color: #30394c;
+      }
+
+      button:disabled {
+        cursor: wait;
+        opacity: 0.65;
+      }
+
+      #message {
+        min-height: 1.5em;
+        margin-bottom: 0;
+      }
+
+      #message.error {
+        color: #a32132;
+      }
+
+      #message.success {
+        color: #17653b;
+      }
+
+      .security-note {
+        margin-top: 24px;
+        padding: 12px 14px;
+        border-radius: 8px;
+        background: #f2f4fa;
+        color: #4c566d;
+        font-size: 0.88rem;
+      }
+
+      [hidden] {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="muted">RecoVibe · One-time initialization</p>
+      <h1>First Super Admin Setup</h1>
+      <p class="muted">
+        Create the initial account, verify its email, then save its
+        <code>users/{uid}</code> profile as <code>superadmin</code>.
+      </p>
+
+      <form id="setup-form">
+        <label>
+          Name
+          <input
+            id="display-name"
+            name="displayName"
+            type="text"
+            autocomplete="name"
+            maxlength="100"
+            required
+          />
+        </label>
+        <label>
+          Allowlisted email
+          <input
+            id="email"
+            name="email"
+            type="email"
+            autocomplete="email"
+            required
+          />
+        </label>
+        <label>
+          Password
+          <input
+            id="password"
+            name="password"
+            type="password"
+            autocomplete="new-password"
+            minlength="6"
+            required
+          />
+        </label>
+        <button id="create-button" type="submit">Create account and send verification</button>
+      </form>
+
+      <section id="verification-step" aria-live="polite" hidden>
+        <p id="verification-detail" class="muted"></p>
+        <button id="finish-button" type="button">I verified my email — finish setup</button>
+        <button id="cancel-button" class="secondary" type="button">Sign out of setup</button>
+      </section>
+
+      <p id="message" role="status" aria-live="polite"></p>
+      <p class="security-note">
+        Security depends on the deployed Firestore rules: they must allow only
+        your exact verified email to create the first superadmin and must lock
+        setup after the first successful transaction. Client-side code alone
+        cannot enforce this restriction.
+      </p>
+    </main>
+
+    <script type="module">
+      import { getApps, initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+      import {
+        createUserWithEmailAndPassword,
+        getAuth,
+        onAuthStateChanged,
+        sendEmailVerification,
+        signInWithEmailAndPassword,
+        signOut,
+        updateProfile,
+      } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+      import {
+        doc,
+        getFirestore,
+        runTransaction,
+        serverTimestamp,
+      } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+      import { app } from "./firebaseConfig.js";
+
+      const SETUP_APP_NAME = "recovibe-first-superadmin-setup";
+      const DISPLAY_NAME_KEY = "recovibe-superadmin-setup-name";
+      const setupForm = document.getElementById("setup-form");
+      const displayNameInput = document.getElementById("display-name");
+      const emailInput = document.getElementById("email");
+      const passwordInput = document.getElementById("password");
+      const createButton = document.getElementById("create-button");
+      const verificationStep = document.getElementById("verification-step");
+      const verificationDetail = document.getElementById("verification-detail");
+      const finishButton = document.getElementById("finish-button");
+      const cancelButton = document.getElementById("cancel-button");
+      const message = document.getElementById("message");
+
+      const existingSetupApp = getApps().find(
+        (candidate) => candidate.name === SETUP_APP_NAME,
+      );
+      const setupApp =
+        existingSetupApp || initializeApp(app.options, SETUP_APP_NAME);
+      const setupAuth = getAuth(setupApp);
+      const setupDb = getFirestore(setupApp);
+      let activeUser = null;
+      let busy = false;
+
+      displayNameInput.value = sessionStorage.getItem(DISPLAY_NAME_KEY) || "";
+
+      function showMessage(text, kind = "") {
+        message.textContent = text;
+        message.className = kind;
+      }
+
+      function setBusy(value) {
+        busy = value;
+        createButton.disabled = value;
+        finishButton.disabled = value;
+        cancelButton.disabled = value;
+      }
+
+      function showVerification(user) {
+        setupForm.hidden = true;
+        verificationStep.hidden = false;
+        verificationDetail.textContent =
+          `A verification email was sent to ${user.email}. Verify it before continuing.`;
+      }
+
+      onAuthStateChanged(setupAuth, (user) => {
+        activeUser = user;
+        if (user) {
+          showVerification(user);
+        } else {
+          setupForm.hidden = false;
+          verificationStep.hidden = true;
+        }
+      });
+
+      setupForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (busy) return;
+
+        const displayName = displayNameInput.value.trim();
+        const email = emailInput.value.trim().toLowerCase();
+        const password = passwordInput.value;
+        if (!displayName) {
+          showMessage("Enter a name for the superadmin profile.", "error");
+          displayNameInput.focus();
+          return;
+        }
+        if (activeUser) {
+          showMessage("Sign out of the current setup account before starting again.", "error");
+          return;
+        }
+
+        sessionStorage.setItem(DISPLAY_NAME_KEY, displayName);
+        showMessage("");
+        setBusy(true);
+        try {
+          let user;
+          try {
+            user = (
+              await createUserWithEmailAndPassword(setupAuth, email, password)
+            ).user;
+          } catch (error) {
+            if (error.code !== "auth/email-already-in-use") throw error;
+            user = (
+              await signInWithEmailAndPassword(setupAuth, email, password)
+            ).user;
+          }
+
+          await updateProfile(user, { displayName });
+          await sendEmailVerification(user);
+          showVerification(user);
+          showMessage("Verification email sent. Complete email verification, then continue here.", "success");
+        } catch (error) {
+          console.error("[SuperAdminSetup] Could not start setup:", {
+            code: error?.code || "unknown",
+            message: error?.message || String(error),
+          });
+          showMessage(error.message || "Could not start superadmin setup.", "error");
+        } finally {
+          setBusy(false);
+        }
+      });
+
+      finishButton.addEventListener("click", async () => {
+        if (busy || !activeUser) return;
+        showMessage("");
+        setBusy(true);
+        try {
+          await activeUser.reload();
+          if (!activeUser.emailVerified) {
+            showMessage("Your email is not verified yet. Verify it and try again.", "error");
+            return;
+          }
+          await activeUser.getIdToken(true);
+
+          const user = activeUser;
+          const profileRef = doc(setupDb, "users", user.uid);
+          const bootstrapRef = doc(setupDb, "system", "bootstrap");
+          const displayName =
+            sessionStorage.getItem(DISPLAY_NAME_KEY) ||
+            user.displayName ||
+            "";
+          if (!displayName) {
+            throw new Error("The setup name is missing. Sign out and start setup again.");
+          }
+
+          await runTransaction(setupDb, async (transaction) => {
+            const bootstrapSnapshot = await transaction.get(bootstrapRef);
+            const profileSnapshot = await transaction.get(profileRef);
+            if (bootstrapSnapshot.exists()) {
+              throw new Error("First superadmin setup has already been completed.");
+            }
+            if (profileSnapshot.exists()) {
+              throw new Error("A profile already exists for this account; setup cannot overwrite it.");
+            }
+
+            transaction.set(profileRef, {
+              displayName,
+              email: user.email,
+              role: "superadmin",
+              uid: user.uid,
+              createdAt: serverTimestamp(),
+            });
+            transaction.set(bootstrapRef, {
+              uid: user.uid,
+              email: user.email,
+              createdAt: serverTimestamp(),
+            });
+          });
+
+          await signOut(setupAuth);
+          sessionStorage.removeItem(DISPLAY_NAME_KEY);
+          verificationStep.hidden = true;
+          setupForm.hidden = true;
+          showMessage("First superadmin setup completed. You can now sign in with this account.", "success");
+        } catch (error) {
+          console.error("[SuperAdminSetup] Could not finish setup:", {
+            code: error?.code || "unknown",
+            message: error?.message || String(error),
+          });
+          showMessage(
+            error.code === "permission-denied"
+              ? "Firestore denied setup. Check that the deployed rules allow your exact verified email and that the bootstrap is still unused."
+              : error.message || "Could not complete superadmin setup.",
+            "error",
+          );
+        } finally {
+          setBusy(false);
+        }
+      });
+
+      cancelButton.addEventListener("click", async () => {
+        if (busy) return;
+        setBusy(true);
+        try {
+          await signOut(setupAuth);
+          sessionStorage.removeItem(DISPLAY_NAME_KEY);
+          passwordInput.value = "";
+          showMessage("Signed out of setup. The Auth account was not deleted; you can retry with its credentials.", "success");
+        } catch (error) {
+          console.error("[SuperAdminSetup] Could not sign out:", {
+            code: error?.code || "unknown",
+            message: error?.message || String(error),
+          });
+          showMessage(error.message || "Could not sign out of setup.", "error");
+        } finally {
+          setBusy(false);
+        }
+      });
+    </script>
+  </body>
+</html>

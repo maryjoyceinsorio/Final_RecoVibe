@@ -2140,6 +2140,12 @@ ul {
   line-height: 1.5;
   white-space: pre-line;
 }
+.inline-details-desc a {
+  color: var(--maroon-700, #7a1f2e);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
 
 /* Search Highlighting */
 mark.search-highlight {

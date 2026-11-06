@@ -2,12 +2,17 @@ import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/f
 import {
   collection,
   onSnapshot,
+  query,
+  where,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {
   auth,
+  authReady,
   db,
+  functions,
   isFirebaseConfigured,
 } from "../UserStudent/firebaseConfig.js";
+import { syncOrganizerOrganization } from "../organizationScope.js";
 
 (() => {
   let events = [];
@@ -402,7 +407,7 @@ import {
     loadError = "Event data is unavailable. Please contact support.";
     render();
   } else {
-    onAuthStateChanged(auth, (user) => {
+    authReady.then(() => onAuthStateChanged(auth, async (user) => {
       unsubscribeEvents?.();
       if (!user) {
         window.location.replace("EventOrganizerLogin.html");
@@ -413,8 +418,21 @@ import {
       isLoading = true;
       loadError = "";
       render();
+      let organizationCode;
+      try {
+        organizationCode = await syncOrganizerOrganization(functions);
+      } catch (error) {
+        console.error("Could not verify organizer organization:", error);
+        isLoading = false;
+        loadError = "Could not verify your organization. Please refresh and try again.";
+        render();
+        return;
+      }
       unsubscribeEvents = onSnapshot(
-        collection(db, "events"),
+        query(
+          collection(db, "events"),
+          where("organizationCode", "==", organizationCode),
+        ),
         (snapshot) => {
           events = snapshot.docs
             .map((eventDocument) => {
@@ -469,6 +487,11 @@ import {
           render();
         },
       );
+    })).catch((error) => {
+      console.error("Could not restore organizer authentication state:", error);
+      isLoading = false;
+      loadError = "Could not verify your session. Please refresh and try again.";
+      render();
     });
   }
 })();

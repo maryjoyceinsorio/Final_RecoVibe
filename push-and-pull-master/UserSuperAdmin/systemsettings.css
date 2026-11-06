@@ -362,13 +362,18 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 .settings-org-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 38px minmax(110px, 150px) minmax(180px, 1fr) minmax(190px, 0.8fr) 38px;
   align-items: center;
   gap: 10px;
   width: 100%;
+  min-width: 580px;
 }
 
 .settings-org-badge {
@@ -424,6 +429,26 @@
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 
+.settings-org-adviser-input {
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+  padding: 7px 11px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #111827;
+  font-size: 13.5px;
+  font-family: inherit;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.settings-org-adviser-input:focus {
+  outline: none;
+  border-color: #72141c;
+  box-shadow: 0 0 0 2px rgba(114, 20, 28, 0.12);
+}
+
 .settings-org-name-input:focus {
   outline: none;
   border-color: #72141c;
@@ -469,6 +494,7 @@
 .settings-select.is-invalid,
 .settings-org-code-input.is-invalid,
 .settings-org-name-input.is-invalid,
+.settings-org-adviser-input.is-invalid,
 .settings-stage-input.is-invalid {
   border-color: #dc2626 !important;
   background: #fff5f5 !important;
@@ -947,6 +973,9 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 .settings-stage-card {
@@ -1032,7 +1061,19 @@
 .settings-stage-col-reviewer {
   display: flex;
   flex-direction: column;
+  gap: 6px;
   min-width: 0;
+}
+
+.settings-stage-field-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  color: #4b5563;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.25;
 }
 
 .settings-stage-fields {
@@ -1217,8 +1258,58 @@
   }
 
   .settings-org-code-input {
-    width: 100px;
-    min-width: 75px;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .settings-org-row {
+    grid-template-columns: 32px minmax(0, 1fr) 38px;
+    grid-template-areas:
+      "badge code remove"
+      "badge name name"
+      "badge adviser adviser";
+    min-width: 0;
+    padding: 2px 0;
+  }
+
+  .settings-org-badge {
+    grid-area: badge;
+    width: 32px;
+    min-width: 32px;
+  }
+
+  .settings-org-code-input {
+    grid-area: code;
+  }
+
+  .settings-org-name-input {
+    grid-area: name;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .settings-org-adviser-input {
+    grid-area: adviser;
+  }
+
+  .settings-org-remove-btn {
+    grid-area: remove;
+  }
+
+  .settings-stage-card {
+    flex-wrap: wrap;
+  }
+
+  .settings-stage-body {
+    flex-basis: calc(100% - 48px);
+  }
+
+  .settings-stage-remove-btn {
+    margin-left: auto;
+  }
+
+  .settings-panel {
+    padding: 18px 16px;
   }
 
   .settings-access-desc {

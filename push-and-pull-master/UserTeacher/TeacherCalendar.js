@@ -836,11 +836,27 @@ import { fetchMonthHolidays } from "../holidayService.js";
         "../UserStudent/firebaseConfig.js"
       );
       if (isFirebaseConfigured && db) {
-        const { collection, getDocs } = await import(
+        const { collection, getDocs, query, where } = await import(
           "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js"
         );
-        const snapshot = await getDocs(collection(db, "events"));
-        snapshot.docs.forEach((doc) => {
+        const eventsRef = collection(db, "events");
+        const publicSnapshots = await Promise.all([
+          getDocs(query(eventsRef, where("status", "in", [
+            "approved", "Approved", "APPROVED",
+            "published", "Published", "PUBLISHED",
+            "completed", "Completed", "COMPLETED",
+            "rescheduled", "Rescheduled", "RESCHEDULED",
+          ]))),
+          getDocs(query(eventsRef, where("published", "==", true))),
+          getDocs(query(eventsRef, where("isPublished", "==", true))),
+        ]);
+        const publicDocuments = new Map();
+        publicSnapshots.forEach((snapshot) => {
+          snapshot.docs.forEach((document) => {
+            publicDocuments.set(document.id, document);
+          });
+        });
+        publicDocuments.forEach((doc) => {
           const data = doc.data();
           const s = String(data.status || "").trim().toLowerCase();
           const isApprovedOrPub =

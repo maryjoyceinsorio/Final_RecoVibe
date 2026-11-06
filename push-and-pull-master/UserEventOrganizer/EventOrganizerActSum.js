@@ -1,11 +1,12 @@
 import {
   collection,
   onSnapshot,
-  orderBy,
   query,
+  where,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
+import { auth, authReady, db, functions, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
+import { syncOrganizerOrganization } from "../organizationScope.js";
 
 (() => {
   "use strict";
@@ -30,21 +31,26 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
     profile.displayName ||
     "Event Organizer";
 
-  // Redirect if unauthorized
-  if (!organizerId && !profile.role) {
-    location.replace("EventOrganizerLogin.html");
-    return;
-  }
-
   let currentUserUid = profile.uid || profile.id || organizerId;
+  authReady
+    .then(() => {
+      if ((!auth || !auth.currentUser) && !organizerId && !profile.role) {
+        location.replace("EventOrganizerLogin.html");
+      }
+    })
+    .catch((error) => {
+      console.error("Could not restore organizer authentication state:", error);
+    });
 
   // Track Firebase Auth user if available
   if (auth) {
-    onAuthStateChanged(auth, (user) => {
+    authReady.then(() => onAuthStateChanged(auth, (user) => {
       if (user?.uid) {
         currentUserUid = user.uid;
         if (allEvents.length) renderReport();
       }
+    })).catch((error) => {
+      console.error("Could not observe organizer authentication state:", error);
     });
   }
 
@@ -116,6 +122,7 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
   // Initialize page
   function init() {
     scopeNote.textContent = "Your events";
+    downloadCopyBtn.disabled = true;
     setupPeriodControls();
     setupDownloadButton();
 
@@ -156,13 +163,25 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
   retryBtn.addEventListener("click", () => {
     errorState.hidden = true;
     loadingState.hidden = false;
+    downloadCopyBtn.disabled = true;
     subscribeToEvents();
   });
 
-  function subscribeToEvents() {
+  async function subscribeToEvents() {
+    downloadCopyBtn.disabled = true;
     try {
+      await authReady;
+      if (auth?.authStateReady) await auth.authStateReady();
+      if (!auth?.currentUser) {
+        throw new Error("Sign in before loading organization events.");
+      }
+      const organizationCode = await syncOrganizerOrganization(functions);
+      unsubscribeEvents?.();
       const eventsRef = collection(db, "events");
-      const q = query(eventsRef, orderBy("createdAt", "desc"));
+      const q = query(
+        eventsRef,
+        where("organizationCode", "==", organizationCode),
+      );
       unsubscribeEvents = onSnapshot(
         q,
         (snapshot) => {
@@ -179,8 +198,8 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
         },
       );
     } catch (e) {
-      console.error(e);
-      showError("Failed to initialize database query.");
+      console.error("Could not load organization events:", e);
+      showError("Could not verify your organization or load its events.");
     }
   }
 
@@ -813,11 +832,24 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
   // Section 10: Download Copy (PDF Export)
   function setupDownloadButton() {
     downloadCopyBtn.addEventListener("click", () => {
+      if (downloadCopyBtn.disabled || dataContainer.hidden) return;
+
+      renderReport();
       const range = getSelectedDateRange();
       const oldTitle = document.title;
+      const restoreTitle = () => {
+        document.title = oldTitle;
+        window.removeEventListener("afterprint", restoreTitle);
+      };
+
       document.title = `RECOVIBE_Activity_Summary_${range.start}_to_${range.end}`;
-      window.print();
-      document.title = oldTitle;
+      window.addEventListener("afterprint", restoreTitle, { once: true });
+      try {
+        window.print();
+      } catch (error) {
+        restoreTitle();
+        console.error("Could not open the Activity Summary print dialog:", error);
+      }
     });
   }
 
@@ -833,4 +865,3 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
 
   init();
 })();
-

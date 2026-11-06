@@ -792,7 +792,7 @@ function hydrateUserProfile() {
       }
       const fullName = [first, mid, last].filter(Boolean).join(" ");
       if (isFirebaseConfigured && db && user.uid) {
-        await updateDoc(doc(db, "studentUser", user.uid), {
+        await updateDoc(doc(db, "users", user.uid), {
           firstName: first,
           middleName: mid,
           lastName: last,
@@ -969,7 +969,7 @@ function hydrateUserProfile() {
           });
         }
         if (isFirebaseConfigured && db && user.uid) {
-          await updateDoc(doc(db, "studentUser", user.uid), {
+          await updateDoc(doc(db, "users", user.uid), {
             contactNumber: phoneDigits,
             contact: phoneDigits,
           });
@@ -1681,7 +1681,7 @@ function hydrateUserProfile() {
         await update(ref(rtdb, `users/${user.uid}/preferences`), newPreferences);
       }
       if (isFirebaseConfigured && db && user.uid) {
-        await updateDoc(doc(db, "studentUser", user.uid), { preferences: newPreferences }).catch((err) => {
+        await updateDoc(doc(db, "users", user.uid), { preferences: newPreferences }).catch((err) => {
           console.warn("Firestore preferences update error:", err);
         });
       }
@@ -2380,7 +2380,7 @@ window.renderMyQr = renderMyQr;
   onAuthStateChanged(auth, async (user) => {
     if (user && db) {
       try {
-        const snap = await getDoc(doc(db, "studentUser", user.uid));
+        const snap = await getDoc(doc(db, "users", user.uid));
         if (snap.exists()) {
           const profileData = snap.data();
           let current = {};
@@ -2610,4 +2610,3 @@ window.renderMyQr = renderMyQr;
     }
   });
 })();
-

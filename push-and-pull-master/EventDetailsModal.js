@@ -77,7 +77,7 @@
             : item;
         const href =
           typeof item === "object"
-            ? item.url || item.href || item.downloadUrl || ""
+            ? item.url || item.href || item.downloadURL || item.downloadUrl || item.fileUrl || ""
             : "";
         if (!name) return "";
         const label = `<span>${escapeHTML(name)}</span><b aria-hidden="true">&#8595;</b>`;
@@ -500,6 +500,12 @@
         ? String(value)
         : `${String(date.getMonth() + 1).padStart(2, "0")} / ${String(date.getDate()).padStart(2, "0")} / ${date.getFullYear()}`;
     };
+    const dateTimeText = (value) => {
+      if (!value) return "Not specified";
+      const [date, time] = String(value).split(/[T ]/, 2);
+      const formattedTime = time ? timeText(time.slice(0, 5)) : "";
+      return `${dateText(date)}${formattedTime ? ` · ${formattedTime}` : ""}`;
+    };
     const timeText = (value) => {
       const match = /^(\d{1,2}):(\d{2})$/.exec(String(value || "").trim());
       if (!match) return String(value || "").trim();
@@ -576,7 +582,9 @@
 
     function attachmentsMarkup(event) {
       const files = entries(
-        event.attachments ||
+        (Array.isArray(event.attachments) && event.attachments.length
+          ? event.attachments
+          : null) ||
           event.participantDocuments ||
           event.participantDocs ||
           event.registrationDocuments,
@@ -596,9 +604,19 @@
               : /^(https?:|blob:|data:|\.\.?\/|\/)/i.test(String(file))
                 ? file
                 : "";
+          let isDriveLink = false;
+          try {
+            const parsedUrl = new URL(String(href));
+            isDriveLink = parsedUrl.protocol === "https:" &&
+              ["drive.google.com", "docs.google.com"].includes(parsedUrl.hostname.toLowerCase());
+          } catch {
+            isDriveLink = false;
+          }
           const icon =
             '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5v10m0 0 3.5-3.5M10 12.5 6.5 9M3.5 13.5v3h13v-3"/></svg>';
-          const link = /^(https?:|blob:|data:|\.\.?\/|\/)/i.test(String(href))
+          const link = isDriveLink
+            ? `<a href="${escapeHTML(href)}" target="_blank" rel="noopener noreferrer" aria-label="Open ${escapeHTML(name)} in Google Drive" title="Open in Google Drive">${icon}</a>`
+            : /^(https?:|blob:|data:|\.\.?\/|\/)/i.test(String(href))
             ? `<a href="${escapeHTML(href)}" download="${escapeHTML(name)}" aria-label="Download ${escapeHTML(name)}" title="Download ${escapeHTML(name)}">${icon}</a>`
             : typeof file === "object" && (file.fileId || file.id)
               ? `<a href="#" data-event-file-id="${escapeHTML(file.fileId || file.id)}" download="${escapeHTML(name)}" aria-label="Download ${escapeHTML(name)}" title="Download ${escapeHTML(name)}">${icon}</a>`
@@ -656,77 +674,170 @@
         event.categories || event.category || event.tag,
       );
       const times = eventTimes(event);
-      const total = capacity(event);
+      const total = event.maxCapacity ?? capacity(event);
       const available = openSlots(event);
-      const participants = total === null ? null : Math.max(0, total - available);
-      const weatherContingency =
-        /open field|outside|outdoor/i.test(
-          [event.venue, event.venueOther, event.location, event.room]
-            .filter(Boolean)
-            .join(" "),
-        )
-          ? "Outside – Might Rain."
-          : "No rain concerns.";
-      const requirements =
-        event.requirements &&
-        typeof event.requirements === "object" &&
-        !Array.isArray(event.requirements)
-          ? [
-              ...entries(event.requirements.required),
-              ...entries(event.requirements.recommended),
-              ...entries(event.reminders),
-            ]
-          : [
-              ...entries(event.requirements || event.requirementsList),
-              ...entries(event.reminders),
-            ];
+      const participants = Number(
+        event.expectedParticipants ??
+          event.registeredCount ??
+          (total === null ? 0 : Math.max(0, total - available)),
+      );
+      const slotsLeft = total === null
+        ? null
+        : Math.max(
+            0,
+            Number(
+              event.slotsLeft ??
+                event.availableSlots ??
+                event.slotsOpen ??
+                total - Number(event.registeredCount || 0),
+            ) || 0,
+          );
+      const dateStart = event.dateStart || event.dateISO || event.date;
+      const dateEnd =
+        event.dateEnd || event.endDate || event.eventEndDate || dateStart;
+      const dailySchedules = Array.isArray(event.dailySchedules)
+        ? event.dailySchedules
+        : [];
+      const differentTimesByDay =
+        dailySchedules.length > 0 &&
+        (/different\s+time/i.test(String(event.dailySchedule || "")) ||
+          dailySchedules.length > 1);
+      const venue =
+        event.venue ||
+        event.location ||
+        event.venueOther ||
+        event.venueName ||
+        "Not specified";
+      const venueType =
+        event.venueType || event.weatherContingency || "Not specified";
+      const source = [
+        event.source || event.eventSource || event.campus || event.office,
+        event.sourceOther,
+      ]
+        .filter(Boolean)
+        .join(" · ") || "Not specified";
+      const targetAudienceValue =
+        event.targetAudience || event.targetYear || "Open to All";
+      const targetAudience = entries(targetAudienceValue)
+        .map(text)
+        .filter(Boolean)
+        .join(", ") || "Open to All";
+      const attendanceRequired =
+        typeof event.attendanceRequired === "boolean"
+          ? event.attendanceRequired
+            ? "Required"
+            : "Not Required"
+          : event.attendanceRequired || "Not specified";
       const description = String(
         event.description || event.desc || event.about || "Not specified",
       )
         .split(/\n\s*\n/)
         .map((item) => item.trim())
         .filter(Boolean);
-      const contactParts = String(
-        event.contactPerson || event.contactName || "",
-      )
+      const contactInfo =
+        event.contactPerson && typeof event.contactPerson === "object"
+          ? event.contactPerson
+          : {};
+      const contactParts = (typeof event.contactPerson === "string"
+        ? event.contactPerson
+        : event.contactName || "")
         .split(/[\n,|]+/)
         .map((item) => item.trim())
         .filter(Boolean);
       const email =
+        contactInfo.email ||
         event.contactEmail ||
         contactParts.find((item) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(item)) ||
         "";
       const phone =
+        contactInfo.phone ||
         event.contactPhone ||
         contactParts.find(
           (item) => /\+?[\d() -]{7,}/.test(item) && /\d{7}/.test(item),
         ) ||
         "";
       const person =
+        contactInfo.name ||
         event.contactName ||
         contactParts.find((item) => item !== email && item !== phone) ||
         event.organizerName ||
         "Not specified";
       const role =
+        contactInfo.role ||
         event.contactRole ||
         contactParts.find(
           (item) => item !== person && item !== email && item !== phone,
         ) ||
         "";
-      const icon = (paths) =>
-        `<svg class="student-event-icon" viewBox="0 0 20 20" aria-hidden="true">${paths}</svg>`;
       const badgeList = categories.length ? categories : ["General"];
-      const keyDetails =
-        event.keyDetails || event.detailedInfo || event.focusAreas;
-      const rules = event.participationRules || event.rules;
+      const objectives =
+        event.objectives || event.keyDetails || event.detailedInfo || event.focusAreas;
+      const rules = [
+        ...entries(event.participationRules || event.rules),
+        ...entries(event.reminders),
+        ...(event.requirements && typeof event.requirements === "object" && !Array.isArray(event.requirements)
+          ? [
+              ...entries(event.requirements.required),
+              ...entries(event.requirements.recommended),
+            ]
+          : entries(event.requirements)),
+      ];
+      const infoCard = (label, value, className = "") =>
+        `<div class="student-event-info-card${className ? ` ${className}` : ""}"><strong>${escapeHTML(label)}</strong><span>${escapeHTML(value || "Not specified")}</span></div>`;
+      const scheduleRows = dailySchedules
+        .map((schedule, index) => {
+          const scheduleDate = schedule.date || schedule.dateISO || "";
+          const scheduleLabel =
+            schedule.label ||
+            (index === 0
+              ? "First Day"
+              : index === dailySchedules.length - 1
+                ? "Last Day"
+                : `Day ${index + 1}`);
+          return `<div class="student-event-daily-row"><strong>${escapeHTML(scheduleLabel)}</strong><span>${escapeHTML(dateText(scheduleDate))}</span><strong>Time Start</strong><span>${escapeHTML(timeText(schedule.timeStart) || "Not specified")}</span><strong>Time End</strong><span>${escapeHTML(timeText(schedule.timeEnd) || "Not specified")}</span></div>`;
+        })
+        .join("");
       detailContent.innerHTML = `
-        <div class="student-event-top"><div><h2 class="student-event-title" id="studentEventTitle">${escapeHTML(event.title || "Untitled event")}</h2><p><strong>Event Organizer:</strong> ${escapeHTML(event.organizerName || event.organizer || event.organization || event.source || "Not specified")}</p><p><strong>Source:</strong> ${escapeHTML([event.source || event.campus || event.office, event.sourceOther].filter(Boolean).join(" · ") || "Not specified")}</p></div><div><p class="student-event-category-label">Categories:</p><div class="student-event-categories">${badgeList.map((category) => `<span class="student-event-pill student-event-pill--${categoryTone(text(category))}">${escapeHTML(text(category))}</span>`).join("")}</div></div></div>
-        <div class="student-event-info"><div>${icon('<rect x="3" y="4.5" width="14" height="13" rx="1.5"/><path d="M6 2.5v4M14 2.5v4M3 8h14"/>')}<strong>Date</strong>${escapeHTML(dateText(event.dateISO || event.date))}</div><div>${icon('<circle cx="10" cy="10" r="7"/><path d="M10 6v4l2.5 2"/>')}<strong>Start time</strong>${escapeHTML(times[0])}</div><div>${icon('<circle cx="10" cy="10" r="7"/><path d="M10 6v4l2.5 2"/>')}<strong>End time</strong>${escapeHTML(times[1])}</div><div>${icon('<path d="M10 17.5S15.5 12.8 15.5 8.5a5.5 5.5 0 1 0-11 0c0 4.3 5.5 9 5.5 9Z"/><circle cx="10" cy="8.3" r="2"/>')}<strong>Venue</strong>${escapeHTML([event.location || event.venue || "Not specified", event.room].filter(Boolean).join(" · "))}</div><div>${icon('<circle cx="7" cy="7" r="2.5"/><path d="M2.5 16a4.5 4.5 0 0 1 9 0M13 5a2.5 2.5 0 0 1 0 4.8M13 12a4 4 0 0 1 4.5 4"/>')}<strong>${total === null ? "Capacity" : `Max Capacity ${total}`}</strong>${total === null ? "No limit" : `${available} slots open`}<small>${total === null ? "Open registration" : `${participants} participants · ${available} of ${total} slots open`}</small></div></div>
-        <div class="student-event-facts"><div><strong>Registration Deadline</strong>${escapeHTML(event.registrationDeadline || "Not specified")}</div><div><strong>Weather Contingency</strong>${escapeHTML(weatherContingency)}</div><div><strong>Attendance Required</strong>${escapeHTML(typeof event.attendanceRequired === "boolean" ? (event.attendanceRequired ? "Yes" : "No") : event.attendanceRequired || "Not specified")}</div></div>
+        <header class="student-event-top">
+          <div class="student-event-heading">
+            <h2 class="student-event-title" id="studentEventTitle">${escapeHTML(event.title || event.eventName || "Untitled event")}</h2>
+            <p><strong>Event Organizer:</strong> ${escapeHTML(event.organizerName || event.organizer || event.organization || "Not specified")}</p>
+            <p><strong>Event Source:</strong> ${escapeHTML(source)}</p>
+          </div>
+          <div class="student-event-header-meta">
+            <div><strong>Categories:</strong><div class="student-event-categories">${badgeList.map((category) => `<span class="student-event-pill student-event-pill--${categoryTone(text(category))}">${escapeHTML(text(category))}</span>`).join("")}</div></div>
+            <p><strong>Target Audience:</strong> ${escapeHTML(targetAudience)}</p>
+            <p><strong>Attendance:</strong> ${escapeHTML(attendanceRequired)}</p>
+          </div>
+        </header>
+        <section class="student-event-info" aria-label="Event schedule and capacity">
+          ${infoCard("Date Start", dateText(dateStart))}
+          ${infoCard("Date End", dateText(dateEnd))}
+          ${differentTimesByDay ? "" : infoCard("Time Start", times[0])}
+          ${differentTimesByDay ? "" : infoCard("Time End", times[1])}
+          ${infoCard("Venue", [venue, event.room || event.roomNumber].filter(Boolean).join(" · "))}
+          ${infoCard("Venue Type", venueType)}
+          ${infoCard("Max Capacity", total === null ? "No limit" : `${total} People`)}
+          ${infoCard("Expected Participants", String(participants))}
+          ${infoCard("Slots Left", total === null ? "Open registration" : `${slotsLeft} of ${total}`)}
+        </section>
+        ${differentTimesByDay ? `<section class="student-event-daily-schedule"><h3>Different Time Per Day</h3><div>${scheduleRows}</div></section>` : ""}
+        <section class="student-event-section student-event-registration">
+          <h3>Registration Information</h3>
+          <div class="student-event-registration-grid">
+            <p><strong>Registration Start:</strong> ${escapeHTML(dateTimeText(event.registrationStart))}</p>
+            <p><strong>Registration End:</strong> ${escapeHTML(dateTimeText(event.registrationEnd || event.registrationDeadline))}</p>
+            ${event.registrationInfo ? `<p>${escapeHTML(event.registrationInfo)}</p>` : ""}
+          </div>
+        </section>
         <section class="student-event-section student-event-description"><h3>Event Description</h3>${description.map((paragraph) => `<p>${escapeHTML(paragraph)}</p>`).join("")}</section>
-        <div class="student-event-two-col"><section class="student-event-section"><h3>Event Key Details</h3>${bullets(keyDetails)}</section><section class="student-event-section"><h3>Requirements &amp; Reminders</h3>${bullets(requirements)}</section></div>
-        <div class="student-event-two-col"><section class="student-event-section"><h3>Participation Rules</h3>${bullets(rules)}</section><section class="student-event-section student-event-contact"><h3>Contact Person</h3><p><strong>${escapeHTML(person)}</strong></p>${role ? `<p>${escapeHTML(role)}</p>` : ""}${email ? `<p><a href="mailto:${escapeHTML(email)}">${escapeHTML(email)}</a></p>` : ""}${phone ? `<p>${escapeHTML(phone)}</p>` : ""}</section></div>
-        <section class="student-event-section"><h3>Participant Documents</h3><p>Participants should download and fill this up before joining the event.</p>${attachmentsMarkup(event)}</section>`;
+        <section class="student-event-section"><h3>Rationale</h3>${event.rationale ? `<p>${escapeHTML(event.rationale)}</p>` : "<p>Not specified</p>"}</section>
+        <section class="student-event-section"><h3>Objectives</h3>${bullets(objectives)}</section>
+        <section class="student-event-section"><h3>Rules &amp; Reminders</h3>${bullets(rules)}</section>
+        <div class="student-event-bottom-grid">
+          <section class="student-event-section student-event-contact"><h3>Contact Person</h3><p><strong>Name:</strong> ${escapeHTML(person)}</p>${role ? `<p><strong>Role:</strong> ${escapeHTML(role)}</p>` : ""}${email ? `<p><strong>Email:</strong> <a href="mailto:${escapeHTML(email)}">${escapeHTML(email)}</a></p>` : ""}${phone ? `<p><strong>Number:</strong> ${escapeHTML(phone)}</p>` : ""}</section>
+          <section class="student-event-section student-event-documents"><h3>Participant Documents</h3><p>Open the Google Drive links to download the required files.</p>${attachmentsMarkup(event)}<small>(Make sure to download and fill up these files. Its needed for participation)</small></section>
+        </div>`;
     }
 
     function updateAction() {
@@ -739,7 +850,7 @@
         ? "Processing..."
         : registered
           ? "Cancel Participation"
-          : "Participate Now";
+          : "Register";
       actionButton.classList.toggle("is-cancel", registered);
       actionButton.disabled = pending || Boolean(reason);
       actionButton.title = reason;

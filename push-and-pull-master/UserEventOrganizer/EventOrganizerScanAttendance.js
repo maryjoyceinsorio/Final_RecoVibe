@@ -1,7 +1,7 @@
-import { auth, db, rtdb, functions, isFirebaseConfigured, isRtdbConfigured } from "../UserStudent/firebaseConfig.js";
+import { auth, authReady, db, rtdb, functions, isFirebaseConfigured, isRtdbConfigured } from "../UserStudent/firebaseConfig.js";
 import { onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { ref, onValue, off, get, child, set } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
-import { collection, getDocs, doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { collection, getDocs, doc, getDoc, query, where } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
 
 // DOM Element References
@@ -82,6 +82,32 @@ const btnExportCsv = document.getElementById("btnExportCsv");
 // Application State
 let currentEvents = [];
 let currentEventId = null;
+const scanUrlParams = new URLSearchParams(window.location.search);
+const requestedEventId = scanUrlParams.get("eventId")?.trim() || "";
+const requestedEventContext = {
+  id: requestedEventId,
+  name: scanUrlParams.get("eventName")?.trim() || "",
+  dateISO: scanUrlParams.get("eventDate")?.trim() || "",
+  startAt: scanUrlParams.get("eventTime")?.trim() || "",
+  venue: scanUrlParams.get("eventVenue")?.trim() || "",
+  status: "published",
+  allowWalkIn: false,
+};
+if (requestedEventContext.id && requestedEventContext.name) {
+  const dateLabel = requestedEventContext.dateISO ? ` (${requestedEventContext.dateISO})` : "";
+  eventSelect?.replaceChildren(new Option(
+    `${requestedEventContext.name}${dateLabel}`,
+    requestedEventContext.id,
+    true,
+    true,
+  ));
+  if (metaDateTime) {
+    metaDateTime.textContent = requestedEventContext.dateISO
+      ? `${requestedEventContext.dateISO}${requestedEventContext.startAt ? ` · ${requestedEventContext.startAt}` : ""}`
+      : requestedEventContext.startAt || "Date TBA";
+  }
+  if (metaVenue) metaVenue.textContent = requestedEventContext.venue || "PUP Biñan Campus";
+}
 let activeAttendanceRef = null;
 let currentAttendanceRows = [];
 let currentAbsentRows = [];
@@ -156,7 +182,7 @@ let isTeacherSession = false;
 })();
 
 // Task 1: Auth & Role Guard (Must be event_organizer, teacher, or admin)
-onAuthStateChanged(auth, async (user) => {
+authReady.then(() => onAuthStateChanged(auth, async (user) => {
   if (!user) {
     // If running in development / demo mode with localStorage session, allow preview
     const localOrganizer = localStorage.getItem("recovibeOrganizerId");
@@ -180,7 +206,14 @@ onAuthStateChanged(auth, async (user) => {
     }
   }
 
-  initApp();
+  initApp().catch((error) => {
+    console.error("Could not initialize attendance events:", error);
+    if (eventSelect) {
+      eventSelect.replaceChildren(new Option("Couldn't load events. Please refresh.", ""));
+    }
+  });
+})).catch((error) => {
+  console.error("Could not restore organizer authentication state:", error);
 });
 
 if (organizerLogout) {
@@ -387,15 +420,16 @@ if (btnWalkInConfirm) {
 async function loadEventsList() {
   const eventsMap = new Map();
 
-  // 1. Load from RTDB events (only published and completed events appear in selector)
-  if (rtdb) {
+  // Start the realtime load without blocking the Firestore event list.
+  const realtimeEventsPromise = (async () => {
+    if (!rtdb) return;
     try {
       const snap = await get(ref(rtdb, "events"));
       const rtdbEvents = snap.val();
       if (rtdbEvents && typeof rtdbEvents === "object") {
         Object.entries(rtdbEvents).forEach(([id, val]) => {
           if (val && typeof val === "object") {
-            const status = val.status || "published";
+            const status = String(val.status || "published").trim().toLowerCase();
             if (status === "published" || status === "completed") {
               eventsMap.set(String(id), {
                 id: String(id),
@@ -415,36 +449,64 @@ async function loadEventsList() {
     } catch (e) {
       console.warn("RTDB events fetch notice:", e);
     }
-  }
+  })();
 
-  // 2. Load from Firestore
+  // Load Firestore events and tolerate an unavailable query without discarding
+  // results from the other queries.
   if (db) {
-    try {
-      const querySnap = await getDocs(collection(db, "events"));
-      querySnap.forEach((d) => {
-        const data = d.data();
-        const id = d.id;
-        const status = data.status || "published";
-        if (status === "published" || status === "completed") {
-          eventsMap.set(String(id), {
-            id: String(id),
-            name: data.eventName || data.title || `Event #${id}`,
-            startAt: data.startTime || data.dateISO || data.eventDate || "",
-            endAt: data.endTime || "",
-            venue: data.venue || data.location || "PUP Biñan Campus",
-            dateISO: data.eventDate || data.dateISO || "",
-            status: status,
-            completedAt: data.completedAt || null,
-            allowWalkIn: Boolean(data.allowWalkIn),
-          });
-        }
-      });
-    } catch (e) {
-      console.warn("Firestore events fetch notice:", e);
+    const eventsRef = collection(db, "events");
+    const eventRequests = [
+      getDocs(query(eventsRef, where("status", "in", ["published", "completed"]))),
+      getDocs(query(eventsRef, where("published", "==", true))),
+      getDocs(query(eventsRef, where("isPublished", "==", true))),
+    ];
+    if (requestedEventId) {
+      eventRequests.push(getDoc(doc(db, "events", requestedEventId)));
     }
+
+    const eventResults = await Promise.allSettled(eventRequests);
+    const eventDocuments = new Map();
+    eventResults.forEach((result, index) => {
+      if (result.status === "rejected") {
+        console.warn("Firestore attendance event query notice:", result.reason);
+        return;
+      }
+
+      const resultValue = result.value;
+      if (Array.isArray(resultValue.docs)) {
+        resultValue.docs.forEach((document) => {
+          eventDocuments.set(document.id, document);
+        });
+      } else if (index === eventRequests.length - 1 && resultValue.exists()) {
+        eventDocuments.set(resultValue.id, resultValue);
+      }
+    });
+
+    eventDocuments.forEach((document) => {
+      const data = document.data();
+      const id = document.id;
+      let status = String(data.status || "").trim().toLowerCase();
+      if (!["published", "completed"].includes(status) &&
+          (data.published === true || data.isPublished === true)) {
+        status = "published";
+      }
+      if (status === "published" || status === "completed") {
+        eventsMap.set(String(id), {
+          id: String(id),
+          name: data.eventName || data.title || `Event #${id}`,
+          startAt: data.startTime || data.dateISO || data.eventDate || "",
+          endAt: data.endTime || "",
+          venue: data.venue || data.location || "PUP Biñan Campus",
+          dateISO: data.eventDate || data.dateISO || "",
+          status: status,
+          completedAt: data.completedAt || null,
+          allowWalkIn: Boolean(data.allowWalkIn),
+        });
+      }
+    });
   }
 
-  // 3. Load from localStorage (Organizer & Teacher events)
+  // Load local events before rendering so Firestore results can be supplemented.
   ["recovibeOrganizerEvents", "recovibeTeacherEvents", "recovibeEvents"].forEach((storageKey) => {
     try {
       const stored = JSON.parse(localStorage.getItem(storageKey) || "[]");
@@ -472,6 +534,14 @@ async function loadEventsList() {
     } catch {}
   });
 
+  if (requestedEventContext.id && !eventsMap.has(requestedEventContext.id) && requestedEventContext.name) {
+    eventsMap.set(requestedEventContext.id, requestedEventContext);
+  }
+
+  currentEvents = Array.from(eventsMap.values());
+  populateEventDropdown();
+
+  await realtimeEventsPromise;
   currentEvents = Array.from(eventsMap.values());
   populateEventDropdown();
 }
@@ -498,12 +568,10 @@ function populateEventDropdown() {
   if (!eventSelect) return;
   eventSelect.innerHTML = "";
 
-  const urlParams = new URLSearchParams(window.location.search);
-  const targetEventId = urlParams.get("eventId");
   let bestMatchEvent = null;
 
-  if (targetEventId) {
-    bestMatchEvent = currentEvents.find((e) => String(e.id) === String(targetEventId));
+  if (requestedEventId) {
+    bestMatchEvent = currentEvents.find((e) => String(e.id) === requestedEventId);
   }
 
   const todayStr = new Date().toISOString().slice(0, 10);
@@ -537,7 +605,9 @@ function populateEventDropdown() {
 
   if (bestMatchEvent) {
     eventSelect.value = bestMatchEvent.id;
-    selectEvent(bestMatchEvent.id);
+    if (String(currentEventId) !== String(bestMatchEvent.id)) {
+      selectEvent(bestMatchEvent.id);
+    }
   }
 
   eventSelect.onchange = (e) => {
@@ -1483,7 +1553,7 @@ async function handleLocalAttendanceProcessing(eventId, token, allowWalkIn) {
 
   if (db) {
     try {
-      const snap = await getDoc(doc(db, "studentUser", uid));
+      const snap = await getDoc(doc(db, "users", uid));
       if (snap.exists()) {
         const d = snap.data();
         studentData = {
@@ -1850,4 +1920,3 @@ async function initApp() {
     }
   }
 }
-

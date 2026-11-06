@@ -53,9 +53,9 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
   const submitButton = document.getElementById("settings-item-submit");
 
   const defaultOrganizations = [
-    { code: "IBITS", name: "Information Technology and Business Intelligence Society" },
-    { code: "ACES", name: "Association of Computer Engineering Students" },
-    { code: "CSC", name: "College Student Council" },
+    { code: "IBITS", name: "Information Technology and Business Intelligence Society", adviserEmail: "" },
+    { code: "ACES", name: "Association of Computer Engineering Students", adviserEmail: "" },
+    { code: "CSC", name: "College Student Council", adviserEmail: "" },
   ];
 
   const defaultApprovalStages = [
@@ -63,30 +63,35 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
       id: "stage-1",
       name: "Organization President",
       reviewer: "Organization President",
+      reviewerEmail: "",
       required: true,
     },
     {
       id: "stage-2",
       name: "Organization Adviser Review",
       reviewer: "Organization Adviser (Sir Migs)",
+      reviewerEmail: "",
       required: true,
     },
     {
       id: "stage-3",
       name: "OSAS Review",
       reviewer: "Ma'am Joyce - OSAS",
+      reviewerEmail: "",
       required: true,
     },
     {
       id: "stage-4",
       name: "Director Review",
       reviewer: "Ma'am Margarita - Director",
+      reviewerEmail: "",
       required: true,
     },
     {
       id: "stage-5",
       name: "Final Approval & Publishing",
       reviewer: "Authorized approver(s)",
+      reviewerEmail: "",
       required: true,
     },
   ];
@@ -112,24 +117,34 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
   let settingsReady = false;
   let initializingDocument = false;
   let backfillingDefaults = null;
+  let pendingSettingsSync = null;
   let unsubscribeSettings = null;
+  const pendingSettingsKey = "recovibe_system_settings_pending";
 
   // Cache loading
   try {
+    const cachedSettings = localStorage.getItem("recovibeSystemSettings");
+    if (cachedSettings) {
+      currentSettings = normalizedSettings(JSON.parse(cachedSettings));
+      workingApprovalStages = JSON.parse(JSON.stringify(currentSettings.approvalStages));
+      workingOrganizations = JSON.parse(JSON.stringify(currentSettings.organizations));
+      workingMainOrg = currentSettings.mainOrganization;
+    }
+
     const cachedStages = localStorage.getItem("recovibe_approval_stages");
     if (cachedStages) {
       const parsed = JSON.parse(cachedStages);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        workingApprovalStages = parsed;
-        currentSettings.approvalStages = parsed;
+        workingApprovalStages = normalizeApprovalStages(parsed);
+        currentSettings.approvalStages = workingApprovalStages;
       }
     }
     const cachedOrgs = localStorage.getItem("recovibe_organizations");
     if (cachedOrgs) {
       const parsed = JSON.parse(cachedOrgs);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        workingOrganizations = parsed;
-        currentSettings.organizations = parsed;
+        workingOrganizations = normalizeOrganizations(parsed);
+        currentSettings.organizations = workingOrganizations;
       }
     }
     const cachedMainOrg = localStorage.getItem("recovibe_main_org");
@@ -145,7 +160,9 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
     if (cachedAllowedDocs) {
       currentSettings.allowedDocumentTypes = cachedAllowedDocs;
     }
-  } catch (e) {}
+  } catch (error) {
+    console.warn("Could not restore cached system settings:", error);
+  }
 
   function showMessage(message, isError = false) {
     if (!statusMessage) return;
@@ -245,11 +262,13 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
         return {
           code: item.trim(),
           name: defaultNameMap[item.trim()] || `${item.trim()} Student Organization`,
+          adviserEmail: "",
         };
       }
       return {
         code: item && item.code ? String(item.code).trim() : (item.name ? String(item.name).trim() : "ORG"),
         name: item && item.name && item.name !== item.code ? String(item.name).trim() : (defaultNameMap[item?.code] || String(item?.name || item?.code || "Organization")),
+        adviserEmail: String(item?.adviserEmail || item?.adviser?.email || "").trim().toLowerCase(),
       };
     });
   }
@@ -261,22 +280,112 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
         id: stage && stage.id ? String(stage.id) : `stage-${idx + 1}`,
         name: stage && typeof stage.name === "string" ? stage.name : `Stage ${idx + 1}`,
         reviewer: stage && typeof stage.reviewer === "string" ? stage.reviewer : "",
+        reviewerEmail: String(stage?.reviewerEmail || stage?.email || "").trim().toLowerCase(),
         required: stage && typeof stage.required === "boolean" ? stage.required : true,
       }));
-      if (!stages.some((s) => (s.name || "").toLowerCase().includes("president"))) {
-        stages = [
-          {
-            id: "stage-pres",
-            name: "Organization President",
-            reviewer: "Organization President",
-            required: true,
-          },
-          ...stages,
-        ];
-      }
     }
     return stages;
   }
+
+  function cacheSettings(settings, markPending = false) {
+    try {
+      localStorage.setItem("recovibeSystemSettings", JSON.stringify(settings));
+      localStorage.setItem("recovibe_approval_stages", JSON.stringify(settings.approvalStages));
+      localStorage.setItem("recovibe_organizations", JSON.stringify(settings.organizations));
+      localStorage.setItem("recovibe_main_org", settings.mainOrganization || "");
+      localStorage.setItem("recovibe_max_upload_size", String(settings.maxUploadSizeMb));
+      localStorage.setItem("recovibe_allowed_doc_types", settings.allowedDocumentTypes || "");
+      if (markPending) {
+        const savedAt = Date.now();
+        localStorage.setItem(pendingSettingsKey, JSON.stringify({
+          settings,
+          savedAt,
+          revision: `${savedAt}-${Math.random().toString(36).slice(2)}`,
+        }));
+      }
+      return true;
+    } catch (error) {
+      console.error("Could not cache system settings locally:", error);
+      return false;
+    }
+  }
+
+  function applySettingsToControls(settings) {
+    currentSettings = normalizedSettings(settings);
+    workingMainOrg = currentSettings.mainOrganization;
+    workingOrganizations = JSON.parse(JSON.stringify(currentSettings.organizations));
+    workingApprovalStages = JSON.parse(JSON.stringify(currentSettings.approvalStages));
+    if (maxUploadInput) maxUploadInput.value = currentSettings.maxUploadSizeMb;
+    if (allowedDocsInput) allowedDocsInput.value = currentSettings.allowedDocumentTypes;
+    if (registrationToggle) {
+      registrationToggle.checked = currentSettings.registrationEnabled !== false;
+      updateToggleBadge("registration", currentSettings.registrationEnabled !== false);
+    }
+    if (loginToggle) {
+      loginToggle.checked = currentSettings.loginEnabled !== false;
+      updateToggleBadge("login", currentSettings.loginEnabled !== false);
+    }
+    renderOrganizations();
+    renderApprovalStages();
+  }
+
+  async function syncPendingSettings() {
+    if (!settingsRef || !db || !navigator.onLine) return false;
+    if (pendingSettingsSync) return pendingSettingsSync;
+
+    pendingSettingsSync = (async () => {
+      let synced = false;
+      while (navigator.onLine) {
+        let pending;
+        try {
+          pending = JSON.parse(localStorage.getItem(pendingSettingsKey) || "null");
+        } catch (error) {
+          console.error("Could not read pending system settings:", error);
+          return false;
+        }
+        if (!pending?.settings) return synced;
+
+        const revision = pending.revision || pending.savedAt;
+        await setDoc(settingsRef, {
+          ...normalizedSettings(pending.settings),
+          updatedAt: serverTimestamp(),
+          updatedBy: actorIdentifier(),
+        }, { merge: true });
+        synced = true;
+
+        let latestPending;
+        try {
+          latestPending = JSON.parse(localStorage.getItem(pendingSettingsKey) || "null");
+        } catch (error) {
+          console.error("Could not verify pending system settings:", error);
+          return false;
+        }
+        if (!latestPending?.settings) return true;
+        if ((latestPending.revision || latestPending.savedAt) !== revision) continue;
+
+        localStorage.removeItem(pendingSettingsKey);
+        applySettingsToControls(pending.settings);
+        cacheSettings(currentSettings);
+        showMessage("Pending system settings synced to the cloud.");
+        return true;
+      }
+      return synced;
+    })();
+
+    try {
+      return await pendingSettingsSync;
+    } catch (error) {
+      console.error("Could not sync pending system settings:", error);
+      showMessage("Changes are saved locally; cloud sync is still pending.", true);
+      return false;
+    } finally {
+      pendingSettingsSync = null;
+    }
+  }
+
+  window.addEventListener("online", () => {
+    void syncPendingSettings();
+  });
 
   function normalizedSettings(data) {
     return {
@@ -370,6 +479,14 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
           aria-label="Full Organization Name"
           ${!settingsReady ? "disabled" : ""}
         />
+        <input
+          type="email"
+          class="settings-org-adviser-input"
+          value="${escapeHtml(org.adviserEmail || "")}"
+          placeholder="Adviser email"
+          aria-label="${escapeHtml(org.code || "Organization")} adviser email"
+          ${!settingsReady ? "disabled" : ""}
+        />
         <button class="settings-org-remove-btn" type="button" aria-label="Remove ${escapeHtml(org.code || "organization")}" ${!settingsReady ? "disabled" : ""}>
           ✕
         </button>
@@ -378,6 +495,7 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
       const badge = row.querySelector(".settings-org-badge");
       const codeInput = row.querySelector(".settings-org-code-input");
       const nameInput = row.querySelector(".settings-org-name-input");
+      const adviserInput = row.querySelector(".settings-org-adviser-input");
       const removeBtn = row.querySelector(".settings-org-remove-btn");
 
       if (codeInput) {
@@ -401,6 +519,14 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
         });
       }
 
+      if (adviserInput) {
+        adviserInput.addEventListener("input", (e) => {
+          org.adviserEmail = e.target.value.trim().toLowerCase();
+          adviserInput.classList.remove("is-invalid");
+          if (stagesErrorEl) stagesErrorEl.hidden = true;
+        });
+      }
+
       if (removeBtn) {
         removeBtn.addEventListener("click", () => {
           removeOrganization(index);
@@ -415,7 +541,7 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
 
   function addOrganization() {
     if (!settingsReady) return;
-    workingOrganizations.push({ code: "", name: "" });
+    workingOrganizations.push({ code: "", name: "", adviserEmail: "" });
     renderOrganizations();
     if (orgListEl) {
       const lastRow = orgListEl.lastElementChild;
@@ -470,15 +596,18 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
 
         <div class="settings-stage-body">
           <div class="settings-stage-col-name">
-            <input
-              type="text"
-              class="settings-stage-input settings-stage-name-input"
-              data-field="name"
-              value="${escapeHtml(stage.name)}"
-              placeholder="Stage name"
-              aria-label="Stage name"
-              ${!settingsReady ? "disabled" : ""}
-            />
+            <label class="settings-stage-field-label">
+              <span>Stage name</span>
+              <input
+                type="text"
+                class="settings-stage-input settings-stage-name-input"
+                data-field="name"
+                value="${escapeHtml(stage.name)}"
+                placeholder="Stage name"
+                aria-label="Stage name"
+                ${!settingsReady ? "disabled" : ""}
+              />
+            </label>
             <label class="settings-stage-required-label">
               <input
                 type="checkbox"
@@ -491,15 +620,30 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
           </div>
 
           <div class="settings-stage-col-reviewer">
-            <input
-              type="text"
-              class="settings-stage-input settings-stage-reviewer-input"
-              data-field="reviewer"
-              value="${escapeHtml(stage.reviewer)}"
-              placeholder="Assign reviewer"
-              aria-label="Assign reviewer"
-              ${!settingsReady ? "disabled" : ""}
-            />
+            <label class="settings-stage-field-label">
+              <span>Reviewer display name</span>
+              <input
+                type="text"
+                class="settings-stage-input settings-stage-reviewer-input"
+                data-field="reviewer"
+                value="${escapeHtml(stage.reviewer)}"
+                placeholder="Reviewer name"
+                aria-label="Reviewer display name"
+                ${!settingsReady ? "disabled" : ""}
+              />
+            </label>
+            <label class="settings-stage-field-label">
+              <span>Reviewer account email (optional)</span>
+              <input
+                type="email"
+                class="settings-stage-input settings-stage-reviewer-email-input"
+                data-field="reviewerEmail"
+                value="${escapeHtml(stage.reviewerEmail || "")}"
+                placeholder="name@example.com"
+                aria-label="Reviewer account email for ${escapeHtml(stage.name)} (optional)"
+                ${!settingsReady ? "disabled" : ""}
+              />
+            </label>
           </div>
         </div>
 
@@ -512,6 +656,7 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
       const downBtn = card.querySelector(".settings-reorder-down");
       const nameInput = card.querySelector(".settings-stage-name-input");
       const reviewerInput = card.querySelector(".settings-stage-reviewer-input");
+      const reviewerEmailInput = card.querySelector(".settings-stage-reviewer-email-input");
       const reqCheckbox = card.querySelector(".settings-stage-required-checkbox");
       const removeBtn = card.querySelector(".settings-stage-remove-btn");
 
@@ -537,6 +682,13 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
           if (stagesErrorEl) stagesErrorEl.hidden = true;
         });
       }
+      if (reviewerEmailInput) {
+        reviewerEmailInput.addEventListener("input", (e) => {
+          stage.reviewerEmail = e.target.value.trim().toLowerCase();
+          reviewerEmailInput.classList.remove("is-invalid");
+          if (stagesErrorEl) stagesErrorEl.hidden = true;
+        });
+      }
       if (reqCheckbox) {
         reqCheckbox.addEventListener("change", (e) => {
           stage.required = e.target.checked;
@@ -559,6 +711,7 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
       id: `stage-${Date.now()}`,
       name: `Stage ${newIndex}`,
       reviewer: "",
+      reviewerEmail: "",
       required: true,
     };
     workingApprovalStages.push(newStage);
@@ -629,6 +782,12 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
         flagValidationError(inp, `Please enter an organization name for "${code}".`);
         return;
       }
+      const adviserEmail = String(o.adviserEmail || "").trim();
+      if (adviserEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(adviserEmail)) {
+        const inp = row?.querySelector(".settings-org-adviser-input");
+        flagValidationError(inp, `Enter a valid adviser email for "${code}", or leave it blank.`);
+        return;
+      }
     }
 
     // Check duplicate organization codes (case-insensitive)
@@ -667,6 +826,21 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
         return;
       }
       seenOrgNames.set(nameKey, i);
+    }
+
+    const seenAdviserEmails = new Map();
+    for (let i = 0; i < workingOrganizations.length; i++) {
+      const email = String(workingOrganizations[i].adviserEmail || "").trim().toLowerCase();
+      if (!email) continue;
+      if (seenAdviserEmails.has(email)) {
+        const row = orgListEl?.querySelector(`[data-index="${i}"]`);
+        const firstRow = orgListEl?.querySelector(`[data-index="${seenAdviserEmails.get(email)}"]`);
+        const input = row?.querySelector(".settings-org-adviser-input");
+        firstRow?.querySelector(".settings-org-adviser-input")?.classList.add("is-invalid");
+        flagValidationError(input, "An adviser email can only be assigned to one organization.");
+        return;
+      }
+      seenAdviserEmails.set(email, i);
     }
 
     // 2. Validate General Settings
@@ -723,6 +897,27 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
         flagValidationError(inp, `Please assign a reviewer for Step ${i + 1} ("${sName}").`);
         return;
       }
+      const reviewerEmail = String(s.reviewerEmail || "").trim();
+      if (reviewerEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(reviewerEmail)) {
+        const inp = card?.querySelector(".settings-stage-reviewer-email-input");
+        flagValidationError(inp, `Enter a valid reviewer email for Step ${i + 1}, or leave it blank.`);
+        return;
+      }
+    }
+
+    const seenReviewerEmails = new Map();
+    for (let i = 0; i < workingApprovalStages.length; i++) {
+      const email = String(workingApprovalStages[i].reviewerEmail || "").trim().toLowerCase();
+      if (!email) continue;
+      if (seenReviewerEmails.has(email)) {
+        const card = stagesList?.querySelector(`[data-index="${i}"]`);
+        const firstCard = stagesList?.querySelector(`[data-index="${seenReviewerEmails.get(email)}"]`);
+        const input = card?.querySelector(".settings-stage-reviewer-email-input");
+        firstCard?.querySelector(".settings-stage-reviewer-email-input")?.classList.add("is-invalid");
+        flagValidationError(input, "A reviewer email can only be assigned to one approval stage.");
+        return;
+      }
+      seenReviewerEmails.set(email, i);
     }
 
     // Check duplicate stage names (case-insensitive)
@@ -755,7 +950,7 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
 
     openConfirmationDialog({
       title: "Save System Settings?",
-      text: `Are you sure you want to save changes to the system settings? These updates (General settings, ${workingOrganizations.length} organization(s) in directory, and ${workingApprovalStages.length} sequential approval stages) will reflect immediately across RECOVIBE.`,
+      text: `Are you sure you want to save changes to the system settings? These updates (General settings, ${workingOrganizations.length} organization(s) in directory, and ${workingApprovalStages.length} sequential approval stages) will apply to new proposals. Existing proposals keep their current approval workflow.`,
       yesText: "Yes, Save",
       cancelText: "No, Cancel",
       onConfirm: async () => {
@@ -778,19 +973,16 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
     currentSettings.organizations = nextOrgs;
     currentSettings.approvalStages = nextStages;
 
-    try {
-      localStorage.setItem("recovibe_approval_stages", JSON.stringify(nextStages));
-      localStorage.setItem("recovibe_organizations", JSON.stringify(nextOrgs));
-      localStorage.setItem("recovibe_main_org", nextMainOrg);
-      localStorage.setItem("recovibe_max_upload_size", String(nextMaxUpload));
-      localStorage.setItem("recovibe_allowed_doc_types", nextAllowedDocs);
-      localStorage.setItem("recovibeSystemSettings", JSON.stringify(currentSettings));
-    } catch (e) {}
+    if (!cacheSettings(currentSettings, Boolean(settingsRef))) {
+      showMessage("Could not save system settings to the local cache.", true);
+      return false;
+    }
 
     renderOrganizations();
     renderApprovalStages();
 
     if (!settingsRef) {
+      localStorage.removeItem(pendingSettingsKey);
       showMessage("System settings saved locally.");
       return true;
     }
@@ -821,12 +1013,13 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
         console.warn("Audit log notice:", auditErr);
       }
 
+      localStorage.removeItem(pendingSettingsKey);
       showMessage("System settings saved successfully.");
       return true;
     } catch (err) {
       console.error("Unable to save system settings:", err);
-      showMessage("Could not save system settings. Please try again.", true);
-      return false;
+      showMessage("Saved locally. Cloud sync is pending and will retry when the connection is available.", true);
+      return true;
     }
   }
 
@@ -995,11 +1188,13 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
   }
 
   async function persistSystemToggles() {
-    try {
-      localStorage.setItem("recovibeSystemSettings", JSON.stringify(currentSettings));
-    } catch (_) {}
+    if (!cacheSettings(currentSettings, Boolean(settingsRef))) {
+      showMessage("Could not save access settings to the local cache.", true);
+      return false;
+    }
 
     if (!settingsRef) {
+      localStorage.removeItem(pendingSettingsKey);
       showMessage("Access and registration settings updated locally.");
       return true;
     }
@@ -1026,12 +1221,13 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
         console.warn("Audit log notice:", auditErr);
       }
 
+      localStorage.removeItem(pendingSettingsKey);
       showMessage("Access and registration settings saved.");
       return true;
     } catch (err) {
       console.error("Unable to save access settings:", err);
-      showMessage("Could not save access settings. Please try again.", true);
-      return false;
+      showMessage("Saved locally. Cloud sync is pending and will retry when the connection is available.", true);
+      return true;
     }
   }
 
@@ -1157,17 +1353,18 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
       if (!snapshot.exists()) {
         if (initializingDocument) return;
         initializingDocument = true;
-        setDoc(settingsRef, {
-          ...defaultSettings,
-          updatedAt: serverTimestamp(),
-        })
-          .catch((error) => {
-            console.error("Unable to initialize system settings:", error);
-            showMessage("Could not initialize system settings.", true);
-          })
+        const initialSettings = normalizedSettings(currentSettings);
+        cacheSettings(initialSettings, true);
+        syncPendingSettings()
           .finally(() => {
             initializingDocument = false;
           });
+        return;
+      }
+
+      if (localStorage.getItem(pendingSettingsKey)) {
+        setReady(true);
+        void syncPendingSettings();
         return;
       }
 
@@ -1203,6 +1400,7 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
         loginToggle.checked = currentSettings.loginEnabled !== false;
         updateToggleBadge("login", currentSettings.loginEnabled !== false);
       }
+      cacheSettings(currentSettings);
 
       const hasMissingFields = Object.keys(defaultSettings).some(
         (field) => !(field in data),

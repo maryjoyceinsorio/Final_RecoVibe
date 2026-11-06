@@ -3,8 +3,10 @@ import {
   onSnapshot,
   orderBy,
   query,
+  where,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
+import { auth, authReady, db, functions, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
+import { syncApproverOrganization } from "../organizationScope.js";
 
 (() => {
   "use strict";
@@ -487,15 +489,31 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
     const clear = root.querySelector("#clearEvents");
     if (clear) clear.style.display = hasFilters() ? "inline-flex" : "none";
   }).observe(root, { childList: true, subtree: true });
-  function init() {
+  async function init() {
     if (!isFirebaseConfigured || !db) {
       root.innerHTML =
         '<div class="admin-error">Event data is unavailable. Please contact support.</div>';
       return;
     }
     root.innerHTML = '<div class="admin-loading">Loading events…</div>';
+    let organizationCode;
+    try {
+      await authReady;
+      if (auth?.authStateReady) await auth.authStateReady();
+      organizationCode = await syncApproverOrganization(functions);
+    } catch (error) {
+      console.error("Could not verify approval organization:", error);
+      root.innerHTML = '<div class="admin-error">Could not verify your approval access. Please refresh and try again.</div>';
+      return;
+    }
+    const eventsQuery = organizationCode === "*"
+      ? query(collection(db, "events"), orderBy("createdAt", "desc"))
+      : query(
+          collection(db, "events"),
+          where("organizationCode", "==", organizationCode),
+        );
     const unsubscribe = onSnapshot(
-      query(collection(db, "events"), orderBy("createdAt", "desc")),
+      eventsQuery,
       (snapshot) => {
         firestoreEvents = snapshot.docs
           .map((eventDocument) => {

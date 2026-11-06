@@ -238,9 +238,17 @@ import { auth, rtdb, functions } from "../UserStudent/firebaseConfig.js";
         const status = getStatus(event);
         const statusClass = getStatusClass(status);
         const isDraft = event.status === "draft";
+        const showAttendanceAction = ["Published", "Completed"].includes(status);
         const isNew = newParam === String(id);
         const schedule = event.time || [event.startTime, event.endTime].filter(Boolean).join(" - ") || "Time TBA";
         const locationText = event.location || event.venue || "Location TBA";
+        const scanParams = new URLSearchParams({
+          eventId: String(event.eventId || event.id),
+          eventName: String(event.title || event.name || "Untitled event"),
+          eventDate: String(event.dateISO || event.date || event.eventDate || ""),
+          eventTime: String(schedule),
+          eventVenue: String(locationText),
+        });
 
         return `<tr data-event-id="${id}"${isNew ? ' class="new-event-highlight"' : ""}>
           <td data-label="Event">
@@ -265,7 +273,7 @@ import { auth, rtdb, functions } from "../UserStudent/firebaseConfig.js";
                       status !== "Cancelled"
                         ? `<button type="button" class="event-action event-action-danger" data-action="cancel" data-event-id="${id}">Cancel</button>`
                         : ""
-                    }`
+                    }${showAttendanceAction ? `<a class="event-action" href="../UserEventOrganizer/EventOrganizerScanAttendance.html?${scanParams.toString()}">Scan attendance</a>` : ""}`
               }
             </div>
           </td>

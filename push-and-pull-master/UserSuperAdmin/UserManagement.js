@@ -166,12 +166,12 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
     return "";
   }
 
-  function setStaffCredentialFields(role) {
-    const isStaff = ["Admin", "Event Organizer", "Teacher", "Super Admin"].includes(role);
-    staffAuthFields.hidden = !isStaff;
-    passwordInput.required = isStaff;
-    passwordConfirmationInput.required = isStaff;
-    if (!isStaff) {
+  function setAccountCredentialFields(role) {
+    const requiresAuth = Boolean(role);
+    staffAuthFields.hidden = !requiresAuth;
+    passwordInput.required = requiresAuth;
+    passwordConfirmationInput.required = requiresAuth;
+    if (!requiresAuth) {
       passwordInput.value = "";
       passwordConfirmationInput.value = "";
     }
@@ -212,10 +212,10 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
     if (error?.code === "auth/invalid-email") {
       return "Enter a valid email address.";
     }
-    return error?.message || "Could not create the staff account.";
+    return error?.message || "Could not create the account.";
   }
 
-  async function provisionStaffAccount(email, password, targetCollection, profile) {
+  async function provisionUserAccount(email, password, targetCollection, profile) {
     const appName = `recovibe-staff-provision-${Date.now()}-${Math.random()
       .toString(36)
       .slice(2)}`;
@@ -231,7 +231,7 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
       );
       await setDoc(
         doc(db, targetCollection, userCredential.user.uid),
-        profile,
+        { ...profile, uid: userCredential.user.uid },
       );
       return userCredential.user.uid;
     } catch (error) {
@@ -239,7 +239,10 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
         try {
           await deleteUser(userCredential.user);
         } catch (cleanupError) {
-          console.error("Unable to remove Auth user after profile write failed:", cleanupError);
+          console.error("[UserManagement] Auth rollback after profile write failure failed:", {
+            code: cleanupError?.code || "unknown",
+            message: cleanupError?.message || String(cleanupError),
+          });
         }
       }
       throw error;
@@ -279,7 +282,7 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
       fullName: stringValue(fullName, "Unnamed User"),
       accountNumber: stringValue(accountNumber, "—"),
       email: stringValue(data.email, "—"),
-      role: stringValue(data.role || (collectionName === "studentUser" ? "Student" : "Staff")),
+      role: stringValue(data.role || (collectionName === "users" ? "Student" : "Staff")),
       status,
       contactNumber: stringValue(data.contactNumber || data.phone),
       department: stringValue(data.department || data.course || data.program),
@@ -377,10 +380,18 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
   }
 
   function handleUsersSnapshot(collectionName, snapshot) {
-    const mappedUsers = snapshot.docs.map((userDocument) =>
-      normalizeUser(userDocument.id, userDocument.data(), collectionName),
-    );
-    if (collectionName === "studentUser") {
+    const mappedUsers = snapshot.docs
+      .filter(
+        (userDocument) =>
+          collectionName !== "users" ||
+          String(userDocument.data().role || userDocument.data().userRole || "")
+            .trim()
+            .toLowerCase() === "student",
+      )
+      .map((userDocument) =>
+        normalizeUser(userDocument.id, userDocument.data(), collectionName),
+      );
+    if (collectionName === "users") {
       studentsList = mappedUsers;
     } else {
       staffList = mappedUsers;
@@ -447,10 +458,10 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
     event.preventDefault();
     const values = new FormData(createForm);
     const role = stringValue(values.get("role")).trim();
-    const isStaffAccount = ["Admin", "Event Organizer", "Teacher", "Super Admin"].includes(role);
-    setStaffCredentialFields(role);
+    const isAuthAccount = Boolean(role);
+    setAccountCredentialFields(role);
     passwordConfirmationInput.setCustomValidity(
-      isStaffAccount &&
+      isAuthAccount &&
         passwordConfirmationInput.value !== passwordInput.value
         ? "Passwords do not match."
         : "",
@@ -474,10 +485,11 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
     const email = stringValue(values.get("email")).trim().toLowerCase();
     const contactNumber = stringValue(values.get("contactNumber")).trim();
     const password = passwordInput.value;
-    const targetCollection = role === "Student" ? "studentUser" : "adminUser";
+    const targetCollection = role === "Student" ? "users" : "adminUser";
 
     const user = {
       fullName,
+      name: fullName,
       firstName,
       lastName,
       middleName,
@@ -486,7 +498,8 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
       organization: ["Teacher", "Super Admin"].includes(role) ? "" : organization,
       department: ["Teacher", "Super Admin"].includes(role) ? "" : organization,
       roleSuffix: ["Event Organizer", "Admin", "Super Admin"].includes(role) ? roleSuffix : "",
-      role,
+      role: role === "Student" ? "student" : role,
+      uid: "",
       accountNo,
       accountNumber: accountNo,
       studentNumber: accountNo,
@@ -498,9 +511,12 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
     const submitButton = createForm.querySelector('[type="submit"]');
     submitButton.disabled = true;
     try {
-      const createdUserId = isStaffAccount
-        ? await provisionStaffAccount(email, password, targetCollection, user)
-        : (await addDoc(collection(db, targetCollection), user)).id;
+      const createdUserId = await provisionUserAccount(
+        email,
+        password,
+        targetCollection,
+        user,
+      );
       createForm.reset();
       createDialog.close();
       if (role !== "Student") {
@@ -516,12 +532,15 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
           showMessage("Account created, but its audit record could not be saved.", true);
         }
       } else {
-        showMessage("User account created.");
+        showMessage("Student account created.");
       }
     } catch (error) {
-      console.error("Unable to create user:", error);
+      console.error("[UserManagement] User account/profile creation failed:", {
+        code: error?.code || "unknown",
+        message: error?.message || String(error),
+      });
       showMessage(
-        isStaffAccount
+        isAuthAccount
           ? authErrorMessage(error)
           : "Could not create the user. Please try again.",
         true,
@@ -807,7 +826,7 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
         updatedAt: serverTimestamp(),
       };
 
-      if (user.collectionName === "studentUser") {
+      if (user.collectionName === "users") {
         updatePayload.studentNumber = newAccountNumber;
         updatePayload.studentNo = newAccountNumber;
         updatePayload.accountNo = newAccountNumber;
@@ -1162,7 +1181,7 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
       const role = button.dataset.selectRole;
       document.getElementById("new-user-role").value = role;
       document.getElementById("new-user-role-value").value = role;
-      setStaffCredentialFields(role);
+      setAccountCredentialFields(role);
       isAccountManuallyEdited = false;
       if (newUserSuffixInput) newUserSuffixInput.value = "";
       if (newUserAccountInput) {
@@ -1244,7 +1263,7 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
     isAccountManuallyEdited = false;
     if (newUserSuffixInput) newUserSuffixInput.value = "";
     if (newUserContactInput) newUserContactInput.value = "09";
-    setStaffCredentialFields("");
+    setAccountCredentialFields("");
     passwordConfirmationInput.setCustomValidity("");
   });
   detailsDialog.addEventListener("close", () => {
@@ -1279,20 +1298,13 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
   tableBody.innerHTML =
     '<tr><td class="user-table-empty" colspan="6">Loading user accounts…</td></tr>';
   unsubscribeStudents = onSnapshot(
-    collection(db, "studentUser"),
+    collection(db, "users"),
     (snapshot) => {
-      console.info("[UserManagement] studentUser snapshot size:", snapshot.size);
-      snapshot.docs.forEach((userDocument) => {
-        console.debug(
-          "[UserManagement] studentUser document:",
-          userDocument.id,
-          userDocument.data(),
-        );
-      });
-      handleUsersSnapshot("studentUser", snapshot);
+      console.info("[UserManagement] users snapshot size:", snapshot.size);
+      handleUsersSnapshot("users", snapshot);
     },
     (error) => {
-      console.error("Unable to load studentUser accounts:", error);
+      console.error("Unable to load student accounts:", error);
       showMessage("Could not load student accounts.", true);
     },
   );
@@ -1301,14 +1313,7 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
     collection(db, "adminUser"),
     (snapshot) => {
       console.info("[UserManagement] adminUser snapshot size:", snapshot.size);
-      snapshot.docs.forEach((userDocument) => {
-        console.debug(
-          "[UserManagement] adminUser document:",
-          userDocument.id,
-          userDocument.data(),
-        );
-      });
-      handleUsersSnapshot("adminUser", snapshot);
+    handleUsersSnapshot("adminUser", snapshot);
     },
     (error) => {
       console.error("Unable to load adminUser accounts:", error);

@@ -4,21 +4,38 @@
  * readiness checks, conflict checking, reusable past events, and robust input rules.
  * Keep in sync with the other role's create event page.
  */
-import { auth, db, rtdb, functions, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
+import { app, auth, db, rtdb, functions, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
 import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
 import { ref, onValue, off, update, get } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
-import { collection, doc, getDocs, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { addDoc, collection, doc, getDocs, onSnapshot, serverTimestamp, updateDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { deleteObject, getDownloadURL, getStorage, ref as storageRef, uploadBytes } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 
 const FAVORITES_LIMIT = 5;
+const storage = app ? getStorage(app) : null;
 
-let systemApprovalStages = [
+const DEFAULT_APPROVAL_STAGES = [
   { id: "stage-1", name: "Organization President", reviewer: "Organization President", required: true },
   { id: "stage-2", name: "Organization Adviser Review", reviewer: "Organization Adviser (Sir Migs)", required: true },
   { id: "stage-3", name: "OSAS Review", reviewer: "Ma'am Joyce - OSAS", required: true },
   { id: "stage-4", name: "Director Review", reviewer: "Ma'am Margarita - Director", required: true },
   { id: "stage-5", name: "Final Approval & Publishing", reviewer: "Authorized approver(s)", required: true },
 ];
+function normalizeApprovalStages(stages) {
+  const source = Array.isArray(stages) && stages.length ? stages : DEFAULT_APPROVAL_STAGES;
+  return source
+    .filter((stage) => stage && typeof stage === "object")
+    .map((stage, index) => ({
+      ...stage,
+      id: String(stage.id || stage.key || `stage-${index + 1}`),
+      name: String(stage.name || stage.label || `Stage ${index + 1}`),
+      reviewer: String(stage.reviewer || stage.name || stage.label || ""),
+      reviewerEmail: String(stage.reviewerEmail || stage.email || "").trim().toLowerCase(),
+      required: stage.required !== false,
+    }));
+}
+
+let systemApprovalStages = normalizeApprovalStages(DEFAULT_APPROVAL_STAGES);
 
 function loadCachedApprovalStages() {
   try {
@@ -26,13 +43,7 @@ function loadCachedApprovalStages() {
     if (cached) {
       let parsed = JSON.parse(cached);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        if (!parsed.some((s) => (s.name || "").toLowerCase().includes("president"))) {
-          parsed = [
-            { id: "stage-pres", name: "Organization President", reviewer: "Organization President", required: true },
-            ...parsed,
-          ];
-        }
-        systemApprovalStages = parsed;
+        systemApprovalStages = normalizeApprovalStages(parsed);
       }
     }
   } catch {}
@@ -41,22 +52,27 @@ loadCachedApprovalStages();
 
 const PARTNER_ORGS_POOL = [
   { id: "aces", name: "ACES", subtitle: "Association of Computer Engineering Students" },
-  { id: "alpha", name: "ALPHA", subtitle: "External organization / entity" },
-  { id: "aeces", name: "AECES", subtitle: "Association of Electronics and Communications Engineering Students" },
-  { id: "chrms", name: "CHRMS", subtitle: "Council of Hotel and Restaurant Management Students" },
-  { id: "cites", name: "CITES", subtitle: "Computer and Information Technology Educational Society" },
   { id: "csc", name: "CSC", subtitle: "Central Student Council" },
   { id: "ibits", name: "IBITS", subtitle: "Institute of Bachelors in Information Technology Studies" },
-  { id: "iiee", name: "IIEE", subtitle: "Institute of Integrated Electrical Engineers" },
-  { id: "jma", name: "JMA", subtitle: "Junior Marketing Association" },
-  { id: "jpcs", name: "JPCS", subtitle: "Junior Philippine Computer Society" },
-  { id: "jpia", name: "JPIA", subtitle: "Junior Philippine Institute of Accountants" },
-  { id: "pasoa", name: "PASOA", subtitle: "Philippine Association of Students in Office Administration" },
-  { id: "pice", name: "PICE", subtitle: "Philippine Institute of Civil Engineers" },
-  { id: "pupcite", name: "PUP CITE", subtitle: "PUP Center for Information Technology and Engineering" },
+  { id: "hrss", name: "HRSS", subtitle: "HRSS" },
+  { id: "piie", name: "PIIE", subtitle: "Philippine Institute of Industrial Engineers" },
+  { id: "sms", name: "SMS", subtitle: "SMS" },
+  { id: "yes", name: "YES", subtitle: "YES" },
 ];
 
 let partnerOrgsPool = [...PARTNER_ORGS_POOL];
+
+function getCanonicalPartnerOrganization(value) {
+  const key = String(value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const canonicalKey = key === "PIEE" ? "PIIE" : key;
+  return PARTNER_ORGS_POOL.find(
+    (organization) => organization.name === canonicalKey,
+  ) || null;
+}
+
+function normalizePartnerOrganizations() {
+  return [...PARTNER_ORGS_POOL];
+}
 
 function loadCachedOrganizations() {
   try {
@@ -64,12 +80,7 @@ function loadCachedOrganizations() {
     if (cached) {
       const parsed = JSON.parse(cached);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        partnerOrgsPool = parsed.map((org) => {
-          if (typeof org === "string") return { id: org.toLowerCase(), name: org, subtitle: org };
-          const code = org.code || org.name || "ORG";
-          const sub = org.name || org.subtitle || code;
-          return { id: code.toLowerCase(), name: code, subtitle: sub };
-        });
+        partnerOrgsPool = normalizePartnerOrganizations(parsed);
       }
     }
   } catch {}
@@ -140,6 +151,13 @@ loadCachedOrganizations();
     return src;
   }
 
+  function normalizeTargetAudience(value) {
+    const normalized = String(value || "").trim().toLowerCase().replace(/[^a-z]/g, "");
+    if (normalized.includes("mixed")) return "Mixed Audience";
+    if (normalized.includes("organizationmembers")) return "Organization Members Only";
+    return "Open to All";
+  }
+
   const storageKeyEvents = isOrganizerPage ? "recovibeOrganizerEvents" : "recovibeTeacherEvents";
   const redirectListUrl = isOrganizerPage ? "EventOrganizerMyEvents.html" : "TeacherMyEvent.html";
 
@@ -185,10 +203,15 @@ loadCachedOrganizations();
       day: "2-digit",
     });
     const dateStr = formatter.format(now); // e.g. "2026-10-13"
-    const [yStr] = dateStr.split("-");
-    const currentYear = parseInt(yStr, 10);
-    const maxYear = currentYear % 2 === 0 ? currentYear + 2 : currentYear + 1;
-    const maxDateStr = `${maxYear}-12-31`;
+    const [year, month, day] = dateStr.split("-").map(Number);
+    const currentYear = year;
+    const maxYear = currentYear + 2;
+    const lastDayOfMaxMonth = new Date(Date.UTC(maxYear, month, 0)).getUTCDate();
+    const maxDateStr = [
+      maxYear,
+      String(month).padStart(2, "0"),
+      String(Math.min(day, lastDayOfMaxMonth)).padStart(2, "0"),
+    ].join("-");
     return {
       todayStr: dateStr,
       currentYear,
@@ -282,6 +305,85 @@ loadCachedOrganizations();
     "4th Year",
     "Ladderize",
   ];
+  const TARGET_DEPARTMENTS = [
+    "BSIT",
+    "BSCPE",
+    "BSBA",
+    "BSOA",
+    "BSHM",
+    "BSIE",
+    "BS Psychology",
+    "BSBA HRM",
+    "BSED Secondary",
+    "BSED Elementary (Elem)",
+    "BSED Social Science",
+  ];
+  const ORGANIZATION_DEPARTMENT_MAP = {
+    ibits: "BSIT",
+    instituteofbachelorsininformationtechnologystudies: "BSIT",
+    aces: "BSCPE",
+    associationofcomputerengineeringstudents: "BSCPE",
+    piie: "BSIE",
+    piee: "BSIE",
+    philippineinstituteofindustrialengineers: "BSIE",
+    yes: "BSBA",
+    youngentrepreneurssociety: "BSBA",
+    sms: "BSBA",
+    societyofmanagementstudents: "BSBA",
+    hrss: "BSBA HRM",
+    humanresourcestudentssociety: "BSBA HRM",
+  };
+  const normalizeDepartmentKey = (value) =>
+    String(value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+  const normalizeTargetDepartment = (value) => {
+    const key = normalizeDepartmentKey(value);
+    const directMatch = TARGET_DEPARTMENTS.find(
+      (department) => normalizeDepartmentKey(department) === key,
+    );
+    if (directMatch) return directMatch;
+    if (["bssecondary", "bsedsecondary"].includes(key)) return "BSED Secondary";
+    if (["bselementaryeducation", "bsedelementary", "bsedelementaryelem"].includes(key)) {
+      return "BSED Elementary (Elem)";
+    }
+    if (["bsbahrm", "bsbshrm"].includes(key) || key.includes("humanresourcemanagement")) {
+      return "BSBA HRM";
+    }
+    if (key.includes("socialscience")) return "BSED Social Science";
+    if (key.includes("psychology")) return "BS Psychology";
+    if (key.includes("computerengineering")) return "BSCPE";
+    if (key.includes("informationtechnology")) return "BSIT";
+    if (key.includes("industrial")) return "BSIE";
+    if (key.includes("officeadministration")) return "BSOA";
+    if (key.includes("hospitality")) return "BSHM";
+    if (key.includes("businessadministration")) return "BSBA";
+    return "";
+  };
+  function getOrganizingDepartment() {
+    const profile = isOrganizerPage ? organizerProfile : teacherProfile;
+    const departmentValues = [
+      profile.departmentCode,
+      profile.department,
+      profile.course,
+    ];
+    for (const value of departmentValues) {
+      const department = normalizeTargetDepartment(value);
+      if (department) return department;
+    }
+    const organizationValues = [
+      profile.organizationCode,
+      profile.orgCode,
+      profile.organization,
+      profile.organizationName,
+      profile.orgName,
+      isOrganizerPage ? profile.name : "",
+    ];
+    for (const value of organizationValues) {
+      const organizationKey = normalizeDepartmentKey(value);
+      const department = ORGANIZATION_DEPARTMENT_MAP[organizationKey];
+      if (department) return department;
+    }
+    return "";
+  }
 
   // Venue Records with explicit type (indoor, outdoor, online)
   const VENUES_GROUPED = [
@@ -334,17 +436,17 @@ loadCachedOrganizations();
     clientRequestId: null,
     dirty: false,
     selectedCategories: [],
-    participatingFaculty: isOrganizerPage
-      ? []
-      : [{ id: userIdentifier, name: teacherName, email: teacherProfile.email || "faculty@pup.edu.ph" }],
+    participatingFaculty: [],
     participantDocs: [],
-    approvalDocs: [],
-    adminDocs: {},
+    adminDocsLink: "",
     conflict: null,
     highlightedFields: new Set(),
     categoryDropdownOpen: false,
     deadlineManuallyEdited: false,
-    targetAudience: "Mixed audience",
+    targetAudience: "Open to All",
+    targetDepartments: [],
+    targetYearLevels: [],
+    targetSections: [],
     isCollaboration: false,
     partnerOrganizations: [],
     collaborationNotes: "",
@@ -358,15 +460,47 @@ loadCachedOrganizations();
     selectedApprovers: systemApprovalStages.map((s) => s.id),
   };
 
+  const autoPartnerTargetDepartments = new Set();
+  function getPartnerOrganizationDepartment(organization) {
+    const value = typeof organization === "string"
+      ? organization
+      : organization?.id || organization?.code || organization?.name;
+    return ORGANIZATION_DEPARTMENT_MAP[normalizeDepartmentKey(value)] || "";
+  }
+  function getAssociatedOrganizationDepartments() {
+    return new Set([
+      getOrganizingDepartment(),
+      ...state.partnerOrganizations.map(getPartnerOrganizationDepartment),
+    ].filter(Boolean));
+  }
+  function syncPartnerTargetDepartments() {
+    const associatedDepartments = getAssociatedOrganizationDepartments();
+    const partnerDepartments = new Set(
+      state.partnerOrganizations.map(getPartnerOrganizationDepartment).filter(Boolean),
+    );
+    const primaryDepartment = getOrganizingDepartment();
+    const inputs = [...document.querySelectorAll(".ce-target-department")];
+    inputs.forEach((input) => {
+      if (associatedDepartments.has(input.value)) {
+        if (partnerDepartments.has(input.value) && input.value !== primaryDepartment) {
+          autoPartnerTargetDepartments.add(input.value);
+        }
+        input.checked = true;
+      } else if (autoPartnerTargetDepartments.has(input.value)) {
+        input.checked = false;
+        autoPartnerTargetDepartments.delete(input.value);
+      }
+    });
+
+    const audience = normalizeTargetAudience(document.getElementById("targetAudience")?.value);
+    state.targetDepartments = audience === "Open to All"
+      ? []
+      : inputs.filter((input) => input.checked).map((input) => input.value);
+  }
+
   Object.defineProperty(state, "participantFiles", {
     get() { return this.participantDocs; },
     set(val) { this.participantDocs = val; },
-    enumerable: true,
-    configurable: true,
-  });
-  Object.defineProperty(state, "approvalFiles", {
-    get() { return this.approvalDocs; },
-    set(val) { this.approvalDocs = val; },
     enumerable: true,
     configurable: true,
   });
@@ -568,32 +702,12 @@ loadCachedOrganizations();
   let dbFacultyPool = [];
   let isFacultyDbInitialized = false;
 
-  const DEFAULT_FACULTY_FALLBACK = [
-    { id: "fac-1", name: "Prof. Maria Santos", email: "msantos@pup.edu.ph", department: "College of Computer and Information Sciences" },
-    { id: "fac-2", name: "Engr. Roberto Cruz", email: "rcruz@pup.edu.ph", department: "College of Engineering" },
-    { id: "fac-3", name: "Dr. Elena Alcantara", email: "ealcantara@pup.edu.ph", department: "Department of Mathematics" },
-    { id: "fac-4", name: "Prof. Antonio Reyes", email: "areyes@pup.edu.ph", department: "College of Business Administration" },
-    { id: "fac-5", name: "Prof. Grace Dizon", email: "gdizon@pup.edu.ph", department: "College of Education" },
-    { id: "fac-6", name: "Engr. Kenneth Bautista", email: "kbautista@pup.edu.ph", department: "College of Engineering" },
-  ];
-
   function loadFacultyPool() {
     if (!isFacultyDbInitialized) {
       initFacultyDatabaseListener();
     }
 
     const facultyMap = new Map();
-
-    DEFAULT_FACULTY_FALLBACK.forEach((f) => facultyMap.set(f.name.toLowerCase(), { ...f }));
-
-    if (teacherName && !facultyMap.has(teacherName.toLowerCase())) {
-      facultyMap.set(teacherName.toLowerCase(), {
-        id: userIdentifier,
-        name: teacherName,
-        email: teacherProfile?.email || "faculty@pup.edu.ph",
-        department: teacherProfile?.department || "Faculty",
-      });
-    }
 
     if (Array.isArray(dbFacultyPool)) {
       dbFacultyPool.forEach((f) => {
@@ -609,16 +723,6 @@ loadCachedOrganizations();
   function initFacultyDatabaseListener() {
     if (isFacultyDbInitialized) return;
     isFacultyDbInitialized = true;
-
-    try {
-      const cached = localStorage.getItem("recovibe_faculty_cache");
-      if (cached) {
-        const parsed = JSON.parse(cached);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          dbFacultyPool = parsed;
-        }
-      }
-    } catch (e) {}
 
     if (isFirebaseConfigured && db) {
       try {
@@ -644,7 +748,9 @@ loadCachedOrganizations();
 
           if (loaded.length > 0) {
             const mergedMap = new Map();
-            DEFAULT_FACULTY_FALLBACK.forEach((f) => mergedMap.set(f.name.toLowerCase(), f));
+            dbFacultyPool.forEach((f) => {
+              if (f?.name) mergedMap.set(f.name.toLowerCase(), f);
+            });
             loaded.forEach((f) => mergedMap.set(f.name.toLowerCase(), f));
             dbFacultyPool = Array.from(mergedMap.values());
             try {
@@ -665,13 +771,7 @@ loadCachedOrganizations();
           if (docSnap.exists()) {
             const data = docSnap.data() || {};
             if (Array.isArray(data.approvalStages) && data.approvalStages.length > 0) {
-              let stages = data.approvalStages;
-              if (!stages.some((s) => (s.name || "").toLowerCase().includes("president"))) {
-                stages = [
-                  { id: "stage-pres", name: "Organization President", reviewer: "Organization President", required: true },
-                  ...stages,
-                ];
-              }
+              const stages = normalizeApprovalStages(data.approvalStages);
               systemApprovalStages = stages;
               try {
                 localStorage.setItem("recovibe_approval_stages", JSON.stringify(stages));
@@ -680,12 +780,7 @@ loadCachedOrganizations();
             }
 
             if (Array.isArray(data.organizations) && data.organizations.length > 0) {
-              partnerOrgsPool = data.organizations.map((org) => {
-                if (typeof org === "string") return { id: org.toLowerCase(), name: org, subtitle: org };
-                const code = org.code || org.name || "ORG";
-                const sub = org.name || org.subtitle || code;
-                return { id: code.toLowerCase(), name: code, subtitle: sub };
-              });
+              partnerOrgsPool = normalizePartnerOrganizations(data.organizations);
               try {
                 localStorage.setItem("recovibe_organizations", JSON.stringify(data.organizations));
               } catch {}
@@ -1696,6 +1791,15 @@ loadCachedOrganizations();
     const initialRegStart = `${manilaInfo.todayStr}T08:00`;
     const initialRegEnd = calculateAutoRegistrationEnd(defaultEventDate);
     const initialMaxRegEnd = calculateMaxRegistrationEnd(defaultEventDate);
+    const organizingDepartment = getOrganizingDepartment();
+    const savedTargetDepartments = state.targetDepartments
+      .map(normalizeTargetDepartment)
+      .filter(Boolean);
+    const defaultTargetDepartments = savedTargetDepartments.length
+      ? savedTargetDepartments
+      : organizingDepartment
+        ? [organizingDepartment]
+        : [];
 
     return `
       ${state.isCopied && state.copiedFrom ? `
@@ -1730,6 +1834,7 @@ loadCachedOrganizations();
                   <input type="text"
                          id="eventName"
                          name="eventName"
+                         minlength="5"
                          maxlength="150"
                          placeholder="e.g. Annual IT Tech Summit 2026"
                          required
@@ -1746,19 +1851,17 @@ loadCachedOrganizations();
                          value="${escapeHTML(readOnlyOrganizerValue)}"
                          readonly
                          class="ce-input--readonly">
-                  <small class="ce-hint">Automatically set based on your account credentials.</small>
                 </div>
 
                 <div class="ce-field" id="wrap-eventSource">
-                  <label for="eventSource">Event Source</label>
-                  <select id="eventSource" name="eventSource">
-                    ${EVENT_SOURCES.map((src) => `
-                      <option value="${escapeHTML(src)}" ${src === defaultEventSource ? "selected" : ""}>
-                        ${escapeHTML(src)}
-                      </option>
-                    `).join("")}
-                  </select>
-                  <small class="ce-hint">Automatically set based on your account credentials.</small>
+                  <label for="eventSource">Event Source <span class="ce-readonly-tag">(Auto-linked)</span></label>
+                  <input type="text"
+                         id="eventSource"
+                         name="eventSource"
+                         value="${escapeHTML(defaultEventSource)}"
+                         readonly
+                         aria-readonly="true"
+                         class="ce-input--readonly ce-input--auto-linked">
                 </div>
 
                 <!-- Category Multi-Select Dropdown with Checkboxes (1 to 3 allowed) -->
@@ -1791,15 +1894,7 @@ loadCachedOrganizations();
                   <p class="ce-error" id="error-category" hidden></p>
                 </div>
 
-                <!-- Target Year Level (Default "All Levels") -->
-                <div class="ce-field" id="wrap-targetYear">
-                  <label for="targetYear">Target Year Level</label>
-                  <select id="targetYear" name="targetYear">
-                    ${TARGET_YEARS.map((opt) => `
-                      <option value="${escapeHTML(opt)}" ${opt === "All Levels" ? "selected" : ""}>${escapeHTML(opt)}</option>
-                    `).join("")}
-                  </select>
-                </div>
+                <input type="hidden" id="targetYear" name="targetYear" value="All Levels">
               </div>
             </section>
 
@@ -1944,12 +2039,13 @@ loadCachedOrganizations();
                 </div>
 
                 <div class="ce-field" id="wrap-maxCapacity">
-                  <label for="maxCapacity">Max Capacity</label>
+                  <label for="maxCapacity">Max Capacity <span class="ce-req">*</span></label>
                   <input type="number"
                          id="maxCapacity"
                          name="maxCapacity"
                          min="1"
                          step="1"
+                         required
                          placeholder="Expected Participants"
                          aria-describedby="venueCapacityHint error-maxCapacity">
                   <small class="ce-hint" id="venueCapacityHint">Select a venue to view capacity limit.</small>
@@ -2016,15 +2112,44 @@ loadCachedOrganizations();
                     Target audience
                     <span class="ce-req" style="color: #dc2626; display: block; margin-top: -2px;">*</span>
                   </label>
-                  <select id="targetAudience" name="targetAudience" class="ce-select" required aria-describedby="targetAudienceHint error-targetAudience">
-                    <option value="Mixed audience">Mixed audience</option>
-                    <option value="Organization members only">Organization members only</option>
-                    <option value="PUP Students only">PUP Students only</option>
-                    <option value="Faculty & Staff only">Faculty & Staff only</option>
-                    <option value="Open to all">Open to all</option>
+                  <select id="targetAudience" name="targetAudience" class="ce-select" required aria-describedby="error-targetAudience">
+                    <option value="Mixed Audience">Mixed Audience</option>
+                    <option value="Organization Members Only">Organization Members Only</option>
+                    <option value="Open to All" selected>Open to All (Default)</option>
                   </select>
-                  <small class="ce-hint" id="targetAudienceHint">Organization members only refers to members of the main organizing organization.</small>
                   <p class="ce-error" id="error-targetAudience" hidden></p>
+                </div>
+
+                <div class="ce-field ce-field--full" id="targetAudienceDetails" hidden>
+                  <div class="ce-fields-grid">
+                    <fieldset class="ce-field" id="wrap-targetDepartments">
+                      <legend>Target Department</legend>
+                      <div class="ce-audience-options">
+                        ${TARGET_DEPARTMENTS.map((department) => `
+                          <label><input type="checkbox" class="ce-target-department" value="${escapeHTML(department)}" ${defaultTargetDepartments.includes(department) ? "checked" : ""}> ${escapeHTML(department)}</label>
+                        `).join("")}
+                      </div>
+                      <p class="ce-error" id="error-targetDepartments" hidden></p>
+                    </fieldset>
+                    <fieldset class="ce-field" id="wrap-targetYearLevels">
+                      <legend>Target Year Level</legend>
+                      <div class="ce-audience-options">
+                        <label><input type="checkbox" id="targetAllYears" value="all" ${state.targetYearLevels.length === 0 ? "checked" : ""}> All Year Level</label>
+                        ${TARGET_YEARS.filter((year) => year !== "All Levels").map((year) => `
+                          <label><input type="checkbox" class="ce-target-year" value="${escapeHTML(year)}" ${state.targetYearLevels.includes(year) ? "checked" : ""}> ${escapeHTML(year)}</label>
+                        `).join("")}
+                      </div>
+                    </fieldset>
+                    <div class="ce-field" id="wrap-targetSections">
+                      <label for="targetSections">Target Section</label>
+                      <div class="ce-chips-container" id="targetSectionsContainer">
+                        <div id="targetSectionsList" class="ce-chips-list"></div>
+                        <input type="text" id="targetSections" name="targetSections" class="ce-chip-input" placeholder="e.g. 1-1" aria-describedby="error-targetSections" autocomplete="off">
+                      </div>
+                      <small class="ce-hint">Press Enter or comma to add each section.</small>
+                      <p class="ce-error" id="error-targetSections" hidden></p>
+                    </div>
+                  </div>
                 </div>
 
                 <!-- Partner Organizations -->
@@ -2143,12 +2268,11 @@ loadCachedOrganizations();
                 </div>
 
                 <div class="ce-field ce-field--full ce-field--toggle" id="wrap-attendanceRequired">
-                  <span class="ce-toggle-label">Attendance Tracking</span>
+                  <span class="ce-toggle-label">Attendance Required</span>
                   <label class="ce-switch">
                     <input type="checkbox" id="attendanceRequired" name="attendanceRequired" checked>
                     <span class="ce-slider"></span>
                   </label>
-                  <span class="ce-toggle-text">Require attendance tracking for attendees</span>
                 </div>
               </div>
             </section>
@@ -2161,7 +2285,7 @@ loadCachedOrganizations();
               <div class="ce-fields-grid">
                 <div class="ce-field ce-field--full" id="wrap-description">
                   <div class="ce-label-split">
-                    <label for="description">Event Description</label>
+                    <label for="description">Event Description <span class="ce-req">*</span></label>
                     <span class="ce-counter" id="descCharCounter">0 / 1500</span>
                   </div>
                   <textarea id="description"
@@ -2169,12 +2293,13 @@ loadCachedOrganizations();
                             rows="4"
                             maxlength="1500"
                             placeholder="Provide a comprehensive summary of the event objectives, agenda, and target outcomes..."></textarea>
+                  <p class="ce-error" id="error-description" hidden></p>
                 </div>
 
                 <!-- Rationale: Just like Event Description -->
                 <div class="ce-field ce-field--full" id="wrap-rationale">
                   <div class="ce-label-split">
-                    <label for="rationale">Rationale</label>
+                    <label for="rationale">Rationale <span class="ce-req">*</span></label>
                     <span class="ce-counter" id="rationaleCharCounter">0 / 1500</span>
                   </div>
                   <textarea id="rationale"
@@ -2182,15 +2307,17 @@ loadCachedOrganizations();
                             rows="4"
                             maxlength="1500"
                             placeholder="Provide the rationale, background, and justification for organizing this event..."></textarea>
+                  <p class="ce-error" id="error-rationale" hidden></p>
                 </div>
 
                 <!-- Objectives (formerly Key Details) with bullet support -->
                 <div class="ce-field ce-field--full" id="wrap-keyDetails">
-                  <label for="keyDetails">Objectives <small>(bulleted list)</small></label>
+                  <label for="keyDetails">Objectives <span class="ce-req">*</span> <small>(bulleted list)</small></label>
                   <textarea id="keyDetails"
                             name="keyDetails"
                             rows="3"
                             placeholder="• Event objective 1&#10;• Event objective 2&#10;• Expected learning outcome"></textarea>
+                  <p class="ce-error" id="error-keyDetails" hidden></p>
                 </div>
 
                 <!-- Requirements & Reminders with bullet support -->
@@ -2200,6 +2327,7 @@ loadCachedOrganizations();
                             name="requirements"
                             rows="3"
                             placeholder="• Bring valid school ID&#10;• Attire: Business casual&#10;• Install required software"></textarea>
+                  <p class="ce-error" id="error-requirements" hidden></p>
                 </div>
 
                 <!-- Participating Faculty Members (Optional) with No Numbers in Names -->
@@ -2216,6 +2344,7 @@ loadCachedOrganizations();
                   </div>
                   <p class="ce-inline-hint" id="facultyNoNumbersHint" style="color: #b3261e; font-size: 12px; margin-top: 4px;" hidden></p>
                   <small class="ce-hint">Participating faculty members who will attend or facilitate (optional).</small>
+                  <p class="ce-error" id="error-facultyChips" hidden></p>
                 </div>
 
                 <!-- Contact Person Section: Empty by default, No Numbers in Name, 09 Lock on Phone -->
@@ -2279,9 +2408,8 @@ loadCachedOrganizations();
                   <h3 class="ce-admin-docs-title">Documents for Admin review</h3>
                 </div>
                 <div class="ce-admin-docs-list" id="adminDocsList">
-                  <!-- Rendered dynamically based on selected venue -->
+                  <!-- Google Drive link input rendered here -->
                 </div>
-                <p class="ce-admin-docs-notice">Proposal files are tracked in this browser session for review only; secure server upload is not enabled.</p>
               </div>
 
               <!-- Participant Documents (Optional) -->
@@ -2289,19 +2417,15 @@ loadCachedOrganizations();
                 <div class="ce-dropzone-title-bar">
                   <h3 class="ce-dropzone-title">Participant Documents <small>(Optional)</small></h3>
                 </div>
-                <div class="ce-dropzone"
-                     id="dropzoneParticipant"
-                     tabindex="0"
-                     role="region"
-                     aria-label="Upload participant documents">
-                  <!-- Dropzone content rendered by component -->
-                </div>
+                <label class="sr-only" for="participantDocsLinks">Participant document Google Drive link</label>
+                <input id="participantDocsLinks"
+                       name="participantDocsLinks"
+                       type="url"
+                       pattern="^https:\\/\\/(drive|docs)\\.google\\.com\\/.*$"
+                       placeholder="https://drive.google.com/..."
+                       aria-describedby="hint-participantDocsLinks error-participantDocs">
+                <small class="ce-hint" id="hint-participantDocsLinks">Set access to “Anyone with the link can view”.</small>
                 <p class="ce-error ce-dropzone-error" id="error-participantDocs" hidden></p>
-                <input type="file"
-                       id="inputParticipantFiles"
-                       accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"
-                       multiple
-                       hidden>
               </div>
             </section>
           </form>
@@ -2394,7 +2518,7 @@ loadCachedOrganizations();
               <li class="ce-check-item is-failed" id="check-name">
                 <span class="ce-check-icon" aria-hidden="true">✕</span>
                 <span class="ce-check-status-sr sr-only">Not yet: </span>
-                <span class="ce-check-label">Event name provided (min 3 chars)</span>
+                <span class="ce-check-label">Event name provided (5-150 chars)</span>
               </li>
               <li class="ce-check-item is-failed" id="check-category">
                 <span class="ce-check-icon" aria-hidden="true">✕</span>
@@ -2429,7 +2553,7 @@ loadCachedOrganizations();
               <li class="ce-check-item is-failed" id="check-approvalDocs">
                 <span class="ce-check-icon" aria-hidden="true">✕</span>
                 <span class="ce-check-status-sr sr-only">Not yet: </span>
-                <span class="ce-check-label">Approval document attached</span>
+                <span class="ce-check-label">Admin proposal documents link</span>
               </li>
             </ul>
           </div>
@@ -2540,22 +2664,24 @@ loadCachedOrganizations();
 
     if (Array.isArray(ev.participatingFaculty)) {
       state.participatingFaculty = [...ev.participatingFaculty];
-    } else if (!isOrganizerPage) {
-      state.participatingFaculty = [{ id: userIdentifier, name: teacherName, email: teacherProfile?.email || "faculty@pup.edu.ph" }];
     } else {
       state.participatingFaculty = [];
     }
 
-    state.adminDocs = {};
-    if (ev.adminDocuments && typeof ev.adminDocuments === "object") {
-      state.adminDocs = { ...ev.adminDocuments };
-    } else if (Array.isArray(ev.approvalDocuments)) {
-      ev.approvalDocuments.forEach((doc) => {
-        if (doc.docKey) state.adminDocs[doc.docKey] = doc;
-      });
-    }
+    state.adminDocsLink = getAdminDocsLink(ev);
 
-    state.targetAudience = ev.targetAudience || "Mixed audience";
+    state.targetAudience = normalizeTargetAudience(ev.targetAudience);
+    state.targetDepartments = Array.isArray(ev.targetDepartments) ? [...ev.targetDepartments] : [];
+    state.targetYearLevels = Array.isArray(ev.targetYearLevels)
+      ? [...ev.targetYearLevels]
+      : ev.targetYear && ev.targetYear !== "All Levels"
+        ? String(ev.targetYear).split(",").map((year) => year.trim()).filter((year) => TARGET_YEARS.includes(year))
+        : [];
+    state.targetSections = Array.isArray(ev.targetSections)
+      ? [...ev.targetSections]
+      : ev.targetSections
+        ? String(ev.targetSections).split(/[,\n]/).map((section) => section.trim()).filter(Boolean)
+        : [];
     state.isCollaboration = ev.isCollaboration !== undefined ? Boolean(ev.isCollaboration) : Boolean(Array.isArray(ev.partnerOrganizations) && ev.partnerOrganizations.length > 0);
     state.partnerOrganizations = Array.isArray(ev.partnerOrganizations) ? [...ev.partnerOrganizations] : [];
     state.collaborationNotes = ev.collaborationNotes || "";
@@ -2569,8 +2695,9 @@ loadCachedOrganizations();
     if (form) {
       if (form.eventName) form.eventName.value = ev.title || ev.eventName || "";
       if (form.eventSource) form.eventSource.value = normalizeEventSource(ev.source);
-      if (form.targetYear && ev.targetYear) form.targetYear.value = ev.targetYear;
       if (form.targetAudience) form.targetAudience.value = state.targetAudience;
+      if (form.targetYear) form.targetYear.value = state.targetYearLevels.join(", ") || "All Levels";
+      renderTargetSectionTags();
       if (form.isCollaboration) form.isCollaboration.checked = state.isCollaboration;
       if (form.collaborationNotes) form.collaborationNotes.value = state.collaborationNotes;
       const savedDate = ev.date || ev.dateISO || ev.eventDate || "";
@@ -2609,6 +2736,9 @@ loadCachedOrganizations();
       }
       if (form.registrationDeadline) {
         form.registrationDeadline.value = form.registrationEnd ? form.registrationEnd.value : "";
+      }
+      if (form.attendanceRequired) {
+        form.attendanceRequired.checked = ev.attendanceRequired !== false;
       }
       if (form.timeStart && ev.timeStart) form.timeStart.value = ev.timeStart;
       if (form.timeEnd && ev.timeEnd) form.timeEnd.value = ev.timeEnd;
@@ -2690,6 +2820,152 @@ loadCachedOrganizations();
           return message;
         }
         return fallback;
+      }
+
+      function sanitizeFirestoreValue(value) {
+        if (Array.isArray(value)) {
+          return value
+            .filter((entry) => entry !== undefined)
+            .map((entry) => sanitizeFirestoreValue(entry));
+        }
+        if (
+          value &&
+          typeof value === "object" &&
+          !(value instanceof Date) &&
+          !(value instanceof Blob)
+        ) {
+          return Object.fromEntries(
+            Object.entries(value)
+              .filter(([, entry]) => entry !== undefined)
+              .map(([key, entry]) => [key, sanitizeFirestoreValue(entry)]),
+          );
+        }
+        return value;
+      }
+
+      function dataUrlToBlob(dataUrl, mimeType) {
+        const [header, encodedData] = String(dataUrl).split(",");
+        if (!header || !encodedData) throw new Error("An attached file could not be decoded.");
+        const inferredType = header.match(/^data:([^;]+)/)?.[1] || mimeType || "application/octet-stream";
+        const binary = atob(encodedData);
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) {
+          bytes[index] = binary.charCodeAt(index);
+        }
+        return new Blob([bytes], { type: inferredType });
+      }
+
+      function sanitizeStorageFileName(name) {
+        return String(name || "attachment")
+          .replace(/[\\/:*?"<>|#%]+/g, "_")
+          .slice(0, 120);
+      }
+
+      async function uploadEventAttachments(payload, uid) {
+        const uploadedRefs = [];
+        const uploadedById = new Map();
+        const uploadedByFile = new WeakMap();
+
+        async function cleanupUploadedFiles(refs) {
+          const results = await Promise.allSettled(refs.map((objectRef) => deleteObject(objectRef)));
+          results.forEach((result) => {
+            if (result.status === "rejected") {
+              console.error("[CreateEvent] Could not clean up an uploaded Storage file:", {
+                code: result.reason?.code || "unknown",
+                message: result.reason?.message || String(result.reason),
+              });
+            }
+          });
+        }
+
+        async function uploadDescriptor(file) {
+          if (!file || typeof file !== "object") return file;
+          const dataUrl = [file.dataUrl, file.url, file.path].find(
+            (value) => typeof value === "string" && value.startsWith("data:"),
+          );
+          const fileBlob = file.fileRef instanceof Blob
+            ? file.fileRef
+            : dataUrl
+              ? dataUrlToBlob(dataUrl, file.mime)
+              : null;
+          const existingUrl = [file.url, file.path].find(
+            (value) => typeof value === "string" && /^(https?:|gs:)/i.test(value),
+          );
+
+          let downloadUrl = existingUrl || "";
+          if (fileBlob) {
+            if (!storage) throw new Error("Firebase Storage is not configured.");
+            if (fileBlob.size > 10 * 1024 * 1024) {
+              throw new Error(`"${file.name || "Attachment"}" exceeds the 10 MB upload limit.`);
+            }
+            const cached = file.fileRef instanceof Blob
+              ? uploadedByFile.get(file.fileRef)
+              : uploadedById.get(String(file.id || ""));
+            if (cached) {
+              downloadUrl = cached;
+            } else {
+              const uniqueName = `${Date.now()}-${crypto.randomUUID()}-${sanitizeStorageFileName(file.name)}`;
+              const objectRef = storageRef(storage, `events/${uid}/attachments/${uniqueName}`);
+              try {
+                await uploadBytes(objectRef, fileBlob, {
+                  contentType: file.mime || fileBlob.type || "application/octet-stream",
+                });
+                uploadedRefs.push(objectRef);
+                downloadUrl = await getDownloadURL(objectRef);
+                if (file.fileRef instanceof Blob) uploadedByFile.set(file.fileRef, downloadUrl);
+                if (file.id) uploadedById.set(String(file.id), downloadUrl);
+              } catch (error) {
+                console.error("[CreateEvent] Storage upload failed:", {
+                  code: error?.code || "unknown",
+                  message: error?.message || String(error),
+                  fileName: file.name || "",
+                });
+                throw new Error(`Could not upload "${file.name || "attachment"}": ${error.message || "Storage upload failed."}`, { cause: error });
+              }
+            }
+          } else if (!downloadUrl && (file.fileRef || dataUrl)) {
+            throw new Error(`Could not upload "${file.name || "attachment"}": file data is unavailable. Reattach the file and retry.`);
+          }
+
+          const cleanFile = { ...file };
+          delete cleanFile.fileRef;
+          delete cleanFile.dataUrl;
+          delete cleanFile.thumbnail;
+          if (downloadUrl) {
+            cleanFile.url = downloadUrl;
+            cleanFile.path = downloadUrl;
+          } else {
+            if (typeof cleanFile.path === "string" && cleanFile.path.startsWith("data:")) {
+              delete cleanFile.path;
+            }
+            if (typeof cleanFile.url === "string" && cleanFile.url.startsWith("data:")) {
+              delete cleanFile.url;
+            }
+          }
+          return cleanFile;
+        }
+
+        async function visit(value) {
+          if (Array.isArray(value)) {
+            const result = [];
+            for (const item of value) result.push(await visit(item));
+            return result;
+          }
+          if (!value || typeof value !== "object" || value instanceof Date || value instanceof Blob) return value;
+          if (value.fileRef || value.dataUrl || value.url || value.path) return uploadDescriptor(value);
+          const result = {};
+          for (const [key, item] of Object.entries(value)) {
+            result[key] = await visit(item);
+          }
+          return result;
+        }
+
+        try {
+          return { payload: await visit(payload), uploadedRefs };
+        } catch (error) {
+          await cleanupUploadedFiles(uploadedRefs);
+          throw error;
+        }
       }
 
       function setRequestBusy(button, busy, idleLabel) {
@@ -2911,16 +3187,19 @@ loadCachedOrganizations();
     setupNoNumbersInput("contactName", "contactNameNoNumbersHint");
     setupAudienceAndCollaboration();
     setupApproverChain();
-    setupDropzone({
-      stateKey: "participantDocs",
-      dropzoneId: "dropzoneParticipant",
-      inputId: "inputParticipantFiles",
-      errorId: "error-participantDocs",
-      isRequired: false,
-      maxFiles: 5,
-      maxSizeBytes: 10 * 1024 * 1024,
-      helperText: "PDF, DOC, DOCX, JPG, PNG up to 10MB (max 5)",
-    });
+    const participantDocsInput = document.getElementById("participantDocsLinks");
+    if (participantDocsInput) {
+      participantDocsInput.value = getParticipantDocumentUrls(state.participantDocs)
+        .filter(isGoogleDriveLink)
+        .find(Boolean) || "";
+      syncParticipantDocumentLinks();
+      participantDocsInput.addEventListener("input", () => {
+        syncParticipantDocumentLinks();
+        state.dirty = true;
+        clearFieldError("participantDocs");
+        updateAllReadinessChecks();
+      });
+    }
     renderAdminDocuments();
 
     // Cancel Button with Confirmation Modal
@@ -2992,36 +3271,101 @@ loadCachedOrganizations();
         }
 
         showConfirmModal({
-          title: requireApproval ? "Submit for Approval?" : "Publish Event?",
-          text: requireApproval
-            ? "Are you sure you want to submit this event for approval? Once submitted, this event proposal will enter the sequential approval chain for review."
-            : "Are you sure you want to publish this event? It will immediately become live.",
-          confirmText: "Yes",
+          title: "Save Event to Firestore?",
+          text: "This saves the event directly to Firestore with pending status. It bypasses the server approval chain and does not notify reviewers.",
+          confirmText: "Save Pending Event",
           cancelText: "No",
-          checkboxText: "I confirm the details are accurate and ready for review.",
+          checkboxText: "I confirm the details are accurate and ready to save.",
           onConfirm: async () => {
             if (state.isActionBusy) return;
             state.isActionBusy = true;
             setRequestBusy(btnSubmit, true, "Submit for Approval");
             try {
-              const payload = serializeFormForServer("pending");
-              payload.clientRequestId = state.clientRequestId || crypto.randomUUID();
-              state.clientRequestId = payload.clientRequestId;
-              const createProposalFn = httpsCallable(functions, "createEventProposal");
-              const result = await createProposalFn(payload);
-              const eventId = result?.data?.eventId;
-              if (!eventId) throw new Error("The server did not confirm the event submission.");
-              state.dirty = false;
-              const firstReviewer = String(result.data.firstReviewer || "the first reviewer");
-              sessionStorage.setItem(
-                "recovibeEventNotice",
-                `Submitted. ${firstReviewer} was notified.`,
+              const adminDocsLink = document.getElementById("adminDocsLink").value.trim();
+              if (!isGoogleDriveLink(adminDocsLink)) {
+                throw new Error("Enter a valid Google Drive or Google Docs link for admin review.");
+              }
+              if (!db || !isFirebaseConfigured) {
+                throw new Error("Event submission is unavailable because Firestore is not configured.");
+              }
+              const organizerUid = auth.currentUser?.uid;
+              if (!organizerUid) {
+                throw new Error("Sign in again before submitting your event.");
+              }
+
+              const formPayload = serializeEvent("pending");
+              const submittedAt = new Date().toISOString();
+              const firestorePayload = sanitizeFirestoreValue({
+                ...formPayload,
+                adminDocuments: adminDocsLink,
+                status: "pending",
+                organizerUid,
+                organizerId: organizerUid,
+                createdBy: organizerUid,
+                createdByRole: isOrganizerPage ? "event_organizer" : "teacher",
+                creatorRole: currentRole,
+                startAt: `${formPayload.date || ""} ${formPayload.timeStart || ""}`.trim(),
+                endAt: `${formPayload.dateEnd || formPayload.date || ""} ${formPayload.timeEnd || ""}`.trim(),
+                approvers: [...state.selectedApprovers],
+              });
+              const { payload: eventPayload, uploadedRefs } = await uploadEventAttachments(
+                firestorePayload,
+                organizerUid,
               );
+              eventPayload.createdAt = serverTimestamp();
+              eventPayload.updatedAt = serverTimestamp();
+              let eventId = formPayload.id;
+              try {
+                if (state.editingEventId) {
+                  eventId = state.editingEventId;
+                  delete eventPayload.createdAt;
+                  await updateDoc(doc(db, "events", eventId), eventPayload);
+                } else {
+                  await addDoc(collection(db, "events"), eventPayload);
+                }
+              } catch (writeError) {
+                const cleanupResults = await Promise.allSettled(
+                  uploadedRefs.map((objectRef) => deleteObject(objectRef)),
+                );
+                cleanupResults.forEach((result) => {
+                  if (result.status === "rejected") {
+                    console.error("[CreateEvent] Could not clean up an uploaded Storage file:", {
+                      code: result.reason?.code || "unknown",
+                      message: result.reason?.message || String(result.reason),
+                    });
+                  }
+                });
+                throw writeError;
+              }
+              const savedEvent = {
+                ...eventPayload,
+                id: eventId,
+                eventId,
+                organizerUid,
+                organizerId: organizerUid,
+                createdBy: organizerUid,
+                createdByRole: isOrganizerPage ? "event_organizer" : "teacher",
+                creatorRole: currentRole,
+                status: "pending",
+                createdAt: submittedAt,
+                updatedAt: submittedAt,
+              };
+              persistEvent(savedEvent);
+              state.dirty = false;
+              const successNotice = "Event saved to Firestore as pending. The reviewer approval chain and notifications were not created.";
+              sessionStorage.setItem("recovibeEventNotice", successNotice);
+              showToast(successNotice);
               location.href = `${redirectListUrl}?new=${encodeURIComponent(eventId)}`;
             } catch (error) {
-              console.error("Could not submit event proposal:", error);
-              showServerFieldErrors(error);
-              showToast(getFriendlyFunctionError(error, "Couldn't submit your event. Your form is still here; please try again."));
+              console.error("Could not save event to Firestore:", {
+                code: error?.code || "unknown",
+                message: error?.message || String(error),
+              });
+              showToast(
+                error?.code === "permission-denied"
+                  ? "Firebase denied the upload or event write. Check your published Storage/Firestore rules and account role."
+                  : error?.message || "Couldn't save your event. Your form is still here; please try again.",
+              );
             } finally {
               state.isActionBusy = false;
               setRequestBusy(btnSubmit, false, "Submit for Approval");
@@ -4292,6 +4636,51 @@ loadCachedOrganizations();
     });
   }
 
+  function renderTargetSectionTags() {
+    const list = document.getElementById("targetSectionsList");
+    if (!list) return;
+
+    list.innerHTML = state.targetSections.map((section, index) => `
+      <div class="ce-chip" data-section-index="${index}">
+        <span class="ce-chip-label">${escapeHTML(section)}</span>
+        <button type="button" class="ce-chip-remove" aria-label="Remove section ${escapeHTML(section)}" data-remove-section-idx="${index}">✕</button>
+      </div>
+    `).join("");
+
+    list.querySelectorAll(".ce-chip-remove").forEach((button) => {
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const index = Number(button.dataset.removeSectionIdx);
+        if (!Number.isInteger(index) || index < 0 || index >= state.targetSections.length) return;
+        state.targetSections.splice(index, 1);
+        state.dirty = true;
+        clearFieldError("targetSections");
+        renderTargetSectionTags();
+        updateLivePreview();
+      });
+    });
+  }
+
+  function addTargetSectionTags(value) {
+    const sections = String(value || "")
+      .split(/[,\n]/)
+      .map((section) => section.trim())
+      .filter(Boolean);
+    let added = false;
+    sections.forEach((section) => {
+      if (state.targetSections.some((existing) => existing.toLowerCase() === section.toLowerCase())) return;
+      state.targetSections.push(section);
+      added = true;
+    });
+    if (added) {
+      state.dirty = true;
+      clearFieldError("targetSections");
+      renderTargetSectionTags();
+      updateLivePreview();
+    }
+    return added;
+  }
+
   // Helper to render partner organizations list
   function renderPartnerOrgList() {
     const list = document.getElementById("partnerOrgList");
@@ -4341,6 +4730,7 @@ loadCachedOrganizations();
       btn.addEventListener("click", () => {
         const id = btn.dataset.partnerId;
         state.partnerOrganizations = state.partnerOrganizations.filter((o) => o.id !== id);
+        syncPartnerTargetDepartments();
         state.dirty = true;
         renderPartnerOrgList();
       });
@@ -4454,7 +4844,7 @@ loadCachedOrganizations();
   }
 
   function updateOutsideGuestsStatus() {
-    const hasExternal = (state.externalGuests && state.externalGuests.length > 0) || state.targetAudience === "Open to all";
+    const hasExternal = Boolean(state.externalGuests && state.externalGuests.length > 0);
     state.outsideGuests = hasExternal;
     const outsideCheckbox = document.getElementById("outsideGuests");
     if (outsideCheckbox) {
@@ -4464,25 +4854,133 @@ loadCachedOrganizations();
 
   function setupAudienceAndCollaboration() {
     const targetAudienceSelect = document.getElementById("targetAudience");
-    if (targetAudienceSelect) {
-      if (state.targetAudience) {
-        targetAudienceSelect.value = state.targetAudience;
-      }
-      targetAudienceSelect.addEventListener("change", (e) => {
-        state.targetAudience = e.target.value;
-        state.dirty = true;
-        updateOutsideGuestsStatus();
+    const targetAudienceDetails = document.getElementById("targetAudienceDetails");
+    const targetSectionsInput = document.getElementById("targetSections");
+    renderTargetSectionTags();
+    if (targetSectionsInput) {
+      const commitTargetSections = () => {
+        if (!targetSectionsInput.value.trim()) return;
+        addTargetSectionTags(targetSectionsInput.value);
+        targetSectionsInput.value = "";
+      };
+      targetSectionsInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === ",") {
+          event.preventDefault();
+          commitTargetSections();
+        }
       });
+      targetSectionsInput.addEventListener("input", () => {
+        if (/[,\n]/.test(targetSectionsInput.value)) commitTargetSections();
+      });
+      targetSectionsInput.addEventListener("blur", commitTargetSections);
+    }
+    if (targetAudienceSelect) {
+      state.targetAudience = normalizeTargetAudience(state.targetAudience || targetAudienceSelect.value);
+      targetAudienceSelect.value = state.targetAudience;
     }
 
     const isCollabCheckbox = document.getElementById("isCollaboration");
     const partnerBody = document.getElementById("partnerBody");
+    const departmentInputs = [...document.querySelectorAll(".ce-target-department")];
+    let previousDepartmentSelection = null;
+    let lastAudience = "";
+    const updateAudienceControls = () => {
+      state.targetAudience = normalizeTargetAudience(targetAudienceSelect?.value);
+      const needsAudienceDetails = state.targetAudience !== "Open to All";
+      if (targetAudienceDetails) targetAudienceDetails.hidden = !needsAudienceDetails;
+      const organizationMembersOnly = state.targetAudience === "Organization Members Only";
+      if (organizationMembersOnly) {
+        if (lastAudience !== "Organization Members Only") {
+          previousDepartmentSelection = departmentInputs
+            .filter((input) => input.checked)
+            .map((input) => input.value);
+        }
+        const organizingDepartments = getAssociatedOrganizationDepartments();
+        departmentInputs.forEach((input) => {
+          if (organizingDepartments.has(input.value)) {
+            if (state.partnerOrganizations.some(
+              (organization) => getPartnerOrganizationDepartment(organization) === input.value,
+            ) && input.value !== getOrganizingDepartment()) {
+              autoPartnerTargetDepartments.add(input.value);
+            }
+            input.checked = true;
+          } else if (autoPartnerTargetDepartments.has(input.value)) {
+            input.checked = false;
+            autoPartnerTargetDepartments.delete(input.value);
+          }
+          input.disabled = true;
+        });
+      } else {
+        if (lastAudience === "Organization Members Only" && previousDepartmentSelection) {
+          departmentInputs.forEach((input) => {
+            input.checked = previousDepartmentSelection.includes(input.value);
+          });
+        }
+        departmentInputs.forEach((input) => {
+          input.disabled = false;
+        });
+        previousDepartmentSelection = null;
+      }
+      syncPartnerTargetDepartments();
+      state.targetDepartments = needsAudienceDetails
+        ? departmentInputs.filter((input) => input.checked).map((input) => input.value)
+        : [];
+      state.targetYearLevels = needsAudienceDetails
+        ? [...document.querySelectorAll(".ce-target-year:checked")].map((input) => input.value)
+        : [];
+      if (!needsAudienceDetails) {
+        state.targetSections = [];
+        renderTargetSectionTags();
+      }
+      const allYears = document.getElementById("targetAllYears");
+      if (allYears) allYears.checked = state.targetYearLevels.length === 0;
+      const legacyYearField = document.getElementById("targetYear");
+      if (legacyYearField) legacyYearField.value = state.targetYearLevels.join(", ") || "All Levels";
+      if (state.targetAudience === "Mixed Audience" && isCollabCheckbox) {
+        isCollabCheckbox.checked = true;
+        state.isCollaboration = true;
+      }
+      if (isCollabCheckbox && partnerBody) {
+        partnerBody.style.display = isCollabCheckbox.checked ? "" : "none";
+      }
+      updateOutsideGuestsStatus();
+      lastAudience = state.targetAudience;
+    };
+
+    if (targetAudienceSelect) {
+      targetAudienceSelect.addEventListener("change", () => {
+        state.dirty = true;
+        clearFieldError("targetDepartments");
+        updateAudienceControls();
+      });
+    }
+
+    document.querySelectorAll(".ce-target-department, .ce-target-year, #targetAllYears")
+      .forEach((input) => {
+        input.addEventListener("change", () => {
+          if (input.id === "targetAllYears" && input.checked) {
+            document.querySelectorAll(".ce-target-year").forEach((yearInput) => {
+              yearInput.checked = false;
+            });
+          } else if (input.classList.contains("ce-target-year") && input.checked) {
+            const allYears = document.getElementById("targetAllYears");
+            if (allYears) allYears.checked = false;
+          }
+          state.dirty = true;
+          updateAudienceControls();
+        });
+      });
     if (isCollabCheckbox) {
       isCollabCheckbox.checked = Boolean(state.isCollaboration);
       if (partnerBody) {
         partnerBody.style.display = isCollabCheckbox.checked ? "" : "none";
       }
       isCollabCheckbox.addEventListener("change", (e) => {
+        if (state.targetAudience === "Mixed Audience" && !e.target.checked) {
+          e.target.checked = true;
+          state.isCollaboration = true;
+          return;
+        }
         state.isCollaboration = Boolean(e.target.checked);
         state.dirty = true;
         if (partnerBody) {
@@ -4490,20 +4988,26 @@ loadCachedOrganizations();
         }
       });
     }
+    updateAudienceControls();
 
     const btnAddPartner = document.getElementById("btnAddPartner");
     const partnerOrgSelect = document.getElementById("partnerOrgSelect");
     const partnerRoleSelect = document.getElementById("partnerRoleSelect");
     if (btnAddPartner && partnerOrgSelect) {
       btnAddPartner.addEventListener("click", () => {
-        const selectedId = partnerOrgSelect.value;
-        if (!selectedId) return;
-        const orgInfo = partnerOrgsPool.find((o) => o.id === selectedId);
+        const orgInfo = getCanonicalPartnerOrganization(partnerOrgSelect.value);
         if (!orgInfo) return;
+        const selectedId = orgInfo.id;
 
         const role = partnerRoleSelect?.value || "Co-Organizer";
-        const existing = state.partnerOrganizations.find((o) => o.id === selectedId);
+        const existing = state.partnerOrganizations.find(
+          (organization) =>
+            getCanonicalPartnerOrganization(organization.id || organization.name)?.id === selectedId,
+        );
         if (existing) {
+          existing.id = orgInfo.id;
+          existing.name = orgInfo.name;
+          existing.subtitle = orgInfo.subtitle;
           existing.role = role;
         } else {
           state.partnerOrganizations.push({
@@ -4513,6 +5017,7 @@ loadCachedOrganizations();
             role,
           });
         }
+        syncPartnerTargetDepartments();
         state.dirty = true;
         partnerOrgSelect.value = "";
         renderPartnerOrgList();
@@ -4577,217 +5082,83 @@ loadCachedOrganizations();
     return results;
   }
 
-  // 24.b Dynamic Admin Review Documents by Venue
-  const ADMIN_DOCS_CONFIG = [
-    {
-      key: "conceptPaper",
-      title: "Concept Paper",
-      subtitle: "Rationale, objectives, schedule, venue, program flow, signatories, and event details.",
-      requiredFor: ["inside", "outside", "online"],
-    },
-    {
-      key: "programFlow",
-      title: "Program Flow / Itinerary",
-      subtitle: "Detailed sequence of activities and time allocations.",
-      requiredFor: ["inside", "outside", "online"],
-    },
-    {
-      key: "permissionToConduct",
-      title: "Permission to Conduct Activity",
-      subtitle: "Campus permission form, submitted at the appropriate approval stage.",
-      requiredFor: ["inside", "outside", "online"],
-    },
-    {
-      key: "participantList",
-      title: "Participant List",
-      subtitle: "List of attendees or participants for the activity.",
-      requiredFor: ["outside"],
-    },
-    {
-      key: "consentInsurance",
-      title: "Consent Forms / Insurance",
-      subtitle: "Consent and insurance documentation when applicable.",
-      requiredFor: ["outside"],
-    },
-    {
-      key: "facultyCompanion",
-      title: "Faculty Companion Confirmation",
-      subtitle: "Confirm the required regular faculty member accompanying the activity.",
-      requiredFor: ["outside"],
-    },
-  ];
-
-  function getCurrentVenueType() {
-    const venueEl = document.getElementById("venue");
-    const v = (venueEl?.value || "").toLowerCase();
-    if (v.includes("outside pup")) return "outside";
-    if (v.includes("online") || VENUES_FLAT_MAP[venueEl?.value]?.type === "online") return "online";
-    return "inside";
-  }
-
-  function syncApprovalDocsFromAdminDocs() {
-    const currentVenueType = getCurrentVenueType();
-    const visibleDocs = ADMIN_DOCS_CONFIG.filter((doc) => doc.requiredFor.includes(currentVenueType));
-    const visibleKeys = new Set(visibleDocs.map((d) => d.key));
-    state.approvalDocs = Object.keys(state.adminDocs || {})
-      .filter((k) => visibleKeys.has(k) && state.adminDocs[k])
-      .map((k) => state.adminDocs[k]);
-  }
-
-  function showAdminDocError(docKey, msg) {
-    const card = document.getElementById(`adminDocCard_${docKey}`);
-    const errEl = document.getElementById(`error-adminDoc_${docKey}`);
-    if (card) card.classList.add("has-error");
-    if (errEl) {
-      errEl.textContent = msg;
-      errEl.hidden = false;
+  function isGoogleDriveLink(value) {
+    try {
+      const url = new URL(String(value || "").trim());
+      if (url.protocol !== "https:") return false;
+      const host = url.hostname.toLowerCase();
+      const path = url.pathname;
+      if (host === "drive.google.com") {
+        return /\/(?:file\/d|folders)\/[^/]+/.test(path) ||
+          /\/drive\/(?:u\/\d+\/)?folders\/[^/]+/.test(path) ||
+          (/\/(?:open|uc)$/.test(path) && Boolean(url.searchParams.get("id")));
+      }
+      return host === "docs.google.com" &&
+        (/\/(?:document|spreadsheets|presentation)\/(?:u\/\d+\/)?d\/[^/]+/.test(path) ||
+          /\/forms\/(?:u\/\d+\/)?d\/(?:e\/)?[^/]+/.test(path));
+    } catch {
+      return false;
     }
   }
 
-  function clearAdminDocError(docKey) {
-    const card = document.getElementById(`adminDocCard_${docKey}`);
-    const errEl = document.getElementById(`error-adminDoc_${docKey}`);
-    if (card) card.classList.remove("has-error");
-    if (errEl) {
-      errEl.textContent = "";
-      errEl.hidden = true;
-    }
+  function getParticipantDocumentUrls(value) {
+    const records = Array.isArray(value) ? value : value ? [value] : [];
+    return records.flatMap((record) => {
+      if (typeof record === "string") return record.split(/\r?\n/).map((url) => url.trim()).filter(Boolean);
+      if (!record || typeof record !== "object") return [];
+      const url = record.url || record.href || record.downloadURL || record.downloadUrl || record.fileUrl || record.path || "";
+      return url ? [String(url).trim()] : [];
+    });
+  }
+
+  function syncParticipantDocumentLinks() {
+    const input = document.getElementById("participantDocsLinks");
+    const url = input?.value.trim() || "";
+    state.participantDocs = url ? [{
+      name: "Participant Documents",
+      url,
+      type: "Google Drive",
+    }] : [];
+  }
+
+  function getAdminDocsLink(eventData) {
+    const sources = [eventData?.adminDocuments, eventData?.approvalDocuments, eventData?.adminDocsLink];
+    const findLink = (value) => {
+      if (typeof value === "string") return isGoogleDriveLink(value) ? value : "";
+      if (Array.isArray(value)) return value.map(findLink).find(Boolean) || "";
+      if (!value || typeof value !== "object") return "";
+      const directLink = value.url || value.href || value.path || value.downloadURL || value.downloadUrl || "";
+      if (isGoogleDriveLink(directLink)) return directLink;
+      return Object.values(value).map(findLink).find(Boolean) || "";
+    };
+    return sources.map(findLink).find(Boolean) || "";
   }
 
   function renderAdminDocuments() {
     const container = document.getElementById("adminDocsList");
     if (!container) return;
 
-    const currentVenueType = getCurrentVenueType();
-    const visibleDocs = ADMIN_DOCS_CONFIG.filter((doc) => doc.requiredFor.includes(currentVenueType));
-
-    container.innerHTML = visibleDocs.map((doc) => {
-      const file = state.adminDocs && state.adminDocs[doc.key];
-      return `
-        <div class="ce-admin-doc-card ${file ? 'is-uploaded' : ''}" id="adminDocCard_${doc.key}" data-doc-key="${doc.key}">
-          <div class="ce-admin-doc-left">
-            <div class="ce-admin-doc-icon-box" aria-hidden="true">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#701219" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                <polyline points="14 2 14 8 20 8"></polyline>
-                <line x1="16" y1="13" x2="8" y2="13"></line>
-                <line x1="16" y1="17" x2="8" y2="17"></line>
-                <line x1="10" y1="9" x2="8" y2="9"></line>
-              </svg>
-            </div>
-            <div class="ce-admin-doc-info">
-              <h4 class="ce-admin-doc-name">${escapeHTML(doc.title)}</h4>
-              <p class="ce-admin-doc-desc">${escapeHTML(doc.subtitle)}</p>
-              <span class="ce-admin-doc-badge">Required</span>
-              ${file ? `
-                <div class="ce-admin-doc-attached">
-                  <svg class="ce-admin-doc-check-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="2.5" aria-hidden="true">
-                    <polyline points="20 6 9 17 4 12"></polyline>
-                  </svg>
-                  <span class="ce-admin-doc-file-name" title="${escapeHTML(file.name)}">${escapeHTML(file.name)}</span>
-                  <span class="ce-admin-doc-file-size">(${formatFileSize(file.size)})</span>
-                </div>
-              ` : ''}
-              <p class="ce-error ce-admin-doc-error" id="error-adminDoc_${doc.key}" hidden></p>
-            </div>
-          </div>
-          <div class="ce-admin-doc-actions">
-            <input type="file"
-                   id="adminDocInput_${doc.key}"
-                   data-doc-key="${doc.key}"
-                   accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"
-                   style="display:none;">
-            ${file ? `
-              <button type="button" class="ce-admin-doc-choose-btn ce-admin-doc-change-btn" data-doc-key="${doc.key}">Change file</button>
-              <button type="button" class="ce-admin-doc-remove-btn" data-doc-key="${doc.key}" aria-label="Remove ${escapeHTML(file.name)}" title="Remove file">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                  <line x1="18" y1="6" x2="6" y2="18"></line>
-                  <line x1="6" y1="6" x2="18" y2="18"></line>
-                </svg>
-              </button>
-            ` : `
-              <button type="button" class="ce-admin-doc-choose-btn" data-doc-key="${doc.key}">Choose file</button>
-            `}
-          </div>
-        </div>
-      `;
-    }).join("");
-
-    visibleDocs.forEach((doc) => {
-      const input = document.getElementById(`adminDocInput_${doc.key}`);
-      const card = document.getElementById(`adminDocCard_${doc.key}`);
-      if (!input || !card) return;
-
-      const chooseBtn = card.querySelector(".ce-admin-doc-choose-btn");
-      if (chooseBtn) {
-        chooseBtn.addEventListener("click", (e) => {
-          e.stopPropagation();
-          input.click();
-        });
-      }
-
-      const removeBtn = card.querySelector(".ce-admin-doc-remove-btn");
-      if (removeBtn) {
-        removeBtn.addEventListener("click", (e) => {
-          e.stopPropagation();
-          delete state.adminDocs[doc.key];
-          syncApprovalDocsFromAdminDocs();
-          state.dirty = true;
-          renderAdminDocuments();
-          updateAllReadinessChecks();
-        });
-      }
-
-      input.addEventListener("change", (e) => {
-        const file = e.target.files?.[0];
-        if (!file) return;
-
-        const allowedExts = [".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png"];
-        const ext = "." + (file.name.split(".").pop() || "").toLowerCase();
-        if (!allowedExts.includes(ext)) {
-          showAdminDocError(doc.key, "Invalid file format. Allowed: PDF, DOC, DOCX, JPG, PNG");
-          input.value = "";
-          return;
-        }
-
-        const maxSizeBytes = 10 * 1024 * 1024;
-        if (file.size > maxSizeBytes) {
-          showAdminDocError(doc.key, "File size exceeds 10MB limit.");
-          input.value = "";
-          return;
-        }
-
-        clearAdminDocError(doc.key);
-
-        const reader = new FileReader();
-        reader.onload = (readEv) => {
-          const docObj = {
-            id: `ad_${doc.key}_${Date.now()}`,
-            docKey: doc.key,
-            docType: doc.title,
-            name: file.name,
-            size: file.size,
-            type: ext.replace(".", "").toUpperCase(),
-            mime: file.type,
-            dataUrl: readEv.target?.result || "",
-            path: readEv.target?.result || "",
-            url: readEv.target?.result || "",
-            uploadedAt: new Date().toISOString(),
-          };
-
-          if (!state.adminDocs) state.adminDocs = {};
-          state.adminDocs[doc.key] = docObj;
-          syncApprovalDocsFromAdminDocs();
-          state.dirty = true;
-          renderAdminDocuments();
-          updateAllReadinessChecks();
-        };
-        reader.readAsDataURL(file);
-        input.value = "";
-      });
+    container.innerHTML = `
+      <div class="ce-field ce-field--full" id="wrap-adminDocsLink">
+        <label for="adminDocsLink">Google Drive folder/document link <span class="ce-req">*</span></label>
+        <input id="adminDocsLink"
+               name="adminDocsLink"
+               type="url"
+               pattern="^https:\\/\\/(drive|docs)\\.google\\.com\\/.*$"
+               placeholder="https://drive.google.com/..."
+               required
+               aria-describedby="hint-adminDocsLink error-adminDocsLink">
+        <small class="ce-hint" id="hint-adminDocsLink">Use one folder/document link for the Concept Paper, Program Flow, and Permission to Conduct Activity. Access: “Anyone with the link can view”.</small>
+        <p class="ce-error" id="error-adminDocsLink" hidden></p>
+      </div>
+    `;
+    const input = document.getElementById("adminDocsLink");
+    input.value = state.adminDocsLink || "";
+    input.addEventListener("input", () => {
+      state.adminDocsLink = input.value.trim();
+      state.dirty = true;
+      updateAllReadinessChecks();
     });
-
-    syncApprovalDocsFromAdminDocs();
   }
 
   // 25. Reusable Drag & Drop File Upload Component
@@ -5460,17 +5831,18 @@ loadCachedOrganizations();
     const failingChecks = [];
     const manilaInfo = getManilaDateInfo();
 
-    // 1. Event name provided (min 3 chars)
+    // 1. Event name provided (5-150 chars)
     const nameVal = form.eventName?.value.trim() || "";
-    const namePass = nameVal.length >= 3;
-    setCheckStatus("check-name", namePass, "Event name provided (min 3 chars)");
+    const namePass = nameVal.length >= 5 && nameVal.length <= 150 &&
+      /^[\p{L}\p{N}\p{P}\p{Zs}]+$/u.test(nameVal);
+    setCheckStatus("check-name", namePass, "Event name provided (5-150 chars)");
     if (namePass) {
       readyCount++;
     } else {
       failingChecks.push({
         id: "eventName",
-        label: "Event name provided (min 3 chars)",
-        message: nameVal.length === 0 ? "Event name is required (minimum 3 characters)." : "Event name must be at least 3 characters long.",
+        label: "Event name provided (5-150 chars)",
+        message: nameVal.length === 0 ? "Event name is required (minimum 5 characters)." : "Event name must contain 5 to 150 valid characters.",
       });
     }
 
@@ -5619,14 +5991,18 @@ loadCachedOrganizations();
     // 6. Capacity is within venue limit
     let capacityPass = true;
     let capErrMsg = "Capacity exceeds venue limit";
-    const capVal = form.maxCapacity?.value ? parseInt(form.maxCapacity.value, 10) : null;
+    const capValue = form.maxCapacity?.value.trim() || "";
+    const capVal = capValue ? Number(capValue) : NaN;
     const venueRecord = VENUES_FLAT_MAP[venueVal];
     const maxVenueLimit = venueRecord?.maxCapacity;
-    if (capVal && maxVenueLimit) {
+    capacityPass = Number.isInteger(capVal) && capVal > 0;
+    if (capacityPass && maxVenueLimit) {
       capacityPass = capVal <= maxVenueLimit;
       if (!capacityPass) capErrMsg = `Capacity cannot exceed venue maximum of ${maxVenueLimit}.`;
+    } else if (!capacityPass) {
+      capErrMsg = capValue ? "Enter a whole-number capacity greater than zero." : "Capacity is required.";
     }
-    setCheckStatus("check-capacity", capacityPass, capacityPass ? "Capacity is within venue limit" : `Capacity exceeds venue limit of ${maxVenueLimit}`);
+    setCheckStatus("check-capacity", capacityPass, capacityPass ? "Capacity is within venue limit" : capErrMsg);
     if (capacityPass) {
       readyCount++;
     } else {
@@ -5660,22 +6036,19 @@ loadCachedOrganizations();
       });
     }
 
-    // 8. Admin review documents attached
-    const currentVenueType = getCurrentVenueType();
-    const requiredDocs = ADMIN_DOCS_CONFIG.filter((d) => d.requiredFor.includes(currentVenueType));
-    const uploadedCount = requiredDocs.filter((d) => state.adminDocs && state.adminDocs[d.key]).length;
-    const approvalPass = requiredDocs.length > 0 && uploadedCount === requiredDocs.length;
+    // 8. Admin review documents link
+    const approvalPass = isGoogleDriveLink(state.adminDocsLink || "");
     const checkMsg = approvalPass
-      ? `All ${requiredDocs.length} required admin documents attached`
-      : `Admin review documents (${uploadedCount}/${requiredDocs.length} attached)`;
+      ? "Google Drive proposal link provided"
+      : "Provide a Google Drive or Google Docs link for admin review";
     setCheckStatus("check-approvalDocs", approvalPass, checkMsg);
     if (approvalPass) {
       readyCount++;
     } else {
       failingChecks.push({
-        id: "approvalDocs",
-        label: "Approval document attached",
-        message: `Admin review documents (${uploadedCount}/${requiredDocs.length} attached). Please attach required document(s).`,
+        id: "adminDocsLink",
+        label: "Admin proposal documents link",
+        message: "Provide a Google Drive or Google Docs link for admin review.",
       });
     }
 
@@ -5712,7 +6085,6 @@ loadCachedOrganizations();
       failingChecks,
     };
   }
-  }
 
   function setCheckStatus(elementId, passed, labelText) {
     const el = document.getElementById(elementId);
@@ -5748,7 +6120,8 @@ loadCachedOrganizations();
       let inputEl = document.getElementById(id);
       if (!inputEl) {
         if (id === "approvalDocs") inputEl = document.getElementById("dropzoneApproval");
-        else if (id === "participantDocs") inputEl = document.getElementById("dropzoneParticipant");
+        else if (id === "participantDocs") inputEl = document.getElementById("participantDocsLinks");
+        else if (id === "facultyChips") inputEl = document.getElementById("facultySearchInput");
       }
       if (errEl) {
         errEl.textContent = msg;
@@ -5776,8 +6149,10 @@ loadCachedOrganizations();
 
     // 1. Event Name
     const nameVal = form.eventName?.value.trim() || "";
-    if (nameVal.length < 3) {
-      markError("eventName", "Event name is required (minimum 3 characters).");
+    if (nameVal.length < 5 || nameVal.length > 150) {
+      markError("eventName", "Event name must contain 5 to 150 characters.");
+    } else if (!/^[\p{L}\p{N}\p{P}\p{Zs}]+$/u.test(nameVal)) {
+      markError("eventName", "Use letters, numbers, spaces, and punctuation only; line breaks and emoji are not allowed.");
     }
 
     // 2. Categories
@@ -5785,12 +6160,12 @@ loadCachedOrganizations();
       markError("category", "Please select 1 to 3 categories for this event.");
     }
 
-    // 3. Date Validation (Asia/Manila Today up to Dec 31, maxYear)
+    // 3. Date Validation (Asia/Manila today through the same date two years ahead)
     const dateVal = form.eventDate?.value || "";
     if (!dateVal) {
       markError("eventDate", "Date Start is required.");
     } else if (dateVal < manilaInfo.todayStr || dateVal > manilaInfo.maxDateStr) {
-      markError("eventDate", `Choose a date from today up to December 31, ${manilaInfo.maxYear}`);
+      markError("eventDate", `Choose a date from today through ${manilaInfo.maxDateStr}.`);
     }
 
     const dateEndVal = form.eventDateEnd?.value || "";
@@ -5799,7 +6174,7 @@ loadCachedOrganizations();
     } else if (dateEndVal < dateVal) {
       markError("eventDateEnd", "Date End cannot be earlier than Date Start.");
     } else if (dateEndVal > manilaInfo.maxDateStr) {
-      markError("eventDateEnd", `Choose a date up to December 31, ${manilaInfo.maxYear}`);
+      markError("eventDateEnd", `Date End cannot be later than ${manilaInfo.maxDateStr}.`);
     }
 
     // 4. Time Start & Time End / Daily Schedule
@@ -5888,13 +6263,12 @@ loadCachedOrganizations();
     // 6. Capacity
     const venueRecord = VENUES_FLAT_MAP[venueVal];
     const maxVenueLimit = venueRecord?.maxCapacity;
-    if (form.maxCapacity?.value) {
-      const cap = parseInt(form.maxCapacity.value, 10);
-      if (cap <= 0) {
-        markError("maxCapacity", "Capacity must be a positive number.");
-      } else if (maxVenueLimit && cap > maxVenueLimit) {
-        markError("maxCapacity", `Capacity cannot exceed venue maximum of ${maxVenueLimit}.`);
-      }
+    const capValue = form.maxCapacity?.value.trim() || "";
+    const cap = capValue ? Number(capValue) : NaN;
+    if (!Number.isInteger(cap) || cap <= 0) {
+      markError("maxCapacity", "Enter a whole-number capacity greater than zero.");
+    } else if (maxVenueLimit && cap > maxVenueLimit) {
+      markError("maxCapacity", `Capacity cannot exceed venue maximum of ${maxVenueLimit}.`);
     }
 
     // 7. Venue Conflict
@@ -5908,6 +6282,8 @@ loadCachedOrganizations();
 
     if (!regStartVal) {
       markError("registrationStart", "Registration start date and time is required.");
+    } else if (regStartVal < getManilaDateTimeString()) {
+      markError("registrationStart", "Registration start cannot be in the past.");
     }
 
     if (!regEndVal) {
@@ -5942,12 +6318,33 @@ loadCachedOrganizations();
       }
     }
 
-    // 9. Contact Person Name (No numbers allowed)
+    const descriptionVal = form.description?.value.trim() || "";
+    if (descriptionVal.length < 20 || descriptionVal.length > 1500) {
+      markError("description", "Event Description must contain 20 to 1,500 characters.");
+    }
+    const rationaleVal = form.rationale?.value.trim() || "";
+    if (rationaleVal.length < 20 || rationaleVal.length > 1500) {
+      markError("rationale", "Rationale must contain 20 to 1,500 characters.");
+    }
+    const getBulletEntries = (value) => String(value || "")
+      .split(/\r?\n/)
+      .map((entry) => entry.trim().replace(/^[•*–-]\s*/, "").trim())
+      .filter(Boolean);
+    const objectiveEntries = getBulletEntries(form.keyDetails?.value);
+    if (objectiveEntries.length < 1 || objectiveEntries.length > 10 ||
+        objectiveEntries.some((item) => item.length < 5 || item.length > 300)) {
+      markError("keyDetails", "Enter 1 to 10 objectives, each 5 to 300 characters.");
+    }
+    const requirementEntries = getBulletEntries(form.requirements?.value);
+    if (requirementEntries.length > 20 ||
+        requirementEntries.some((item) => item.length < 2 || item.length > 300)) {
+      markError("requirements", "Enter no more than 20 reminders, each 2 to 300 characters.");
+    }
+
+    // 9. Contact Person Name
     const contactNameVal = form.contactName?.value.trim() || "";
-    if (contactNameVal.length < 2) {
-      markError("contactName", "Contact person name is required.");
-    } else if (/\d/.test(contactNameVal)) {
-      markError("contactName", "Contact person name cannot contain numbers.");
+    if (!/^[\p{L} .-]{2,100}$/u.test(contactNameVal)) {
+      markError("contactName", "Enter a 2 to 100 character name using letters, spaces, periods, and hyphens only.");
     }
 
     // 10. Contact Person Email
@@ -5965,25 +6362,23 @@ loadCachedOrganizations();
     }
 
     // 12. Admin Review Documents
-    const currentVenueType = getCurrentVenueType();
-    const requiredDocs = ADMIN_DOCS_CONFIG.filter((d) => d.requiredFor.includes(currentVenueType));
-    let missingDocs = [];
-    requiredDocs.forEach((doc) => {
-      const uploaded = state.adminDocs && state.adminDocs[doc.key];
-      if (!uploaded) {
-        missingDocs.push(doc);
-        showAdminDocError(doc.key, `${doc.title} is required before submission.`);
-      } else {
-        clearAdminDocError(doc.key);
-      }
-    });
-
-    if (missingDocs.length > 0) {
-      isValid = false;
-      if (!firstErrorElement) {
-        firstErrorElement = document.getElementById(`adminDocCard_${missingDocs[0].key}`) || document.getElementById("card-documents");
-      }
-      showToast(`Please upload all required admin documents (${missingDocs.length} missing).`);
+    const adminDocsLink = document.getElementById("adminDocsLink")?.value.trim() || "";
+    if (!isGoogleDriveLink(adminDocsLink)) {
+      markError("adminDocsLink", "Enter a valid Google Drive or Google Docs link.");
+      showToast("Provide a valid Google Drive or Google Docs link for admin review.");
+    }
+    const participantUrl = document.getElementById("participantDocsLinks")?.value.trim() || "";
+    if (participantUrl && !isGoogleDriveLink(participantUrl)) {
+      markError("participantDocs", "Enter a valid Google Drive link with viewing access enabled.");
+    }
+    const registeredFaculty = loadFacultyPool();
+    if (state.participatingFaculty.some((selected) =>
+      !registeredFaculty.some((faculty) =>
+        (selected.id && faculty.id === selected.id) ||
+        String(faculty.name || "").trim().toLowerCase() === String(selected.name || "").trim().toLowerCase(),
+      ),
+    )) {
+      markError("facultyChips", "Select participating faculty from registered faculty members only.");
     }
 
     // 13. Sequential Approval Steps
@@ -5994,32 +6389,83 @@ loadCachedOrganizations();
     }
 
     // 14. Target Audience
-    const targetAudienceVal = form.targetAudience?.value || state.targetAudience || "";
+    const targetAudienceVal = normalizeTargetAudience(form.targetAudience?.value || state.targetAudience);
     if (!targetAudienceVal) {
       markError("targetAudience", "Please select a target audience.");
+    } else if (targetAudienceVal !== "Open to All") {
+      if (!document.querySelector(".ce-target-department:checked")) {
+        markError(
+          "targetDepartments",
+          targetAudienceVal === "Organization Members Only"
+            ? "No department is mapped to this organizing body. Update the organizer profile or choose another target audience."
+            : "Select at least one target department.",
+        );
+      }
+      const sectionsInput = document.getElementById("targetSections");
+      if (sectionsInput?.value.trim()) {
+        addTargetSectionTags(sectionsInput.value);
+        sectionsInput.value = "";
+      }
+      const sections = state.targetSections;
+      if (sections.some((section) => !/^\d{1,2}-\d{1,2}$/.test(section)) ||
+          new Set(sections.map((section) => section.toLowerCase())).size !== sections.length) {
+        markError("targetSections", "Use unique section values such as 1-1 or 2-3.");
+      }
     }
 
     // 14. External Guests validation if any added
     collectExternalGuests();
     if (state.externalGuests && state.externalGuests.length > 0) {
       const guestCards = document.querySelectorAll("#externalGuestsList .ce-guest-card");
+      const seenGuests = new Set();
+      const guestErrors = [];
       state.externalGuests.forEach((g, idx) => {
-        if (!g.name || !g.name.trim()) {
+        const card = guestCards[idx];
+        const fields = {
+          name: card?.querySelector(".ce-guest-name"),
+          organization: card?.querySelector(".ce-guest-org"),
+          contact: card?.querySelector(".ce-guest-email"),
+          role: card?.querySelector(".ce-guest-role"),
+          needs: card?.querySelector(".ce-guest-access"),
+        };
+        const fail = (field, message) => {
+          const input = fields[field];
+          if (input) {
+            input.classList.add("has-error");
+            input.setAttribute("aria-invalid", "true");
+            if (!firstErrorElement) firstErrorElement = input;
+          }
+          guestErrors.push(`Guest ${idx + 1}: ${message}`);
           isValid = false;
-          const card = guestCards[idx];
-          const nameInput = card?.querySelector(".ce-guest-name");
-          if (nameInput) {
-            nameInput.classList.add("has-error");
-            nameInput.setAttribute("aria-invalid", "true");
-            if (!firstErrorElement) firstErrorElement = nameInput;
-          }
-          const errEl = document.getElementById("error-externalGuests");
-          if (errEl) {
-            errEl.textContent = `Please enter the full name for Guest ${idx + 1}.`;
-            errEl.hidden = false;
-          }
+        };
+        if (!/^[\p{L} .-]{2,100}$/u.test(g.name)) {
+          fail("name", "enter a 2 to 100 character name using letters, spaces, periods, or hyphens.");
         }
+        if (g.organization && !/^[\p{L}\p{N} .,&'()-]{1,100}$/u.test(g.organization)) {
+          fail("organization", "affiliation must be 1 to 100 characters and contain no markup.");
+        }
+        if (!(/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(g.email) || /^\+?[\d ()-]{7,20}$/.test(g.email))) {
+          fail("contact", "provide a valid email address or phone number.");
+        }
+        if (!/^[\p{L}\p{N} .,&'()/+-]{2,50}$/u.test(g.role)) {
+          fail("role", "role/topic is required and must be 2 to 50 characters.");
+        }
+        if (g.accessNeeds.length > 500 || /[<>]/.test(g.accessNeeds)) {
+          fail("needs", "needs must be no more than 500 characters and contain no markup.");
+        }
+        const duplicateKey = `${g.name.toLowerCase().replace(/\s+/g, " ")}|${g.email.toLowerCase().replace(/\s+/g, "")}`;
+        if (seenGuests.has(duplicateKey)) {
+          fail("name", "this guest duplicates another guest record.");
+        }
+        seenGuests.add(duplicateKey);
       });
+      if (guestErrors.length) {
+        const errEl = document.getElementById("error-externalGuests");
+        if (errEl) {
+          errEl.textContent = guestErrors.join(" ");
+          errEl.hidden = false;
+        }
+      }
     }
 
     if (!isValid && firstErrorElement) {
@@ -6036,7 +6482,8 @@ loadCachedOrganizations();
     let inputEl = document.getElementById(id);
     if (!inputEl) {
       if (id === "approvalDocs") inputEl = document.getElementById("dropzoneApproval");
-      else if (id === "participantDocs") inputEl = document.getElementById("dropzoneParticipant");
+      else if (id === "participantDocs") inputEl = document.getElementById("participantDocsLinks");
+      else if (id === "facultyChips") inputEl = document.getElementById("facultySearchInput");
     }
     if (errEl) {
       errEl.textContent = "";
@@ -6052,6 +6499,7 @@ loadCachedOrganizations();
   // 29. Save Draft & Submit Event Handlers
   function serializeEvent(status) {
     const form = document.getElementById("createEventMainForm");
+    syncParticipantDocumentLinks();
     const id = state.editingEventId || `${isOrganizerPage ? "org" : "tch"}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const nowISO = new Date().toISOString();
 
@@ -6069,7 +6517,8 @@ loadCachedOrganizations();
     }
 
     const venue = form?.venue?.value || "";
-    const maxCapacity = form?.maxCapacity?.value ? parseInt(form.maxCapacity.value, 10) : null;
+    const capacityValue = form?.maxCapacity?.value.trim() || "";
+    const maxCapacity = capacityValue ? Number(capacityValue) : null;
 
     // Contact phone: treat bare "09" as empty
     let cleanPhone = (form?.contactPhone?.value || "").trim();
@@ -6100,6 +6549,9 @@ loadCachedOrganizations();
       categories: [...state.selectedCategories],
       category: state.selectedCategories.join(", "),
       targetYear: form?.targetYear?.value || "All Levels",
+      targetYearLevels: [...state.targetYearLevels],
+      targetDepartments: [...state.targetDepartments],
+      targetSections: [...state.targetSections],
       date,
       dateISO: date,
       dateStart: date,
@@ -6148,9 +6600,9 @@ loadCachedOrganizations();
       contactPhone: cleanPhone,
       participantDocuments: [...state.participantDocs],
       attachments: [...state.participantDocs],
-      approvalDocuments: [...state.approvalDocs],
-      adminDocuments: { ...(state.adminDocs || {}) },
-      targetAudience: form?.targetAudience?.value || state.targetAudience || "Mixed audience",
+      approvalDocuments: document.getElementById("adminDocsLink")?.value.trim() || state.adminDocsLink || "",
+      adminDocuments: document.getElementById("adminDocsLink")?.value.trim() || state.adminDocsLink || "",
+      targetAudience: normalizeTargetAudience(form?.targetAudience?.value || state.targetAudience),
       isCollaboration: Boolean(state.isCollaboration),
       partnerOrganizations: [...(state.partnerOrganizations || [])],
       collaborationNotes: form?.collaborationNotes?.value.trim() || state.collaborationNotes || "",
@@ -6197,18 +6649,27 @@ loadCachedOrganizations();
       state.mode = "new";
       state.selectedCategories = Array.isArray(target.categories) ? [...target.categories] : [];
       state.participatingFaculty = Array.isArray(target.participatingFaculty) ? [...target.participatingFaculty] : [];
-      state.participantDocs = Array.isArray(target.participantDocuments) ? [...target.participantDocuments] : [];
-      state.approvalDocs = Array.isArray(target.approvalDocuments) ? [...target.approvalDocuments] : [];
-      state.adminDocs = {};
-      if (target.adminDocuments && typeof target.adminDocuments === "object") {
-        state.adminDocs = { ...target.adminDocuments };
-      } else if (Array.isArray(target.approvalDocuments)) {
-        target.approvalDocuments.forEach((doc) => {
-          if (doc.docKey) state.adminDocs[doc.docKey] = doc;
-        });
-      }
+      state.participantDocs = getParticipantDocumentUrls(target.participantDocuments || target.attachments)
+        .filter(isGoogleDriveLink)
+        .map((url, index) => ({
+          name: `Participant Document ${index + 1}`,
+          url,
+          type: "Google Drive",
+        }));
+      state.adminDocsLink = getAdminDocsLink(target);
       state.deadlineManuallyEdited = true;
-      state.targetAudience = target.targetAudience || "Mixed audience";
+      state.targetAudience = normalizeTargetAudience(target.targetAudience);
+      state.targetDepartments = Array.isArray(target.targetDepartments) ? [...target.targetDepartments] : [];
+      state.targetYearLevels = Array.isArray(target.targetYearLevels)
+        ? [...target.targetYearLevels]
+        : target.targetYear && target.targetYear !== "All Levels"
+          ? String(target.targetYear).split(",").map((year) => year.trim()).filter((year) => TARGET_YEARS.includes(year))
+          : [];
+      state.targetSections = Array.isArray(target.targetSections)
+        ? [...target.targetSections]
+        : target.targetSections
+          ? String(target.targetSections).split(/[,\n]/).map((section) => section.trim()).filter(Boolean)
+          : [];
       state.isCollaboration = target.isCollaboration !== undefined ? Boolean(target.isCollaboration) : Boolean(Array.isArray(target.partnerOrganizations) && target.partnerOrganizations.length > 0);
       state.partnerOrganizations = Array.isArray(target.partnerOrganizations) ? [...target.partnerOrganizations] : [];
       state.collaborationNotes = target.collaborationNotes || "";
@@ -6233,8 +6694,9 @@ loadCachedOrganizations();
       if (form) {
         if (form.eventName) form.eventName.value = target.title || target.eventName || "";
         if (form.eventSource) form.eventSource.value = normalizeEventSource(target.source);
-        if (form.targetYear && target.targetYear) form.targetYear.value = target.targetYear;
+        if (form.targetYear) form.targetYear.value = state.targetYearLevels.join(", ") || "All Levels";
         if (form.targetAudience) form.targetAudience.value = state.targetAudience;
+        renderTargetSectionTags();
         if (form.isCollaboration) form.isCollaboration.checked = state.isCollaboration;
         if (form.collaborationNotes) form.collaborationNotes.value = state.collaborationNotes;
         renderPartnerOrgList();
@@ -6243,6 +6705,7 @@ loadCachedOrganizations();
         if (form.eventDateEnd) {
           form.eventDateEnd.value = target.dateEnd || target.endDate || target.endDateISO || form.eventDate.value;
           form.eventDateEnd.min = form.eventDate.value;
+          form.eventDateEnd.max = getManilaDateInfo().maxDateStr;
         }
         if (form.dailySchedule) {
           form.dailySchedule.value = target.dailySchedule || "Same time each day";
@@ -6277,6 +6740,12 @@ loadCachedOrganizations();
         if (form.registrationStart && target.registrationStart) form.registrationStart.value = target.registrationStart;
         if (form.registrationEnd) form.registrationEnd.value = target.registrationEnd || target.registrationDeadline || "";
         if (form.registrationDeadline) form.registrationDeadline.value = target.registrationEnd || target.registrationDeadline || "";
+        if (form.registrationStart) form.registrationStart.min = getManilaDateTimeString();
+        if (form.registrationEnd) {
+          form.registrationEnd.min = form.registrationStart?.value || getManilaDateTimeString();
+          form.registrationEnd.max = calculateMaxRegistrationEnd(form.eventDate?.value || "");
+        }
+        if (form.attendanceRequired) form.attendanceRequired.checked = target.attendanceRequired !== false;
         if (form.description && target.description) form.description.value = target.description;
         if (form.rationale && target.rationale) form.rationale.value = target.rationale;
 

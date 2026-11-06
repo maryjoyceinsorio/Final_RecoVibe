@@ -17,10 +17,12 @@ import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/f
 import {
   auth,
   db,
+  functions,
   rtdb,
   isFirebaseConfigured,
   isRtdbConfigured,
 } from "../UserStudent/firebaseConfig.js";
+import { syncApproverOrganization } from "../organizationScope.js";
 
 (() => {
   "use strict";
@@ -490,7 +492,7 @@ import {
     combineAndRenderNotifications();
   }
 
-  function init() {
+  async function init() {
     if (!isFirebaseConfigured || !db) {
       root.innerHTML =
         '<div class="admin-error">Event data is unavailable. Please contact support.</div>';
@@ -512,17 +514,30 @@ import {
       subscribeToRtdbNotifications(currentAdminUid);
     }
 
-    unsubscribeEvents = onSnapshot(
-      query(collection(db, "events"), orderBy("createdAt", "desc")),
-      (snapshot) => {
-        firestoreEvents = snapshot.docs.map(normalizeEvent);
-        render();
-      },
-      (error) => {
-        console.error("Unable to load dashboard events:", error);
-        root.innerHTML = `<div class="admin-error">Could not load dashboard events. ${esc(error.message || "Please try again later.")}</div>`;
-      },
-    );
+    try {
+      if (auth?.authStateReady) await auth.authStateReady();
+      const organizationCode = await syncApproverOrganization(functions);
+      const eventsQuery = organizationCode === "*"
+        ? query(collection(db, "events"), orderBy("createdAt", "desc"))
+        : query(
+            collection(db, "events"),
+            where("organizationCode", "==", organizationCode),
+          );
+      unsubscribeEvents = onSnapshot(
+        eventsQuery,
+        (snapshot) => {
+          firestoreEvents = snapshot.docs.map(normalizeEvent);
+          render();
+        },
+        (error) => {
+          console.error("Unable to load dashboard events:", error);
+          root.innerHTML = `<div class="admin-error">Could not load dashboard events. ${esc(error.message || "Please try again later.")}</div>`;
+        },
+      );
+    } catch (error) {
+      console.error("Could not verify dashboard approval access:", error);
+      root.innerHTML = '<div class="admin-error">Could not verify your approval access. Please refresh and try again.</div>';
+    }
     unsubscribeNotifications = onSnapshot(
       query(collection(db, "notifications"), where("recipientRole", "==", "admin")),
       renderFirestoreNotifications,

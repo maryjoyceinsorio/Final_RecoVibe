@@ -78,6 +78,30 @@
       </main>
     </div>
     <div class="admin-toast" role="status" aria-live="polite" hidden></div>
-    <script type="module" src="AdminApproval.js"></script>
+    <script type="module" src="AdminApproval.js" id="approvalModule"></script>
+    <script>
+      const approvalRoot = document.getElementById("approvalRoot");
+      document.getElementById("approvalModule")?.addEventListener("error", () => {
+        approvalRoot.innerHTML = `
+          <div class="queue-empty-box" role="alert">
+            <h3>Couldn't start the approval queue</h3>
+            <p>The approval module failed to load. Check that AdminApproval.js and its Firebase imports are reachable, then retry.</p>
+            <button type="button" class="btn-queue-review">Retry</button>
+          </div>
+        `;
+        approvalRoot.querySelector("button")?.addEventListener("click", () => window.location.reload());
+      });
+      window.setTimeout(() => {
+        if (!approvalRoot?.textContent?.includes("Loading approval items")) return;
+        approvalRoot.innerHTML = `
+          <div class="queue-empty-box" role="alert">
+            <h3>Approval queue startup is delayed</h3>
+            <p>The admin session or approver directory is taking longer than expected. Check the browser console for the specific startup error, then retry.</p>
+            <button type="button" class="btn-queue-review">Retry</button>
+          </div>
+        `;
+        approvalRoot.querySelector("button")?.addEventListener("click", () => window.location.reload());
+      }, 5000);
+    </script>
   </body>
 </html>

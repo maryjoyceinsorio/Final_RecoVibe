@@ -14,7 +14,9 @@ const upcomingEventsList = document.getElementById("upcomingEventsList");
 const happeningNowList = document.getElementById("happeningNowList");
 const logoutButton = document.getElementById("organizerLogout");
 let unsubscribeEvents = [];
+let unsubscribeAuth = null;
 let organizerEvents = [];
+let signingOut = false;
 const eventsById = new Map();
 const eventsBySource = new Map();
 
@@ -276,104 +278,130 @@ actionRows?.addEventListener("click", (event) => {
 if (!isFirebaseConfigured || !auth || !db) {
   showLoadError("Event data is unavailable. Please contact support.");
 } else {
-  onAuthStateChanged(auth, (user) => {
-    unsubscribeEvents.forEach((unsubscribe) => unsubscribe());
-    unsubscribeEvents = [];
-    eventsById.clear();
-    eventsBySource.clear();
-    organizerEvents = [];
-
-    if (!user) {
-      window.location.replace(loginPath);
-      return;
-    }
-
-    console.log("Organizer UID:", user.uid);
-    renderEvents();
-
-    const q = query(
-      collection(db, "events"),
-      where("createdBy", "==", user.uid),
-    );
-    console.info("[OrganizerDashboard] Firestore query:", {
-      collection: "events",
-      field: "createdBy",
-      value: user.uid,
-    });
-    const legacyOrganizerQuery = query(
-      collection(db, "events"),
-      where("organizerId", "==", user.uid),
-    );
-    console.info("[OrganizerDashboard] Legacy query:", {
-      collection: "events",
-      field: "organizerId",
-      value: user.uid,
-    });
-
-    function subscribeToEvents(eventsQuery, sourceField) {
-      return onSnapshot(
-        eventsQuery,
-        (snapshot) => {
-          console.log("Fetched Events Count:", snapshot.docs.length);
-          console.info(
-            "[OrganizerDashboard] Retrieved document IDs:",
-            snapshot.docs.map((eventDocument) => eventDocument.id),
-          );
-          console.info(`[OrganizerDashboard] Snapshot source: ${sourceField}`);
-          const sourceEvents = new Map(
-            snapshot.docs.map((eventDocument) => [
-              eventDocument.id,
-              normalizeEvent(eventDocument),
-            ]),
-          );
-          eventsBySource.set(sourceField, sourceEvents);
+  auth
+    .authStateReady()
+    .then(() => {
+      unsubscribeAuth = onAuthStateChanged(
+        auth,
+        (user) => {
+          unsubscribeEvents.forEach((unsubscribe) => unsubscribe());
+          unsubscribeEvents = [];
           eventsById.clear();
-          ["organizerId", "createdBy"].forEach((source) => {
-            eventsBySource.get(source)?.forEach((event, eventId) => {
-              eventsById.set(eventId, event);
-            });
-          });
-          organizerEvents = [...eventsById.values()];
-          console.log(
-            ">> LOGGED IN AS UID:",
-            user.uid,
-            "MATCHING EVENTS FOUND:",
-            organizerEvents.length,
-          );
+          eventsBySource.clear();
+          organizerEvents = [];
+
+          if (!user) {
+            window.location.replace(loginPath);
+            return;
+          }
+
+          console.log("Organizer UID:", user.uid);
           renderEvents();
-        },
-        (error) => {
-          console.error(`Unable to load organizer events by ${sourceField}:`, error);
-          if (!eventsById.size) {
+
+          const q = query(
+            collection(db, "events"),
+            where("createdBy", "==", user.uid),
+          );
+          console.info("[OrganizerDashboard] Firestore query:", {
+            collection: "events",
+            field: "createdBy",
+            value: user.uid,
+          });
+          const legacyOrganizerQuery = query(
+            collection(db, "events"),
+            where("organizerId", "==", user.uid),
+          );
+          console.info("[OrganizerDashboard] Legacy query:", {
+            collection: "events",
+            field: "organizerId",
+            value: user.uid,
+          });
+
+          function subscribeToEvents(eventsQuery, sourceField) {
+            return onSnapshot(
+              eventsQuery,
+              (snapshot) => {
+                console.log("Fetched Events Count:", snapshot.docs.length);
+                console.info(
+                  "[OrganizerDashboard] Retrieved document IDs:",
+                  snapshot.docs.map((eventDocument) => eventDocument.id),
+                );
+                console.info(`[OrganizerDashboard] Snapshot source: ${sourceField}`);
+                const sourceEvents = new Map(
+                  snapshot.docs.map((eventDocument) => [
+                    eventDocument.id,
+                    normalizeEvent(eventDocument),
+                  ]),
+                );
+                eventsBySource.set(sourceField, sourceEvents);
+                eventsById.clear();
+                ["organizerId", "createdBy"].forEach((source) => {
+                  eventsBySource.get(source)?.forEach((event, eventId) => {
+                    eventsById.set(eventId, event);
+                  });
+                });
+                organizerEvents = [...eventsById.values()];
+                console.log(
+                  ">> LOGGED IN AS UID:",
+                  user.uid,
+                  "MATCHING EVENTS FOUND:",
+                  organizerEvents.length,
+                );
+                renderEvents();
+              },
+              (error) => {
+                console.error(`Unable to load organizer events by ${sourceField}:`, error);
+                if (!eventsById.size) {
+                  showLoadError("Could not load events. Please try again later.");
+                }
+              },
+            );
+          }
+
+          try {
+            unsubscribeEvents = [
+              subscribeToEvents(q, "createdBy"),
+              subscribeToEvents(legacyOrganizerQuery, "organizerId"),
+            ];
+          } catch (error) {
+            console.error("Unable to start organizer event listeners:", error);
             showLoadError("Could not load events. Please try again later.");
           }
         },
+        (error) => {
+          console.error("Unable to observe organizer authentication state:", error);
+          showLoadError("Could not verify your session. Check your connection and try again.");
+        },
       );
-    }
-
-    try {
-      unsubscribeEvents = [
-        subscribeToEvents(q, "createdBy"),
-        subscribeToEvents(legacyOrganizerQuery, "organizerId"),
-      ];
-    } catch (error) {
-      console.error("Unable to start organizer event listeners:", error);
-      showLoadError("Could not load events. Please try again later.");
-    }
-  });
+    })
+    .catch((error) => {
+      console.error("Unable to initialize organizer authentication state:", error);
+      showLoadError("Could not verify your session. Check your connection and try again.");
+    });
 }
 
 logoutButton?.addEventListener("click", async (event) => {
   event.preventDefault();
+  if (signingOut) return;
+  signingOut = true;
+  logoutButton.disabled = true;
   try {
-    if (auth) await signOut(auth);
-  } finally {
+    if (auth) {
+      await auth.authStateReady();
+      await signOut(auth);
+    }
     localStorage.removeItem("recovibeOrganizerId");
     localStorage.removeItem("recovibeOrganizerProfile");
     window.location.assign(loginPath);
+  } catch (error) {
+    console.error("Unable to sign out organizer:", error);
+    showLoadError("Could not sign out. Your session is still active; please try again.");
+    signingOut = false;
+    logoutButton.disabled = false;
   }
 });
 
 window.addEventListener("beforeunload", () => {
+  unsubscribeAuth?.();
   unsubscribeEvents.forEach((unsubscribe) => unsubscribe());
 });
