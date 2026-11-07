@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 import { collection, onSnapshot, query, where } from "firebase/firestore";
 import { db } from "../../../firebase.js";
-import { approveEvent } from "../events/eventService.js";
+import { approveEvent, EVENT_STATUSES } from "../events/eventService.js";
 import { useAuth } from "../auth/AuthProvider.jsx";
 
 export default function AdminDashboard() {
-  const { user } = useAuth();
+  const { user, profile } = useAuth();
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -13,7 +13,25 @@ export default function AdminDashboard() {
   const [notice, setNotice] = useState("");
 
   useEffect(() => {
-    const pendingEventsQuery = query(collection(db, "events"), where("status", "==", "pending"));
+    const role = profile?.role;
+    const stageStatus = {
+      adviser: EVENT_STATUSES.PENDING_ADVISER,
+      hap: EVENT_STATUSES.PENDING_HAP,
+      osas: EVENT_STATUSES.PENDING_OSAS,
+    }[role];
+
+    setEvents([]);
+    setError("");
+    if (!stageStatus || !user?.uid) {
+      setLoading(false);
+      return undefined;
+    }
+
+    setLoading(true);
+    const filters = [where("status", "==", stageStatus)];
+    if (role === "adviser") filters.push(where("adviserUid", "==", user.uid));
+
+    const pendingEventsQuery = query(collection(db, "events"), ...filters);
     return onSnapshot(
       pendingEventsQuery,
       (snapshot) => {
@@ -27,20 +45,33 @@ export default function AdminDashboard() {
         setLoading(false);
       },
     );
-  }, []);
+  }, [profile?.role, user?.uid]);
 
-  async function handleApprove(eventId) {
+  function canApprove(event) {
+    if (profile?.role === "adviser") {
+      return event.status === EVENT_STATUSES.PENDING_ADVISER && event.adviserUid === user.uid;
+    }
+    if (profile?.role === "hap") return event.status === EVENT_STATUSES.PENDING_HAP;
+    if (profile?.role === "osas") return event.status === EVENT_STATUSES.PENDING_OSAS;
+    return false;
+  }
+
+  async function handleApprove(event) {
     setError("");
     setNotice("");
-    setApprovingId(eventId);
+    setApprovingId(event.id);
     try {
-      await approveEvent(eventId, user.uid);
-      setNotice("Event approved and published to the public feed.");
+      await approveEvent(event.id, user.uid, profile.role, event);
+      setNotice(
+        event.status === EVENT_STATUSES.PENDING_OSAS
+          ? "Event approved and published to the public feed."
+          : `Event approved. It is now ${event.status === EVENT_STATUSES.PENDING_ADVISER ? "waiting for HAP" : "waiting for OSAS"}.`,
+      );
     } catch (approvalError) {
       console.error("Could not approve event:", approvalError);
       setError(
         approvalError.code === "permission-denied"
-          ? "Firestore denied this approval. Confirm that your profile has the admin role."
+          ? "Firestore denied this approval. Confirm that your account is assigned to this approval stage."
           : `Could not approve the event: ${approvalError.message || "Please try again."}`,
       );
     } finally {
@@ -53,7 +84,7 @@ export default function AdminDashboard() {
       <div className="section-heading">
         <div>
           <p className="eyebrow">Administrator</p>
-          <h1>Pending event review</h1>
+          <h1>Pending event approvals</h1>
         </div>
         <span className="count-pill">{events.length} pending</span>
       </div>
@@ -61,13 +92,15 @@ export default function AdminDashboard() {
       {notice && <p className="notice success" role="status">{notice}</p>}
       {loading ? (
         <p className="page-status">Loading pending events…</p>
+      ) : !["adviser", "hap", "osas"].includes(profile?.role) ? (
+        <div className="empty-state"><h2>No approval stage assigned</h2><p>Your account is not assigned to an event approval stage.</p></div>
       ) : events.length === 0 ? (
-        <div className="empty-state"><h2>All caught up</h2><p>No events are waiting for review.</p></div>
+        <div className="empty-state"><h2>All caught up</h2><p>No events are waiting at your approval stage.</p></div>
       ) : (
         <div className="event-grid">
           {events.map((event) => (
             <article className="event-card" key={event.id}>
-              <div className="event-meta"><span className="category-pill">{event.category}</span><span className="status-pill pending">Pending</span></div>
+              <div className="event-meta"><span className="category-pill">{event.category}</span><span className="status-pill pending">{event.status}</span></div>
               <h2>{event.title}</h2>
               <p className="event-description">{event.description || "No description provided."}</p>
               <dl className="event-details">
@@ -75,14 +108,18 @@ export default function AdminDashboard() {
                 <div><dt>Location</dt><dd>{event.location}</dd></div>
                 <div><dt>Submitted by</dt><dd>{event.createdByName || "RecoVibe user"}</dd></div>
               </dl>
-              <button
-                className="primary-button"
-                type="button"
-                disabled={approvingId === event.id}
-                onClick={() => handleApprove(event.id)}
-              >
-                {approvingId === event.id ? "Approving…" : "Approve and publish"}
-              </button>
+              {canApprove(event) ? (
+                <button
+                  className="primary-button"
+                  type="button"
+                  disabled={approvingId === event.id}
+                  onClick={() => handleApprove(event)}
+                >
+                  {approvingId === event.id ? "Approving…" : "Approve"}
+                </button>
+              ) : (
+                <p className="muted" role="status">This event is not assigned to your approval stage.</p>
+              )}
             </article>
           ))}
         </div>

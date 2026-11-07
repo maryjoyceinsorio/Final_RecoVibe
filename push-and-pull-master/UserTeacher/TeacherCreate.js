@@ -15,11 +15,10 @@ const FAVORITES_LIMIT = 5;
 const storage = app ? getStorage(app) : null;
 
 const DEFAULT_APPROVAL_STAGES = [
-  { id: "stage-1", name: "Organization President", reviewer: "Organization President", required: true },
-  { id: "stage-2", name: "Organization Adviser Review", reviewer: "Organization Adviser (Sir Migs)", required: true },
-  { id: "stage-3", name: "OSAS Review", reviewer: "Ma'am Joyce - OSAS", required: true },
-  { id: "stage-4", name: "Director Review", reviewer: "Ma'am Margarita - Director", required: true },
-  { id: "stage-5", name: "Final Approval & Publishing", reviewer: "Authorized approver(s)", required: true },
+  { id: "stage-1", name: "Organization Adviser", reviewer: "Organization Adviser", required: true },
+  { id: "stage-2", name: "Laboratory Head, Property Custodian, Administrative Officer", reviewer: "Laboratory Head, Property Custodian, Administrative Officer", required: true },
+  { id: "stage-3", name: "Head of Academic Programs, QAC Coordinator (HAP)", reviewer: "Head of Academic Programs, QAC Coordinator (HAP)", required: true },
+  { id: "stage-4", name: "OSAS", reviewer: "OSAS", required: true },
 ];
 function normalizeApprovalStages(stages) {
   const source = Array.isArray(stages) && stages.length ? stages : DEFAULT_APPROVAL_STAGES;

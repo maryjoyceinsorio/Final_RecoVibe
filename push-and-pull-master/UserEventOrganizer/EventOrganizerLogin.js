@@ -13,6 +13,19 @@ import { auth, authReady, db, isFirebaseConfigured } from "../UserStudent/fireba
   const setInvalid = (id, invalid) =>
     document.getElementById(id).classList.toggle("invalid", invalid);
   let signingIn = false;
+  const PROFILE_VERIFICATION_TIMEOUT_MS = 12000;
+
+  function withTimeout(promise, timeoutMs) {
+    let timeoutId;
+    const timeout = new Promise((_, reject) => {
+      timeoutId = window.setTimeout(() => {
+        reject(Object.assign(new Error("Organizer profile verification timed out."), {
+          code: "profile/timeout",
+        }));
+      }, timeoutMs);
+    });
+    return Promise.race([promise, timeout]).finally(() => window.clearTimeout(timeoutId));
+  }
 
   function normalizeRole(value) {
     return String(value || "")
@@ -111,14 +124,19 @@ import { auth, authReady, db, isFirebaseConfigured } from "../UserStudent/fireba
       await authReady;
       const credential = await signInWithEmailAndPassword(auth, email, password);
       authenticated = true;
-      const profile = await findOrganizerProfile(credential.user.uid);
+      banner.textContent = "Verifying organizer account...";
+      banner.classList.add("show");
+      const profile = await withTimeout(
+        findOrganizerProfile(credential.user.uid),
+        PROFILE_VERIFICATION_TIMEOUT_MS,
+      );
 
       const organizerProfile = {
         ...profile,
         uid: credential.user.uid,
         email: credential.user.email || email,
       };
-      localStorage.setItem("recovibeOrganizerId", email);
+      localStorage.setItem("recovibeOrganizerId", credential.user.uid);
       localStorage.setItem(
         "recovibeOrganizerProfile",
         JSON.stringify(organizerProfile),
@@ -162,6 +180,8 @@ import { auth, authReady, db, isFirebaseConfigured } from "../UserStudent/fireba
         banner.textContent = "Your account signed in, but no organizer profile was found. Ask an administrator to verify your organizer account.";
       } else if (error?.code === "profile/role-mismatch") {
         banner.textContent = "This account is not assigned the Event Organizer role. Ask an administrator to check its role.";
+      } else if (error?.code === "profile/timeout") {
+        banner.textContent = "Organizer account verification is taking too long. Check your connection and try again.";
       } else {
         banner.textContent =
           "Your account could not be verified for the organizer portal. Contact an administrator.";
@@ -173,6 +193,10 @@ import { auth, authReady, db, isFirebaseConfigured } from "../UserStudent/fireba
       loginButton.textContent = "Sign in";
     }
   }
+
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) window.location.reload();
+  });
 
   loginButton.addEventListener("click", handleSignIn);
   passwordInput.addEventListener("keydown", (event) => {

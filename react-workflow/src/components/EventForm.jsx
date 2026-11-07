@@ -2,6 +2,7 @@ import { useState } from "react";
 import { addDoc, collection, serverTimestamp } from "firebase/firestore";
 import { db } from "../../../firebase.js";
 import { useAuth } from "../auth/AuthProvider.jsx";
+import { EVENT_STATUSES } from "../events/eventService.js";
 
 const CATEGORIES = ["Academic", "Arts & Culture", "Career", "Community", "Sports", "Other"];
 
@@ -42,19 +43,24 @@ export default function EventForm() {
       setError("Description must be 3,000 characters or fewer.");
       return;
     }
+    if (typeof profile.adviserUid !== "string" || !profile.adviserUid.trim()) {
+      setError("Your account does not have an assigned adviser. Contact an administrator before submitting an event.");
+      return;
+    }
 
     setSaving(true);
     try {
       await addDoc(collection(db, "events"), {
         ...eventData,
-        status: "pending",
+        status: EVENT_STATUSES.PENDING_ADVISER,
+        adviserUid: profile.adviserUid.trim(),
         createdBy: user.uid,
         createdByName: profile.displayName || user.displayName || user.email,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
       setForm({ title: "", description: "", category: CATEGORIES[0], date: "", location: "" });
-      setSuccess("Event submitted. It will appear in the public feed after admin approval.");
+      setSuccess("Event submitted for Adviser approval. It will appear in the public feed after all approval stages are complete.");
     } catch (submitError) {
       console.error("Could not submit event:", submitError);
       setError(
@@ -71,7 +77,7 @@ export default function EventForm() {
     <section className="form-card">
       <p className="eyebrow">Share something happening</p>
       <h1>Submit an event</h1>
-      <p className="muted">New events are reviewed before they are published to everyone.</p>
+      <p className="muted">New events go through Adviser, HAP, and OSAS review before they are published.</p>
       <form className="stack-form" onSubmit={handleSubmit}>
         <label>
           Event title
@@ -100,7 +106,7 @@ export default function EventForm() {
         {error && <p className="notice error" role="alert">{error}</p>}
         {success && <p className="notice success" role="status">{success}</p>}
         <button className="primary-button" type="submit" disabled={saving}>
-          {saving ? "Submitting…" : "Submit for approval"}
+          {saving ? "Submitting…" : "Submit for Adviser approval"}
         </button>
       </form>
     </section>

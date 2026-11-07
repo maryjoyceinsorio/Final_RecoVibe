@@ -11,6 +11,8 @@ import SignIn from "./components/SignIn.jsx";
 import SignUp from "./components/SignUp.jsx";
 import UserManagementDashboard from "./components/UserManagementDashboard.jsx";
 
+const APPROVAL_ROLES = ["adviser", "hap", "osas"];
+
 function ProtectedRoute({ children, allowedRoles }) {
   const { user, profile, profileError, loading } = useAuth();
   if (loading) return <p className="page-status">Loading your account…</p>;
@@ -46,7 +48,7 @@ export default function App() {
         <nav aria-label="Main navigation">
           <Link to="/">Events</Link>
           {user && <Link to="/submit">Submit event</Link>}
-          {["admin", "superadmin"].includes(profile?.role) && <Link to="/admin">Admin review</Link>}
+          {["admin", "superadmin", ...APPROVAL_ROLES].includes(profile?.role) && <Link to="/admin">Event approvals</Link>}
           {profile?.role === "superadmin" && <Link to="/user-management">User management</Link>}
           {!user ? (
             <>
@@ -80,7 +82,7 @@ export default function App() {
           <Route
             path="/admin"
             element={
-              <ProtectedRoute allowedRoles={["admin", "superadmin"]}>
+              <ProtectedRoute allowedRoles={["admin", "superadmin", ...APPROVAL_ROLES]}>
                 <AdminDashboard />
               </ProtectedRoute>
             }

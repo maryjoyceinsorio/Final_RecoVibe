@@ -360,22 +360,17 @@ exports.recordAttendanceByStudentNo = functions.region("asia-southeast1").https.
    ========================================================================== */
 
 const APPROVER_DIRECTORY = {
-  event_head: { key: "event_head", label: "Event Head", stage: 1, defaultOn: true, required: true },
-  vp_doc: { key: "vp_doc", label: "VP for Documentation", stage: 2, defaultOn: true, required: true },
-  vp_ext: { key: "vp_ext", label: "VP for External", stage: 3, defaultOn: false, required: false, suggestIf: "outsideGuests" },
-  org_pres: { key: "org_pres", label: "Org President", stage: 4, defaultOn: true, required: true },
-  org_adv: { key: "org_adv", label: "Organization Adviser", stage: 5, defaultOn: true, required: true },
-  sir_abelida: { key: "sir_abelida", label: "Laboratory Head, Property Custodian, Administrative Officer", stage: 6, defaultOn: true, required: true },
-  hap: { key: "hap", label: "Head of Academic Programs, QAC Coordinator", stage: 7, defaultOn: true, required: true },
-  osas: { key: "osas", label: "OSAS", stage: 8, defaultOn: true, required: true },
+  org_adv: { key: "org_adv", label: "Organization Adviser", stage: 1, defaultOn: true, required: true },
+  sir_abelida: { key: "sir_abelida", label: "Laboratory Head, Property Custodian, Administrative Officer", stage: 2, defaultOn: true, required: true },
+  hap: { key: "hap", label: "Head of Academic Programs, QAC Coordinator (HAP)", stage: 3, defaultOn: true, required: true },
+  osas: { key: "osas", label: "OSAS", stage: 4, defaultOn: true, required: true },
 };
 
 const DEFAULT_SYSTEM_APPROVAL_STAGES = [
-  { id: "stage-1", name: "Organization President", reviewer: "Organization President", required: true },
-  { id: "stage-2", name: "Organization Adviser Review", reviewer: "Organization Adviser (Sir Migs)", required: true },
-  { id: "stage-3", name: "OSAS Review", reviewer: "Ma'am Joyce - OSAS", required: true },
-  { id: "stage-4", name: "Director Review", reviewer: "Ma'am Margarita - Director", required: true },
-  { id: "stage-5", name: "Final Approval & Publishing", reviewer: "Authorized approver(s)", required: true },
+  { id: "org_adv", name: "Organization Adviser", reviewer: "Organization Adviser", required: true },
+  { id: "sir_abelida", name: "Laboratory Head, Property Custodian, Administrative Officer", reviewer: "Laboratory Head, Property Custodian, Administrative Officer", required: true },
+  { id: "hap", name: "Head of Academic Programs, QAC Coordinator (HAP)", reviewer: "Head of Academic Programs, QAC Coordinator (HAP)", required: true },
+  { id: "osas", name: "OSAS", reviewer: "OSAS", required: true },
 ];
 
 const APPROVAL_ACCOUNT_STAGES = [
@@ -429,12 +424,31 @@ async function getSystemSettingsData() {
     .doc("global_config")
     .get();
   const data = snapshot.exists ? snapshot.data() || {} : {};
+  const configuredStages = Array.isArray(data.approvalStages)
+    ? data.approvalStages
+    : [];
+  const approvalStages = APPROVAL_ACCOUNT_STAGES.map((workflowStage, index) => {
+    const defaultStage = DEFAULT_SYSTEM_APPROVAL_STAGES[index];
+    const configuredStage = configuredStages.find((candidate) =>
+      getWorkflowApprovalStage({
+        id: candidate?.id || candidate?.key,
+        label: candidate?.name || candidate?.label,
+        reviewer: candidate?.reviewer,
+      })?.key === workflowStage.key,
+    );
+    return {
+      ...defaultStage,
+      ...(configuredStage || {}),
+      id: workflowStage.key,
+      name: defaultStage.name,
+      reviewer: defaultStage.reviewer,
+      required: true,
+    };
+  });
   return {
     ...data,
     organizations: Array.isArray(data.organizations) ? data.organizations : [],
-    approvalStages: Array.isArray(data.approvalStages) && data.approvalStages.length
-      ? data.approvalStages
-      : DEFAULT_SYSTEM_APPROVAL_STAGES,
+    approvalStages,
   };
 }
 
@@ -853,6 +867,33 @@ function normalizeFirestoreApprovalStages(event, now) {
   return { approvalStages, currentStep, stages, now };
 }
 
+function getWorkflowApprovalStage(stage) {
+  const stageIdentity = {
+    approvalStage: stage.id || stage.key,
+    approvalRole: stage.label || stage.name,
+    approverRole: stage.reviewer,
+  };
+  const exactMatch = getApprovalStageForProfile(stageIdentity);
+  if (exactMatch) return exactMatch;
+
+  const rawValues = [
+    stageIdentity.approvalStage,
+    stageIdentity.approvalRole,
+    stageIdentity.approverRole,
+  ].filter(Boolean).map(String);
+  const normalizedValues = rawValues.map(normalizeApprovalKey);
+  return APPROVAL_ACCOUNT_STAGES.find((workflowStage) =>
+    [workflowStage.key, workflowStage.label, ...workflowStage.aliases].some((alias) => {
+      const normalizedAlias = normalizeApprovalKey(alias);
+      if (normalizedAlias.length <= 4) {
+        const tokenPattern = new RegExp(`(^|[^a-z0-9])${normalizedAlias}([^a-z0-9]|$)`, "i");
+        return rawValues.some((value) => tokenPattern.test(value));
+      }
+      return normalizedValues.some((value) => value.includes(normalizedAlias));
+    }),
+  ) || null;
+}
+
 function getCurrentFirestoreApprovalStage(normalized, uid) {
   const currentStage = normalized.stages.find(
     (stage) => stage.step === normalized.currentStep,
@@ -1055,12 +1096,39 @@ exports.approveFirestoreEvent = functions.region("asia-southeast1").https.onCall
     stageRecord.updatedAt = now;
     stageRecord.note = "Approved.";
 
-    const nextStage = normalized.stages.find((candidate) => candidate.step > stageRecord.step);
+    const activeWorkflowStage = getWorkflowApprovalStage(stage);
+    const workflowStages = normalized.stages.filter((candidate) =>
+      candidate.required && getWorkflowApprovalStage(candidate),
+    );
+    const missingWorkflowStages = APPROVAL_ACCOUNT_STAGES.filter((workflowStage) =>
+      !workflowStages.some((candidate) =>
+        getWorkflowApprovalStage(candidate)?.key === workflowStage.key,
+      ),
+    );
+    if (!activeWorkflowStage || missingWorkflowStages.length) {
+      throw new functions.https.HttpsError(
+        "failed-precondition",
+        "This proposal does not have all four required approval stages configured.",
+      );
+    }
+    const nextStage = workflowStages.find((candidate) => candidate.step > stageRecord.step);
     if (nextStage) {
       normalized.approvalStages[nextStage.id].status = "review";
       normalized.approvalStages[nextStage.id].updatedAt = now;
     }
-    const isComplete = !nextStage;
+    const isComplete = APPROVAL_ACCOUNT_STAGES.every((workflowStage) => {
+      const configuredStage = workflowStages.find((candidate) =>
+        getWorkflowApprovalStage(candidate)?.key === workflowStage.key,
+      );
+      return configuredStage &&
+        normalized.approvalStages[configuredStage.id]?.status === "approved";
+    });
+    if (!isComplete && !nextStage) {
+      throw new functions.https.HttpsError(
+        "failed-precondition",
+        "Earlier required approval stages must be completed before this proposal can advance.",
+      );
+    }
     const historyEntry = {
       action: "approved",
       stageId: stage.key,
@@ -1078,7 +1146,7 @@ exports.approveFirestoreEvent = functions.region("asia-southeast1").https.onCall
       approvalCurrentStep: isComplete ? null : nextStage.step,
       approvalUpdatedAt: now,
       approvalHistory: admin.firestore.FieldValue.arrayUnion(historyEntry),
-      status: isComplete ? "ready_to_publish" : "pending",
+      status: isComplete ? "approved" : "pending",
       ...(isComplete
         ? {
             approvedBy: caller.uid,
@@ -1102,7 +1170,7 @@ exports.approveFirestoreEvent = functions.region("asia-southeast1").https.onCall
             approvalStages: normalized.approvalStages,
             approvalStatus: "approved",
             approvalCurrentStep: null,
-            status: "ready_to_publish",
+            status: "approved",
           }
         : null,
     };
@@ -2132,16 +2200,19 @@ exports.publishEvent = functions.region("asia-southeast1").https.onCall(async (d
     }
 
     const status = String(eventData.status || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
-    if (!["ready_to_publish", "approved", "published"].includes(status)) {
+    if (!["ready_to_publish", "approved", "pending", "published"].includes(status)) {
       throw new functions.https.HttpsError("failed-precondition", "Publish unlocks after every approval stage is complete.");
     }
 
     const now = Date.now();
     const normalized = normalizeFirestoreApprovalStages(eventData, now);
-    const allStagesApproved = normalized.stages.length > 0 &&
-      normalized.stages.every(
-        (stage) => normalized.approvalStages[stage.id]?.status === "approved",
+    const allStagesApproved = APPROVAL_ACCOUNT_STAGES.every((workflowStage) => {
+      const configuredStage = normalized.stages.find((stage) =>
+        stage.required && getWorkflowApprovalStage(stage)?.key === workflowStage.key,
       );
+      return configuredStage &&
+        normalized.approvalStages[configuredStage.id]?.status === "approved";
+    });
     if (!allStagesApproved) {
       throw new functions.https.HttpsError("failed-precondition", "Publish unlocks after every approval stage is complete.");
     }

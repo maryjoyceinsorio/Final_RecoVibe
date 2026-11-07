@@ -14,7 +14,9 @@ import {
   doc,
   getDoc,
   onSnapshot,
+  query,
   updateDoc,
+  where,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {
   auth,
@@ -426,7 +428,7 @@ import {
     events.forEach((ev) => {
       const st = normalizeStatus(getEffectiveStatus(ev));
       if (["pending", "revision"].includes(st)) pending++;
-      if (st === "approved") approved++;
+      if (["approved", "published"].includes(st)) approved++;
       if (st === "revision") needsRevision++;
     });
 
@@ -1444,64 +1446,6 @@ import {
       : "";
   }
 
-  function hasOwnedEventMatch(eventData) {
-    const matchKey = getEventMatchKey(eventData);
-    if (!matchKey) return false;
-    const candidates = new Map();
-    [
-      ...getDashboardOwnedEvents(),
-      ...eventDataById.values(),
-    ]
-      .filter((event) => getEventMatchKey(event) === matchKey)
-      .forEach((event) => {
-        const eventId = [event.sourceEventId, event.eventId, event.id]
-          .find((id) => id !== null && id !== undefined && String(id));
-        candidates.set(String(eventId || matchKey), event);
-      });
-    return candidates.size === 1;
-  }
-
-  function getEventOwnershipContext(currentUserId) {
-    const identifiers = getCurrentOwnerIdentifiers(currentUserId);
-    return {
-      ...identifiers,
-      dashboardEventIds: new Set(
-        getDashboardOwnedEvents().flatMap((event) =>
-          [event.id, event.eventId, event.sourceEventId]
-            .filter(Boolean)
-            .map(String),
-        ),
-      ),
-    };
-  }
-
-  function isOwnedFirestoreEvent(eventData, documentId, ownership) {
-    const ownerFields = [
-      eventData.createdBy,
-      eventData.createdByUid,
-      eventData.organizerUid,
-      eventData.organizerId,
-      eventData.authorId,
-      eventData.uid,
-      eventData.ownerUid,
-      eventData.userId,
-    ].flatMap((value) => {
-      if (Array.isArray(value)) return value;
-      if (value && typeof value === "object") {
-        return [value.uid, value.email, value.id, value.userId].filter(Boolean);
-      }
-      return [value];
-    });
-
-    if (ownerFields.some((value) => isCurrentOwner(value, ownership))) {
-      return true;
-    }
-
-    return [documentId, eventData.id, eventData.eventId]
-      .filter(Boolean)
-      .some((eventId) => ownership.dashboardEventIds.has(String(eventId)));
-  }
-
   function subscribeFirestoreEvents() {
     const currentUserId = auth.currentUser?.uid;
     if (!db || !currentUserId) {
@@ -1511,138 +1455,152 @@ import {
       return;
     }
 
-    const unsubscribe = onSnapshot(
-      collection(db, "events"),
-      (snapshot) => {
-        const events = new Map();
-        const ownership = getEventOwnershipContext(currentUserId);
-        const eventSnapshots = [];
-        snapshot.forEach((eventSnapshot) => eventSnapshots.push(eventSnapshot));
-        const matchKeyCounts = new Map();
-        eventSnapshots.forEach((eventSnapshot) => {
-          const matchKey = getEventMatchKey(eventSnapshot.data());
-          if (matchKey) matchKeyCounts.set(matchKey, (matchKeyCounts.get(matchKey) || 0) + 1);
+    const snapshotsBySource = new Map();
+    const successfulSources = new Set();
+    const failedSources = new Set();
+    const processSnapshots = () => {
+      const eventSnapshots = new Map();
+      ["organizerId", "createdBy"].forEach((source) => {
+        snapshotsBySource.get(source)?.forEach((snapshot, eventId) => {
+          eventSnapshots.set(eventId, snapshot);
         });
-        eventSnapshots.forEach((eventSnapshot) => {
-          const eventData = eventSnapshot.data();
-          const eventId = eventSnapshot.id;
-          const matchKey = getEventMatchKey(eventData);
-          const hasUniqueOwnedMatch =
-            matchKeyCounts.get(matchKey) === 1 && hasOwnedEventMatch(eventData);
-          if (!isOwnedFirestoreEvent(eventData, eventId, ownership) && !hasUniqueOwnedMatch) return;
-          const createdAt = eventData.createdAt?.toDate
-            ? eventData.createdAt.toDate().toISOString()
-            : eventData.createdAt || "";
-          const dateISO = normalizeDateValue(
-            eventData.eventDate ||
-              eventData.dateISO ||
-              eventData.date ||
-              eventData.dateStart ||
-              eventData.schedule?.date ||
-              eventData.schedule?.startDate ||
-              eventData.startAt,
-          );
-          const startTime =
-            eventData.timeStart ||
-            eventData.startTime ||
-            eventData.schedule?.timeStart ||
-            eventData.schedule?.startTime ||
-            eventData.schedule?.start ||
-            "";
-          const endTime =
-            eventData.timeEnd ||
-            eventData.endTime ||
-            eventData.schedule?.timeEnd ||
-            eventData.schedule?.endTime ||
-            eventData.schedule?.end ||
-            "";
-          const schedule =
-            eventData.time ||
-            (typeof eventData.schedule === "string" ? eventData.schedule : "") ||
-            [startTime, endTime].filter(Boolean).join(" - ");
-          const approvalStatus =
-            eventData.approvalStatus ||
-            eventData.approval_status ||
-            eventData.adminStatus ||
-            eventData.admin_status ||
-            eventData.adminApprovalStatus ||
-            eventData.approval?.approvalStatus ||
-            eventData.approval?.status ||
-            eventData.reviewStatus ||
-            eventData.publicationStatus ||
-            eventData.moderationStatus ||
-            eventData.eventStatus ||
-            eventData.admin?.status ||
-            eventData.review?.status ||
-            eventData.moderation?.status ||
-            eventData.approvalData?.status ||
-            "";
-          const event = {
-            ...eventData,
-            id: eventId,
-            eventId,
-            sourceEventId: eventData.eventId || eventData.id || eventId,
-            organizerUid:
-              eventData.organizerUid ||
-              eventData.organizerId ||
-              eventData.createdBy ||
-              eventData.authorId ||
-              eventData.uid ||
-              currentUserId,
-            title: eventData.eventName || eventData.title || "Untitled",
-            eventName: eventData.eventName || eventData.title || eventData.name || "Untitled",
-            name: eventData.name || eventData.eventName || eventData.title || "Untitled Event",
-            dateISO,
-            time: schedule,
-            startTime,
-            endTime,
-            venue: eventData.venue || eventData.location || eventData.venueOther || "Location TBA",
-            location: eventData.venue || eventData.location || eventData.venueOther || "Location TBA",
-            category: eventData.category || eventData.eventType || "General",
-            source:
-              eventData.source ||
-              eventData.eventSource ||
-              (eventData.organizerId
-                ? "Organizational"
-                : eventData.organization || eventData.organizerName || "Others / External"),
-            description: eventData.eventDescription || eventData.description || "",
-            firestoreSubmission: true,
-            createdAt,
-            updatedAt: eventData.updatedAt?.toDate
-              ? eventData.updatedAt.toDate().toISOString()
-              : eventData.updatedAt || "",
-            approvalStatus,
-            status: eventData.status || approvalStatus || "pending",
-          };
-          events.set(eventId, event);
-          firestoreApprovalsById.set(eventId, buildFirestoreApproval(event));
-          if (activeTrackingEventId === eventId) {
-            renderTrackerContent(event, getApprovalForEvent(event));
-          }
-        });
+      });
+      const events = new Map();
+      eventSnapshots.forEach((eventSnapshot, eventId) => {
+        const eventData = eventSnapshot.data();
+        const createdAt = eventData.createdAt?.toDate
+          ? eventData.createdAt.toDate().toISOString()
+          : eventData.createdAt || "";
+        const dateISO = normalizeDateValue(
+          eventData.eventDate ||
+            eventData.dateISO ||
+            eventData.date ||
+            eventData.dateStart ||
+            eventData.schedule?.date ||
+            eventData.schedule?.startDate ||
+            eventData.startAt,
+        );
+        const startTime =
+          eventData.timeStart ||
+          eventData.startTime ||
+          eventData.schedule?.timeStart ||
+          eventData.schedule?.startTime ||
+          eventData.schedule?.start ||
+          "";
+        const endTime =
+          eventData.timeEnd ||
+          eventData.endTime ||
+          eventData.schedule?.timeEnd ||
+          eventData.schedule?.endTime ||
+          eventData.schedule?.end ||
+          "";
+        const schedule =
+          eventData.time ||
+          (typeof eventData.schedule === "string" ? eventData.schedule : "") ||
+          [startTime, endTime].filter(Boolean).join(" - ");
+        const approvalStatus =
+          eventData.approvalStatus ||
+          eventData.approval_status ||
+          eventData.adminStatus ||
+          eventData.admin_status ||
+          eventData.adminApprovalStatus ||
+          eventData.approval?.approvalStatus ||
+          eventData.approval?.status ||
+          eventData.reviewStatus ||
+          eventData.publicationStatus ||
+          eventData.moderationStatus ||
+          eventData.eventStatus ||
+          eventData.admin?.status ||
+          eventData.review?.status ||
+          eventData.moderation?.status ||
+          eventData.approvalData?.status ||
+          "";
+        const event = {
+          ...eventData,
+          id: eventId,
+          eventId,
+          sourceEventId: eventData.eventId || eventData.id || eventId,
+          organizerUid:
+            eventData.organizerUid ||
+            eventData.organizerId ||
+            eventData.createdBy ||
+            eventData.authorId ||
+            eventData.uid ||
+            currentUserId,
+          title: eventData.eventName || eventData.title || "Untitled",
+          eventName: eventData.eventName || eventData.title || eventData.name || "Untitled",
+          name: eventData.name || eventData.eventName || eventData.title || "Untitled Event",
+          dateISO,
+          time: schedule,
+          startTime,
+          endTime,
+          venue: eventData.venue || eventData.location || eventData.venueOther || "Location TBA",
+          location: eventData.venue || eventData.location || eventData.venueOther || "Location TBA",
+          category: eventData.category || eventData.eventType || "General",
+          source:
+            eventData.source ||
+            eventData.eventSource ||
+            (eventData.organizerId
+              ? "Organizational"
+              : eventData.organization || eventData.organizerName || "Others / External"),
+          description: eventData.eventDescription || eventData.description || "",
+          firestoreSubmission: true,
+          createdAt,
+          updatedAt: eventData.updatedAt?.toDate
+            ? eventData.updatedAt.toDate().toISOString()
+            : eventData.updatedAt || "",
+          approvalStatus,
+          status: eventData.status || approvalStatus || "pending",
+        };
+        events.set(eventId, event);
+        firestoreApprovalsById.set(eventId, buildFirestoreApproval(event));
+        if (activeTrackingEventId === eventId) {
+          renderTrackerContent(event, getApprovalForEvent(event));
+        }
+      });
 
-        firestoreEventsById = events;
-        const retainedEventIds = new Set(events.keys());
-        firestoreApprovalsById.forEach((_, eventId) => {
-          if (!retainedEventIds.has(eventId)) firestoreApprovalsById.delete(eventId);
-        });
-        approvalsMap.forEach((_, eventId) => {
-          if (!retainedEventIds.has(eventId) && !eventDataById.has(eventId) && !draftsById.has(eventId)) {
-            approvalsMap.delete(eventId);
+      firestoreEventsById = events;
+      const retainedEventIds = new Set(events.keys());
+      firestoreApprovalsById.forEach((_, eventId) => {
+        if (!retainedEventIds.has(eventId)) firestoreApprovalsById.delete(eventId);
+      });
+      approvalsMap.forEach((_, eventId) => {
+        if (!retainedEventIds.has(eventId) && !eventDataById.has(eventId) && !draftsById.has(eventId)) {
+          approvalsMap.delete(eventId);
+        }
+      });
+      firestoreEventsLoaded = true;
+      loadErrorOccurred = successfulSources.size === 0;
+      renderOwnedEvents();
+    };
+    const subscribeToOwnedEvents = (field) => {
+      const eventsQuery = query(
+        collection(db, "events"),
+        where(field, "==", currentUserId),
+      );
+      const unsubscribe = onSnapshot(
+        eventsQuery,
+        (snapshot) => {
+          snapshotsBySource.set(field, new Map(
+            snapshot.docs.map((eventSnapshot) => [eventSnapshot.id, eventSnapshot]),
+          ));
+          successfulSources.add(field);
+          processSnapshots();
+        },
+        (error) => {
+          console.error(`Couldn't load Firestore events by ${field}:`, error);
+          failedSources.add(field);
+          if (successfulSources.size === 0 && failedSources.size === 2) {
+            firestoreEventsLoaded = true;
+            loadErrorOccurred = true;
+            renderOwnedEvents();
           }
-        });
-        firestoreEventsLoaded = true;
-        loadErrorOccurred = false;
-        renderOwnedEvents();
-      },
-      (error) => {
-        console.error("Couldn't load Firestore events:", error);
-        firestoreEventsLoaded = true;
-        loadErrorOccurred = true;
-        renderOwnedEvents();
-      },
-    );
-    firestoreEventUnsubscribers.push(unsubscribe);
+        },
+      );
+      firestoreEventUnsubscribers.push(unsubscribe);
+    };
+    subscribeToOwnedEvents("createdBy");
+    subscribeToOwnedEvents("organizerId");
   }
 
   function cleanupListeners() {
@@ -1887,10 +1845,25 @@ import {
       }
       const eventId = existingEntry?.[0] || eventIds[0];
       if (eventId) {
-        mergedEvents.set(eventId, {
-          ...(existingEntry?.[1] || {}),
+        const existingEvent = existingEntry?.[1] || {};
+        const mergedEvent = {
+          ...existingEvent,
           ...event,
-        });
+        };
+        const sourceEvents = [existingEvent, event];
+        const hasPublishedSource = sourceEvents.some((source) =>
+          getEventStatusValues(source).includes("published") ||
+          [source.published, source.isPublished, source.isLive].some(hasTrueFlag),
+        );
+        const hasNonPublishedTerminalSource = sourceEvents.some((source) =>
+          getEventStatusValues(source).some((status) =>
+            ["cancelled", "rejected", "revision"].includes(status),
+          ),
+        );
+        if (hasPublishedSource && !hasNonPublishedTerminalSource) {
+          mergedEvent.status = "published";
+        }
+        mergedEvents.set(eventId, mergedEvent);
       }
     });
     organizerEvents = [...mergedEvents.values()].sort((a, b) => {

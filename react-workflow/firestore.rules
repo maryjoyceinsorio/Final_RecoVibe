@@ -20,6 +20,55 @@ service cloud.firestore {
       );
     }
 
+    function approvalRole() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get("status", "Active") == "Active"
+        ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get("role", "")
+        : "";
+    }
+
+    function isEventApprover() {
+      return approvalRole() in ["adviser", "hap", "osas"];
+    }
+
+    function isPendingApprovalEvent(eventData) {
+      return eventData.get("status", "") in [
+        "pending",
+        "pending_approval",
+        "needs_revision",
+        "Pending Adviser Approval",
+        "Pending HAP Approval",
+        "Pending OSAS Approval"
+      ];
+    }
+
+    function canReadAtApprovalStage(eventData) {
+      return isEventApprover() && (
+        (
+          approvalRole() == "adviser"
+          && eventData.get("status", "") == "Pending Adviser Approval"
+          && eventData.get("adviserUid", "") == request.auth.uid
+        )
+        || (
+          approvalRole() == "hap"
+          && eventData.get("status", "") == "Pending HAP Approval"
+        )
+        || (
+          approvalRole() == "osas"
+          && eventData.get("status", "") == "Pending OSAS Approval"
+        )
+      );
+    }
+
+    function assignedAdviserExists(adviserUid) {
+      let adviserPath = /databases/$(database)/documents/users/$(adviserUid);
+      return adviserUid is string
+        && adviserUid.size() > 0
+        && exists(adviserPath)
+        && get(adviserPath).data.get("role", "") == "adviser";
+    }
+
     function isSuperAdmin() {
       return signedIn()
         && exists(/databases/$(database)/documents/users/$(request.auth.uid))
@@ -58,7 +107,9 @@ service cloud.firestore {
           ])
           && request.resource.data.displayName is string
           && request.resource.data.email is string
-          && request.resource.data.role in ["admin", "organizer", "teacher"]
+          && request.resource.data.role in [
+            "admin", "organizer", "teacher", "adviser", "hap", "osas"
+          ]
           && request.resource.data.uid == userId
           && request.resource.data.status == "Active"
           && request.resource.data.createdBy == request.auth.uid
@@ -148,6 +199,13 @@ service cloud.firestore {
               !request.resource.data.diff(resource.data).affectedKeys().hasAny(["role"])
               || isSuperAdmin()
             )
+            && (
+              !request.resource.data.diff(resource.data).affectedKeys().hasAny(["adviserUid"])
+              || (
+                isSuperAdmin()
+                && assignedAdviserExists(request.resource.data.adviserUid)
+              )
+            )
             && request.resource.data.uid == resource.data.uid
             && request.resource.data.createdAt == resource.data.createdAt
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
@@ -155,7 +213,7 @@ service cloud.firestore {
               "name", "email", "contactNumber", "contact", "phone", "department",
               "course", "program", "yearSection", "section", "organization", "org",
               "role", "status", "isActive", "studentNumber", "studentNo",
-              "accountNo", "accountNumber", "roleSuffix", "updatedAt"
+              "accountNo", "accountNumber", "roleSuffix", "adviserUid", "updatedAt"
             ])
           )
         );
@@ -183,11 +241,11 @@ service cloud.firestore {
         && accountRole() in ["user", "organizer"]
         && request.resource.data.keys().hasOnly([
           "title", "description", "category", "date", "location", "status",
-          "createdBy", "createdByName", "createdAt", "updatedAt"
+          "adviserUid", "createdBy", "createdByName", "createdAt", "updatedAt"
         ])
         && request.resource.data.keys().hasAll([
           "title", "description", "category", "date", "location", "status",
-          "createdBy", "createdAt", "updatedAt"
+          "adviserUid", "createdBy", "createdAt", "updatedAt"
         ])
         && request.resource.data.title is string
         && request.resource.data.title.size() >= 3
@@ -202,26 +260,59 @@ service cloud.firestore {
         && request.resource.data.location is string
         && request.resource.data.location.size() > 0
         && request.resource.data.location.size() <= 200
-        && request.resource.data.status == "pending"
+        && request.resource.data.status == "Pending Adviser Approval"
+        && assignedAdviserExists(request.resource.data.adviserUid)
         && request.resource.data.createdBy == request.auth.uid
         && request.resource.data.createdAt == request.time
         && request.resource.data.updatedAt == request.time;
 
       allow read: if resource.data.status == "approved"
-        || (signedIn() && resource.data.createdBy == request.auth.uid)
-        || isAdmin();
+        || (
+          signedIn()
+          && resource.data.createdBy == request.auth.uid
+          && !isEventApprover()
+          && !isAdmin()
+        )
+        || canReadAtApprovalStage(resource.data)
+        || (isAdmin() && !isPendingApprovalEvent(resource.data));
 
-      allow update: if isAdmin()
-        && resource.data.status == "pending"
-        && request.resource.data.status == "approved"
-        && request.resource.data.approvedBy == request.auth.uid
-        && request.resource.data.approvedAt == request.time
-        && request.resource.data.updatedAt == request.time
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          "status", "approvedBy", "approvedAt", "updatedAt"
-        ]);
+      allow update: if isEventApprover()
+        && (
+          (
+            approvalRole() == "adviser"
+            && resource.data.status == "Pending Adviser Approval"
+            && resource.data.adviserUid == request.auth.uid
+            && request.resource.data.status == "Pending HAP Approval"
+            && request.resource.data.adviserApprovedBy == request.auth.uid
+            && request.resource.data.adviserApprovedAt == request.time
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              "status", "adviserApprovedBy", "adviserApprovedAt", "updatedAt"
+            ])
+          )
+          || (
+            approvalRole() == "hap"
+            && resource.data.status == "Pending HAP Approval"
+            && request.resource.data.status == "Pending OSAS Approval"
+            && request.resource.data.hapApprovedBy == request.auth.uid
+            && request.resource.data.hapApprovedAt == request.time
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              "status", "hapApprovedBy", "hapApprovedAt", "updatedAt"
+            ])
+          )
+          || (
+            approvalRole() == "osas"
+            && resource.data.status == "Pending OSAS Approval"
+            && request.resource.data.status == "approved"
+            && request.resource.data.osasApprovedBy == request.auth.uid
+            && request.resource.data.osasApprovedAt == request.time
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              "status", "osasApprovedBy", "osasApprovedAt", "updatedAt"
+            ])
+          )
+        )
+        && request.resource.data.updatedAt == request.time;
 
-      allow delete: if isAdmin();
+      allow delete: if isAdmin() && !isPendingApprovalEvent(resource.data);
     }
   }
 }

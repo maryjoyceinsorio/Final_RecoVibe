@@ -16,27 +16,22 @@ import {
   "use strict";
 
   const APPROVER_DIRECTORY_DEFAULTS = {
-    event_head: { key: "event_head", label: "Event Head", stage: 1, defaultOn: true, required: true },
-    vp_doc: { key: "vp_doc", label: "VP for Documentation", stage: 2, defaultOn: true, required: true },
-    vp_ext: { key: "vp_ext", label: "VP for External", stage: 3, defaultOn: false, required: false, suggestIf: "outsideGuests" },
-    org_pres: { key: "org_pres", label: "Org President", stage: 4, defaultOn: true, required: true },
-    org_adv: { key: "org_adv", label: "Organization Adviser", stage: 5, defaultOn: true, required: true },
-    sir_abelida: { key: "sir_abelida", label: "Laboratory Head, Property Custodian, Administrative Officer", stage: 6, defaultOn: true, required: false },
-    hap: { key: "hap", label: "Head of Academic Programs, QAC Coordinator", stage: 7, defaultOn: true, required: false },
-    osas: { key: "osas", label: "OSAS", stage: 8, defaultOn: true, required: true },
+    org_adv: { key: "org_adv", label: "Organization Adviser", stage: 1, defaultOn: true, required: true },
+    sir_abelida: { key: "sir_abelida", label: "Laboratory Head, Property Custodian, Administrative Officer", stage: 2, defaultOn: true, required: true },
+    hap: { key: "hap", label: "Head of Academic Programs, QAC Coordinator (HAP)", stage: 3, defaultOn: true, required: true },
+    osas: { key: "osas", label: "OSAS", stage: 4, defaultOn: true, required: true },
   };
   const APPROVAL_ACCOUNT_STAGES = [
-    { key: "org_adv", label: "Organization Adviser", step: 1, required: true, aliases: ["org_adv", "org adviser", "organization adviser", "organization adviser review"] },
-    { key: "sir_abelida", label: "Laboratory Head, Property Custodian, Administrative Officer", step: 2, required: false, aliases: ["sir_abelida", "laboratory head", "property custodian", "administrative officer"] },
-    { key: "hap", label: "Head of Academic Programs, QAC Coordinator", step: 3, required: false, aliases: ["hap", "head of academic programs", "qac coordinator"] },
-    { key: "osas", label: "OSAS", step: 4, required: true, aliases: ["osas"] },
+    { key: "org_adv", label: "Organization Adviser", step: 1, required: true, aliases: ["org_adv", "org adviser", "organization adviser", "organization adviser review", "adviser"] },
+    { key: "sir_abelida", label: "Laboratory Head, Property Custodian, Administrative Officer", step: 2, required: true, aliases: ["sir_abelida", "abelida", "abelidas", "laboratory head", "property custodian", "administrative officer", "lab head", "lab_head"] },
+    { key: "hap", label: "Head of Academic Programs, QAC Coordinator (HAP)", step: 3, required: true, aliases: ["hap", "head of academic programs", "qac coordinator", "head of academic programs qac coordinator"] },
+    { key: "osas", label: "OSAS", step: 4, required: true, aliases: ["osas", "osas review"] },
   ];
   const DEFAULT_FIRESTORE_APPROVAL_STAGES = [
-    { id: "stage-1", name: "Organization President", reviewer: "Organization President", required: true },
-    { id: "stage-2", name: "Organization Adviser Review", reviewer: "Organization Adviser", required: true },
-    { id: "stage-3", name: "OSAS Review", reviewer: "OSAS", required: true },
-    { id: "stage-4", name: "Director Review", reviewer: "Director", required: true },
-    { id: "stage-5", name: "Final Approval & Publishing", reviewer: "Authorized approver(s)", required: true },
+    { id: "org_adv", key: "org_adv", step: 1, name: "Organization Adviser", reviewer: "Organization Adviser", required: true },
+    { id: "sir_abelida", key: "sir_abelida", step: 2, name: "Laboratory Head, Property Custodian, Administrative Officer", reviewer: "Laboratory Head, Property Custodian, Administrative Officer", required: true },
+    { id: "hap", key: "hap", step: 3, name: "Head of Academic Programs, QAC Coordinator (HAP)", reviewer: "Head of Academic Programs, QAC Coordinator (HAP)", required: true },
+    { id: "osas", key: "osas", step: 4, name: "OSAS", reviewer: "OSAS", required: true },
   ];
   const normalizeApprovalKey = (value) => String(value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
   const normalizeOrganizationCode = (value) => String(value || "").trim().replace(/\s+/g, " ").toUpperCase();
@@ -57,7 +52,33 @@ import {
   );
   const getCurrentAdminOrganizationCode = () => getProfileOrganizationCode(currentAdminProfile);
   const isOrgAdviserReviewer = (stage) => isOrganizationAdviserStage(stage);
+  const getApprovalStageFromAccountNumber = (profile) => {
+    const accountNumbers = [
+      profile?.accountNumber,
+      profile?.accountNo,
+      profile?.account_number,
+      profile?.account_no,
+    ].map(normalizeApprovalKey).filter(Boolean);
+    if (accountNumbers.some((accountNumber) => accountNumber.includes("administrative"))) {
+      return APPROVAL_ACCOUNT_STAGES.find((stage) => stage.key === "sir_abelida");
+    }
+    if (accountNumbers.some((accountNumber) =>
+      accountNumber.includes("orgadviser") || accountNumber.includes("orgadvisor"),
+    )) {
+      return APPROVAL_ACCOUNT_STAGES.find((stage) => stage.key === "org_adv");
+    }
+    if (accountNumbers.some((accountNumber) => accountNumber.includes("hap"))) {
+      return APPROVAL_ACCOUNT_STAGES.find((stage) => stage.key === "hap");
+    }
+    if (accountNumbers.some((accountNumber) => accountNumber.includes("osas"))) {
+      return APPROVAL_ACCOUNT_STAGES.find((stage) => stage.key === "osas");
+    }
+    return null;
+  };
   const getApprovalStageForProfile = (profile) => {
+    const accountStage = getApprovalStageFromAccountNumber(profile);
+    if (accountStage) return accountStage;
+
     const identityValues = [
       profile?.approvalStage,
       profile?.approvalStageKey,
@@ -71,9 +92,9 @@ import {
       profile?.adminRole,
       profile?.roleName,
       profile?.stageKey,
-      profile?.accountNumber,
-      profile?.accountNo,
       profile?.position,
+      profile?.role,
+      profile?.userRole,
     ].map(normalizeApprovalKey).filter(Boolean);
     const matches = APPROVAL_ACCOUNT_STAGES.filter((stage) =>
       [stage.key, ...stage.aliases].some((alias) => identityValues.includes(normalizeApprovalKey(alias))),
@@ -109,6 +130,7 @@ import {
   // Application State
   let currentAdminUid = null;
   let currentAdminProfile = null;
+  let verifiedAdminProfileUid = null;
   let currentAdminKey = null; // e.g. "org_adv"
   let approverDirectory = { ...APPROVER_DIRECTORY_DEFAULTS };
 
@@ -202,28 +224,32 @@ import {
 
   async function loadAdminProfileSafely(user, cachedProfile) {
     if (!user || !db) return cachedProfile;
-
-    let timeoutId;
-    try {
-      const snapshot = await Promise.race([
-        getDoc(doc(db, "adminUser", user.uid)),
-        new Promise((_, reject) => {
-          timeoutId = setTimeout(
-            () => reject(new Error("Timed out loading the administrator profile.")),
-            2500,
-          );
-        }),
-      ]);
-      if (!snapshot.exists()) return cachedProfile;
-      return {
-        ...cachedProfile,
-        ...snapshot.data(),
-        uid: user.uid,
-        email: user.email || cachedProfile.email || "",
-      };
-    } finally {
-      clearTimeout(timeoutId);
+    const [adminProfileResult, userProfileResult] = await Promise.allSettled([
+      getDoc(doc(db, "adminUser", user.uid)),
+      getDoc(doc(db, "users", user.uid)),
+    ]);
+    const adminProfile = adminProfileResult.status === "fulfilled" && adminProfileResult.value.exists()
+      ? adminProfileResult.value.data()
+      : null;
+    const userProfile = userProfileResult.status === "fulfilled" && userProfileResult.value.exists()
+      ? userProfileResult.value.data()
+      : null;
+    const profile = adminProfile || userProfile
+      ? { ...(userProfile || {}), ...(adminProfile || {}) }
+      : null;
+    if (!profile) {
+      const readError = [adminProfileResult, userProfileResult]
+        .find((result) => result.status === "rejected")?.reason;
+      if (readError) throw readError;
+      return cachedProfile;
     }
+    verifiedAdminProfileUid = user.uid;
+    return {
+      ...cachedProfile,
+      ...profile,
+      uid: user.uid,
+      email: user.email || cachedProfile.email || "",
+    };
   }
 
   function getFirestoreStageEntries(event) {
@@ -236,36 +262,33 @@ import {
   }
 
   function findFirestoreStageSource(entries, stage) {
-    const stageKey = normalizeApprovalKey(stage.key);
-    return entries.find(([id, source]) =>
-      [id, source.key, source.id].some((value) => normalizeApprovalKey(value) === stageKey),
-    )?.[1];
+    return entries.find(([id, source]) => {
+      const values = [id, source.key, source.roleKey, source.id, source.name, source.label, source.reviewer];
+      return values.some((value) => {
+        const resolvedStage = resolveApprovalStage(value);
+        return resolvedStage?.key === stage.key;
+      });
+    })?.[1];
   }
 
   function getConfiguredFirestoreStages(event) {
     const entries = getFirestoreStageEntries(event);
-    const sourceEntries = entries.length
-      ? entries
-      : DEFAULT_FIRESTORE_APPROVAL_STAGES.map((stage, index) => [stage.id, stage, index]);
-    return sourceEntries
-      .map(([id, source, sourceIndex], index) => ({
-        key: String(source.key || source.id || id),
-        label: String(source.name || source.label || source.reviewer || id),
-        name: String(source.name || source.label || source.reviewer || id),
-        reviewer: String(source.reviewer || source.name || source.label || ""),
-        configuredStep: Number(source.step || source.stage) || (sourceIndex ?? index) + 1,
-        sourceIndex: sourceIndex ?? index,
-        required: source.required !== false,
+    return APPROVAL_ACCOUNT_STAGES.map((stage, index) => {
+      const source = findFirestoreStageSource(entries, stage) || DEFAULT_FIRESTORE_APPROVAL_STAGES[index];
+      return {
+        key: stage.key,
+        label: stage.key === "hap"
+          ? "Head of Academic Programs, QAC Coordinator (HAP)"
+          : stage.label,
+        name: stage.key === "hap"
+          ? "Head of Academic Programs, QAC Coordinator (HAP)"
+          : stage.label,
+        reviewer: source.reviewer || stage.label,
+        step: stage.step,
+        required: true,
         source,
-      }))
-      .filter((stage) => stage.required || entries.length)
-      .sort((first, second) =>
-        first.configuredStep - second.configuredStep || first.sourceIndex - second.sourceIndex,
-      )
-      .map((stage, index) => {
-        const { configuredStep, sourceIndex, ...normalizedStage } = stage;
-        return { ...normalizedStage, step: index + 1 };
-      });
+      };
+    });
   }
 
   function getFirestoreCurrentStageKey(event) {
@@ -319,10 +342,71 @@ import {
   function getCurrentFirestoreStage(event) {
     const stageKey = getFirestoreCurrentStageKey(event);
     const stage = getConfiguredFirestoreStages(event).find((candidate) => candidate.key === stageKey);
-    if (!stage) return null;
-    const assignedUid = String(stage.source?.reviewerUid || stage.source?.uid || "");
-    if (assignedUid && assignedUid !== String(auth?.currentUser?.uid || "")) return null;
-    return stage.key;
+    return stage && isCurrentUserAssignedToStage(event, stage) ? stage.key : null;
+  }
+
+  function getStageAssignment(event, stage) {
+    const configuredStage = stage?.source
+      ? stage
+      : getConfiguredFirestoreStages(event).find((candidate) => candidate.key === stage?.key);
+    const source = configuredStage?.source || stage || {};
+    const keyAssignments = {
+      org_adv: ["orgAdviserUid", "organizationAdviserUid", "adviserUid"],
+      sir_abelida: ["labHeadUid", "laboratoryHeadUid", "propertyCustodianUid", "sirAbelidaUid"],
+      hap: ["hapUid", "qacCoordinatorUid"],
+      osas: ["osasUid"],
+    };
+    const keyEmails = {
+      org_adv: ["orgAdviserEmail", "organizationAdviserEmail", "adviserEmail"],
+      sir_abelida: ["labHeadEmail", "laboratoryHeadEmail", "propertyCustodianEmail", "sirAbelidaEmail"],
+      hap: ["hapEmail", "qacCoordinatorEmail"],
+      osas: ["osasEmail"],
+    };
+    const assignments = event?.approverAssignments?.[stage?.key];
+    const directAssignment = assignments && typeof assignments === "object" ? assignments : {};
+    const uid = String(
+      source.reviewerUid ||
+      source.assignedReviewerUid ||
+      source.approverUid ||
+      source.assignedUid ||
+      source.uid ||
+      directAssignment.reviewerUid ||
+      directAssignment.approverUid ||
+      directAssignment.uid ||
+      keyAssignments[stage?.key]?.map((field) => event?.[field]).find(Boolean) ||
+      event?.[`${stage?.key}ReviewerUid`] ||
+      event?.[`${stage?.key}ApproverUid`] ||
+      approverDirectory[stage?.key]?.uid ||
+      "",
+    ).trim();
+    const email = String(
+      source.reviewerEmail ||
+      source.assignedReviewerEmail ||
+      source.approverEmail ||
+      source.assignedEmail ||
+      directAssignment.reviewerEmail ||
+      directAssignment.approverEmail ||
+      directAssignment.email ||
+      keyEmails[stage?.key]?.map((field) => event?.[field]).find(Boolean) ||
+      event?.[`${stage?.key}ReviewerEmail`] ||
+      event?.[`${stage?.key}ApproverEmail`] ||
+      approverDirectory[stage?.key]?.email ||
+      approverDirectory[stage?.key]?.reviewerEmail ||
+      "",
+    ).trim().toLowerCase();
+    return { uid, email };
+  }
+
+  function isCurrentUserAssignedToStage(event, stage) {
+    const user = auth?.currentUser;
+    if (!user || !stage) return false;
+    const assignment = getStageAssignment(event, stage);
+    if (assignment.uid) return assignment.uid === user.uid;
+    if (assignment.email && user.email) {
+      return assignment.email === user.email.trim().toLowerCase();
+    }
+    return verifiedAdminProfileUid === user.uid &&
+      getApprovalStageForProfile(currentAdminProfile)?.key === stage.key;
   }
 
   async function applyFirestoreDecisionLocally(eventId, decision, note, stage, user) {
@@ -332,13 +416,6 @@ import {
       if (!snapshot.exists()) throw new Error("This proposal no longer exists.");
 
       const event = snapshot.data() || {};
-      if (
-        isOrgAdviserReviewer(stage) &&
-        getEventOrganizationCode(event) !== getCurrentAdminOrganizationCode()
-      ) {
-        throw new Error("This proposal is outside your assigned organization.");
-      }
-
       const entries = getFirestoreStageEntries(event);
       const configuredEntries = entries.length
         ? entries
@@ -351,8 +428,7 @@ import {
             },
           ]);
       const stageSource = findFirestoreStageSource(configuredEntries, stage);
-      const assignedUid = String(stageSource?.reviewerUid || stageSource?.uid || "");
-      if (assignedUid && assignedUid !== user.uid) {
+      if (!isCurrentUserAssignedToStage(event, stage)) {
         throw new Error("This proposal is assigned to a different reviewer account.");
       }
       const stageStatus = String(stageSource?.status || "").trim().toLowerCase().replace(/[\s_-]+/g, " ");
@@ -480,7 +556,7 @@ import {
         } else {
           updates.approvalCurrentStep = null;
           updates.approvalStatus = "approved";
-          updates.status = "ready_to_publish";
+          updates.status = "approved";
         }
       }
 
@@ -511,6 +587,7 @@ import {
     } else {
       currentAdminUid = user.uid;
     }
+    verifiedAdminProfileUid = null;
 
     let storedProfile = {};
     try {
@@ -519,21 +596,21 @@ import {
       console.warn("Could not read the cached administrator profile:", error);
     }
     if (user && storedProfile.uid && storedProfile.uid !== user.uid) storedProfile = {};
-    currentAdminProfile = storedProfile;
-    if (user && db) {
-      try {
-        currentAdminProfile = await loadAdminProfileSafely(user, storedProfile);
-      } catch (error) {
-        console.warn("Could not load the signed-in administrator profile; using available account details:", error);
-        currentAdminProfile = storedProfile;
-      }
-    }
+    currentAdminProfile = {
+      ...storedProfile,
+      ...(user ? { uid: user.uid, email: user.email || storedProfile.email || "" } : {}),
+    };
 
     const profileRole = String(currentAdminProfile.role || currentAdminProfile.userRole || "")
       .trim()
       .toLowerCase()
       .replace(/[\s_-]+/g, "");
-    if (user && profileRole && !["admin", "superadmin"].includes(profileRole)) {
+    if (
+      user &&
+      profileRole &&
+      !["admin", "superadmin"].includes(profileRole) &&
+      !getApprovalStageForProfile(currentAdminProfile)
+    ) {
       alert("Access restricted to administrators.");
       location.replace("AdminLogin.html");
       return;
@@ -566,6 +643,22 @@ import {
     } catch (error) {
       showDashboardLoadError(error);
     }
+
+    if (user && db) {
+      loadAdminProfileSafely(user, storedProfile)
+        .then((profile) => {
+          currentAdminProfile = profile;
+          if (getApprovalStageForProfile(profile)) {
+            findOrAssignAdminKey();
+            subscribeFirestorePendingEvents();
+            if (activeReviewEventId) renderReviewScreen();
+            else renderReviewQueue();
+          }
+        })
+        .catch((error) => {
+          console.warn("Could not load the signed-in administrator profile; using assigned event reviewer identity:", error);
+        });
+    }
   });
 
   function showDashboardLoadError(error) {
@@ -590,9 +683,14 @@ import {
   }
 
   async function initAdminData() {
-    await loadApproverDirectory();
     findOrAssignAdminKey();
     const assignedStage = getAccountStage();
+    loadApproverDirectory().then(() => {
+      findOrAssignAdminKey();
+      subscribeFirestorePendingEvents();
+      if (activeReviewEventId) renderReviewScreen();
+      else renderReviewQueue();
+    });
     // Check URL parameters for direct review link: ?review={eventId}
     const urlParams = new URLSearchParams(window.location.search);
     const reviewId = urlParams.get("review") || urlParams.get("event") || urlParams.get("id");
@@ -611,25 +709,7 @@ import {
       return;
     }
 
-    try {
-      if (!functions) {
-        throw new Error("Approval access could not be verified.");
-      }
-      if (
-        isOrgAdviserReviewer(assignedStage || { key: currentAdminKey }) &&
-        !getCurrentAdminOrganizationCode()
-      ) {
-        throw new Error("Your adviser profile must have an organization assigned.");
-      }
-      await httpsCallable(functions, "syncApproverOrganization")({});
-      subscribeReviewQueue();
-    } catch (error) {
-      queueItems = [];
-      updateQueueBadge(0);
-      console.error("Could not verify administrator proposal access:", error);
-      showToast(error?.message || "Could not verify your proposal access.");
-      if (!activeReviewEventId) renderReviewQueue();
-    }
+    subscribeReviewQueue();
   }
 
   function subscribeFirestorePendingEvents() {
@@ -658,12 +738,6 @@ import {
     const assignedOrganizationCode = isOrganizationAdviser
       ? getCurrentAdminOrganizationCode()
       : "";
-    if (isOrganizationAdviser && !assignedOrganizationCode) {
-      firestorePendingEventsLoaded = true;
-      firestorePendingEventsError = "Your adviser profile must have an organization assigned before proposals can be loaded.";
-      if (!activeReviewEventId) renderReviewQueue();
-      return;
-    }
     firestorePendingEventsTimeout = setTimeout(() => {
       firestorePendingEventsTimeout = null;
       if (firestorePendingEventsLoaded) return;
@@ -675,7 +749,7 @@ import {
 
     try {
       const pendingEventConstraints = [where("status", "==", "pending")];
-      if (isOrganizationAdviser) {
+      if (isOrganizationAdviser && assignedOrganizationCode) {
         pendingEventConstraints.push(
           where("organizationCode", "==", assignedOrganizationCode),
         );
@@ -700,18 +774,10 @@ import {
               id: eventSnapshot.id,
             }));
             firestorePendingEvents = pendingEvents.flatMap((event) => {
-              if (
-                isOrganizationAdviser &&
-                getEventOrganizationCode(event) !== assignedOrganizationCode
-              ) return [];
               const currentStageKey = getFirestoreCurrentStageKey(event);
               const currentStage = getConfiguredFirestoreStages(event)
                 .find((stage) => stage.key === currentStageKey);
-              const assignedUid = String(currentStage?.source?.reviewerUid || currentStage?.source?.uid || "");
-              if (
-                !currentStage ||
-                (assignedUid && assignedUid !== String(auth?.currentUser?.uid || ""))
-              ) return [];
+              if (!currentStage || !isCurrentUserAssignedToStage(event, currentStage)) return [];
               return [{
                 ...event,
                 currentApprovalStage: currentStageKey,
@@ -762,25 +828,14 @@ import {
 
   async function loadApproverDirectory() {
     if (!rtdb) return;
-    let timeoutId;
     try {
-      const snap = await Promise.race([
-        get(ref(rtdb, "approverDirectory")),
-        new Promise((_, reject) => {
-          timeoutId = setTimeout(
-            () => reject(new Error("Timed out loading the approver directory.")),
-            1500,
-          );
-        }),
-      ]);
+      const snap = await get(ref(rtdb, "approverDirectory"));
       const data = snap.val();
       if (data && typeof data === "object") {
         approverDirectory = { ...APPROVER_DIRECTORY_DEFAULTS, ...data };
       }
     } catch (err) {
       console.warn("Could not load approver directory:", err);
-    } finally {
-      clearTimeout(timeoutId);
     }
   }
 
@@ -1466,15 +1521,6 @@ import {
     window.history.pushState(null, "", `AdminApproval.html?review=${encodeURIComponent(eventId)}`);
 
     const renderFirestoreEvent = (eventData) => {
-      if (
-        isOrgAdviserReviewer(getAccountStage() || { key: currentAdminKey }) &&
-        getEventOrganizationCode(eventData) !==
-          getCurrentAdminOrganizationCode()
-      ) {
-        showToast("This proposal is outside your assigned organization.");
-        closeReviewScreen();
-        return;
-      }
       activeEvent = {
         ...eventData,
         name: eventData.eventName || eventData.name || eventData.title || "Untitled Event",
@@ -1546,24 +1592,63 @@ import {
       return;
     }
 
-    const members = activeApproval.members || {};
-    const sortedMembers = Object.values(members).sort(
-      (a, b) => (a.stage || 0) - (b.stage || 0) || (a.step || 0) - (b.step || 0)
-    );
+    const sourceMembers = activeApproval.members || {};
+    const members = Object.fromEntries(APPROVAL_ACCOUNT_STAGES.map((stage) => {
+      const sourceEntry = Object.entries(sourceMembers).find(([key, member]) =>
+        [key, member.key, member.roleKey, member.id, member.label, member.name, member.reviewer]
+          .some((value) => resolveApprovalStage(value)?.key === stage.key),
+      );
+      const source = sourceEntry?.[1] || {};
+      return [stage.key, {
+        ...source,
+        key: stage.key,
+        label: stage.key === "hap"
+          ? "Head of Academic Programs, QAC Coordinator (HAP)"
+          : stage.label,
+        step: stage.step,
+        stage: stage.step,
+        status: source.status || "wait",
+      }];
+    }));
+    const sortedMembers = Object.values(members);
 
     // Identify current admin's member entry
-    const firestoreStageKey = activeFirestoreReview
-      ? getCurrentFirestoreStage(activeEvent)
+    const firestoreCurrentStageKey = activeFirestoreReview
+      ? getFirestoreCurrentStageKey(activeEvent)
       : null;
-    const myMember = members[activeFirestoreReview ? firestoreStageKey : currentAdminKey];
-    const isMyTurn = myMember && myMember.status === "review" && activeApproval.status !== "revision" &&
-      (!activeFirestoreReview ||
-        Boolean(firestoreStageKey));
+    const activeStage = sortedMembers.find((member) => member.status !== "ok") || null;
+    const activeStageKey = activeStage?.key || null;
+    const explicitCurrentStep = Number(
+      activeEvent.currentStep ??
+      activeEvent.approvalCurrentStep ??
+      activeApproval.currentStep ??
+      activeApproval.approvalCurrentStep,
+    );
+    const declaredStageKey = firestoreCurrentStageKey ||
+      sortedMembers.find((member) => Number(member.step) === explicitCurrentStep)?.key ||
+      sortedMembers.find((member) => member.status === "review")?.key ||
+      null;
+    const assignedRole = getApprovalStageForProfile(currentAdminProfile);
+    const isMyTurn = Boolean(
+      activeStage &&
+      activeStage.status === "review" &&
+      activeApproval.status !== "revision" &&
+      (!assignedRole || assignedRole.key === activeStage.key) &&
+      (!declaredStageKey || declaredStageKey === activeStage.key) &&
+      (!Number.isInteger(explicitCurrentStep) || explicitCurrentStep < 1 ||
+        explicitCurrentStep === activeStage.step) &&
+      isCurrentUserAssignedToStage(activeEvent, activeStage) &&
+      (!activeFirestoreReview || firestoreCurrentStageKey === activeStage.key)
+    );
 
     // Header Tag
     let turnTagHtml = "";
     if (isMyTurn) {
-      turnTagHtml = `<span class="turn-badge">Your turn: Step ${myMember.step}</span>`;
+      turnTagHtml = `<span class="turn-badge">Your turn: Step ${activeStage.step}</span>`;
+    } else if (activeStage && !["approved", "rejected", "cancelled"].includes(
+      String(activeApproval.status || "").toLowerCase(),
+    )) {
+      turnTagHtml = `<div class="not-waiting-notice">Waiting for the assigned approver for Step ${activeStage.step}: ${esc(activeStage.label)}.</div>`;
     } else if (activeFirestoreReview) {
       turnTagHtml = `<div class="not-waiting-notice">Approval tracker · review actions are available from the assigned approver queue.</div>`;
     } else {
@@ -1588,7 +1673,7 @@ import {
     // 2. Intermediate Steps
     sortedMembers.forEach((m, idx) => {
       const isLast = idx === sortedMembers.length - 1;
-      const isOwnStep = m.key === (activeFirestoreReview ? firestoreStageKey : currentAdminKey);
+      const isOwnStep = m.key === (activeFirestoreReview ? activeStageKey : currentAdminKey);
       let dotClass = "dot-wait";
       let dotIcon = "–";
       let statusText = "Waiting";
@@ -1707,7 +1792,7 @@ import {
     // Decision Card HTML
     let decisionCardHtml = "";
     if (isMyTurn) {
-      const nextStage = sortedMembers.find((member) => Number(member.step) > Number(myMember.step));
+      const nextStage = sortedMembers.find((member) => Number(member.step) > Number(activeStage.step));
       const fileOptions = filesList
         .map((f) => `<option value="${esc(f.id)}">${esc(f.name)}</option>`)
         .join("");
@@ -1744,6 +1829,15 @@ import {
             `}
             <button type="button" class="btn-decision-reject" id="btnReject">Reject</button>
           </div>
+        </section>
+      `;
+    } else if (activeStage && !["approved", "rejected", "cancelled"].includes(
+      String(activeApproval.status || "").toLowerCase(),
+    )) {
+      decisionCardHtml = `
+        <section class="review-decision-card">
+          <h3>Decision</h3>
+          <p>Waiting for the assigned approver for Step ${activeStage.step}: ${esc(activeStage.label)}.</p>
         </section>
       `;
     }
