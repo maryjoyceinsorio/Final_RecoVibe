@@ -25,6 +25,7 @@ import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/f
 import {
   collection,
   doc,
+  getDoc,
   onSnapshot,
   query,
   runTransaction,
@@ -444,10 +445,28 @@ function loadStudentProfileFromStorage() {
           "Student";
         studentProfile.studentNo =
           u.studentNumber || u.studentNo || u.studentId || "2025-00790-BN-1";
-        studentProfile.organization = u.organization || "";
-        studentProfile.courseOrganization = u.courseOrganization || "";
-        studentProfile.department = u.department || "";
-        studentProfile.departmentCode = u.departmentCode || "";
+        studentProfile.organization = u.organization || u.courseOrganization || "";
+        studentProfile.courseOrganization = u.courseOrganization || u.organization || "";
+        studentProfile.department = u.department || u.departmentCode || "";
+        studentProfile.departmentCode = u.departmentCode || u.department || "";
+
+        // Infer organization from department or course if blank
+        if (!studentProfile.organization && studentProfile.department) {
+          const dept = String(studentProfile.department).toUpperCase();
+          if (dept.includes("IT") || dept.includes("INFORMATION")) {
+            studentProfile.organization = "IBITS";
+            studentProfile.courseOrganization = "IBITS";
+          } else if (dept.includes("CPE") || dept.includes("COMPUTER")) {
+            studentProfile.organization = "ACES";
+            studentProfile.courseOrganization = "ACES";
+          } else if (dept.includes("IE") || dept.includes("INDUSTRIAL")) {
+            studentProfile.organization = "PIIE";
+            studentProfile.courseOrganization = "PIIE";
+          } else if (dept.includes("HRM") || dept.includes("HRSS")) {
+            studentProfile.organization = "HRSS";
+            studentProfile.courseOrganization = "HRSS";
+          }
+        }
       }
     }
   } catch (e) {
@@ -1808,9 +1827,54 @@ function init() {
 
   // Auth state listener
   if (auth) {
-    onAuthStateChanged(auth, (user) => {
+    onAuthStateChanged(auth, async (user) => {
       if (user) {
         currentUid = user.uid;
+        if (db) {
+          try {
+            const userSnap = await getDoc(doc(db, "users", user.uid));
+            if (userSnap.exists()) {
+              const u = userSnap.data();
+              if (u.organization || u.courseOrganization) {
+                studentProfile.organization = u.organization || u.courseOrganization || studentProfile.organization;
+                studentProfile.courseOrganization = u.courseOrganization || u.organization || studentProfile.courseOrganization;
+              }
+              if (u.department || u.departmentCode) {
+                studentProfile.department = u.department || u.departmentCode || studentProfile.department;
+                studentProfile.departmentCode = u.departmentCode || u.department || studentProfile.departmentCode;
+              }
+
+              if (!studentProfile.organization && studentProfile.department) {
+                const dept = String(studentProfile.department).toUpperCase();
+                if (dept.includes("IT") || dept.includes("INFORMATION")) {
+                  studentProfile.organization = "IBITS";
+                  studentProfile.courseOrganization = "IBITS";
+                } else if (dept.includes("CPE") || dept.includes("COMPUTER")) {
+                  studentProfile.organization = "ACES";
+                  studentProfile.courseOrganization = "ACES";
+                } else if (dept.includes("IE") || dept.includes("INDUSTRIAL")) {
+                  studentProfile.organization = "PIIE";
+                  studentProfile.courseOrganization = "PIIE";
+                } else if (dept.includes("HRM") || dept.includes("HRSS")) {
+                  studentProfile.organization = "HRSS";
+                  studentProfile.courseOrganization = "HRSS";
+                }
+              }
+              if (u.firstName || u.fullName || u.name) {
+                studentProfile.fullName = u.fullName || u.name || [u.firstName, u.lastName].filter(Boolean).join(" ");
+                studentProfile.firstName = u.firstName || studentProfile.fullName.split(" ")[0];
+              }
+              console.log(
+                `[Student Dashboard] Verified student profile from Firestore for UID ${user.uid}: Organization = "${studentProfile.organization}", CourseOrg = "${studentProfile.courseOrganization}", Department = "${studentProfile.department}"`
+              );
+              renderGreeting();
+              initSidebar();
+              rebuildStudentEvents();
+            }
+          } catch (profileErr) {
+            console.warn("[Student Dashboard] Could not fetch Firestore user doc:", profileErr);
+          }
+        }
         if (user.displayName && studentProfile.fullName === "Student") {
           studentProfile.fullName = user.displayName;
           studentProfile.firstName = user.displayName.split(" ")[0];

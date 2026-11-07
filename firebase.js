@@ -13,6 +13,7 @@ const firebaseConfig = {
   storageBucket: "recovibe-v1.firebasestorage.app",
   messagingSenderId: "79140044760",
   appId: "1:79140044760:web:8523fc92592e3555fefcad",
+  databaseURL: "https://recovibe-v1-default-rtdb.firebaseio.com",
 };
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);

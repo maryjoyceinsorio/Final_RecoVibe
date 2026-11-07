@@ -14,7 +14,15 @@ function listValues(value) {
 }
 
 function normalizeOrganization(value) {
-  return String(value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const raw = String(value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  // Standardize common student organization abbreviations and aliases
+  if (raw === "PIEE" || raw === "PIIE" || raw.includes("INDUSTRIALENG")) return "PIIE";
+  if (raw === "IBITS" || raw.includes("INFORMATIONTECH")) return "IBITS";
+  if (raw === "ACES" || raw.includes("COMPUTERENG")) return "ACES";
+  if (raw === "SMS" || raw.includes("MANAGEMENT")) return "SMS";
+  if (raw === "HRSS" || raw.includes("HUMANRESOURCE")) return "HRSS";
+  if (raw === "YES" || raw.includes("YOUNGEDUC")) return "YES";
+  return raw;
 }
 
 function normalizeDepartment(value) {
@@ -112,18 +120,25 @@ export function isEventVisibleToStudent(eventData, studentProfile) {
     studentOrganizations.includes(target),
   );
 
+  let isVisible = true;
   if (audienceKey === "organizationmembersonly") {
-    if (!targetOrganizations.length || !matchesOrganization) return false;
-    return !targetDepartments.length || matchesDepartment;
-  }
-  if (audienceKey === "mixedaudience") {
-    if (!targetDepartments.length && !targetOrganizations.length) return false;
-    return matchesDepartment || matchesOrganization;
+    if (!targetOrganizations.length || !matchesOrganization) isVisible = false;
+    else isVisible = !targetDepartments.length || matchesDepartment;
+  } else if (audienceKey === "mixedaudience") {
+    if (!targetDepartments.length && !targetOrganizations.length) isVisible = false;
+    else isVisible = matchesDepartment || matchesOrganization;
+  } else {
+    if (!targetDepartments.length && !targetOrganizations.length) isVisible = true;
+    else {
+      isVisible =
+        (!targetDepartments.length || matchesDepartment) &&
+        (!targetOrganizations.length || matchesOrganization);
+    }
   }
 
-  if (!targetDepartments.length && !targetOrganizations.length) return true;
-  return (
-    (!targetDepartments.length || matchesDepartment) &&
-    (!targetOrganizations.length || matchesOrganization)
+  console.log(
+    `[Audience Filter] Event: "${event.eventName || event.title || event.name || event.id}" | Audience: "${event.targetAudience || 'Default'}" | TargetOrgs: [${targetOrganizations.join(', ')}] | StudentOrgs: [${studentOrganizations.join(', ')}] => Visible: ${isVisible}`
   );
+
+  return isVisible;
 }
