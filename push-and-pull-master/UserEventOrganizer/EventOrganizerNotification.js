@@ -3,6 +3,12 @@ const deletedNotificationStorageKey = "recovibeOrganizerDeletedNotifications";
 const deletedNotificationLifetime = 7 * 24 * 60 * 60 * 1000;
 const organizerId = localStorage.getItem("recovibeOrganizerId");
 const organizerIdentifiers = new Set([organizerId].filter(Boolean));
+let organizerProfile = {};
+try {
+  organizerProfile = JSON.parse(localStorage.getItem("recovibeOrganizerProfile") || "{}");
+} catch (error) {
+  console.error("[OrganizerNotifications] Could not read organizer profile:", error);
+}
 const firestoreNotifications = new Map();
 let firestoreNotificationUnsubscribers = [];
 const savedNotifications = JSON.parse(
@@ -43,6 +49,140 @@ const belongsToCurrentOrganizer = (item) => {
   return !recipients.length ||
     recipients.some((identifier) => organizerIdentifiers.has(identifier));
 };
+const notificationValues = (value) => {
+  const values = Array.isArray(value) ? value : [value];
+  return values.flatMap((entry) => {
+    if (typeof entry === "string") {
+      return entry.split(",").map((item) => item.trim()).filter(Boolean);
+    }
+    if (entry && typeof entry === "object") {
+      return [
+        entry.organizationCode,
+        entry.organizationId,
+        entry.orgCode,
+        entry.orgId,
+        entry.departmentCode,
+        entry.departmentId,
+        entry.code,
+        entry.id,
+        entry.value,
+        entry.name,
+        entry.label,
+      ].filter(Boolean).map(String);
+    }
+    return [];
+  });
+};
+const findNotificationEvent = (eventId) => {
+  if (!eventId) return null;
+  const sources = [];
+  ["recovibeOrganizerEvents", "recovibeEventsCache", "recovibeTeacherEvents"].forEach((key) => {
+    try {
+      const cached = JSON.parse(localStorage.getItem(key) || "[]");
+      if (Array.isArray(cached)) sources.push(cached);
+    } catch (error) {
+      console.warn(`[OrganizerNotifications] Could not read ${key} for audience filtering:`, error);
+    }
+  });
+  return sources.flat().find(
+    (event) => String(event.id || event.eventId || "") === String(eventId),
+  ) || null;
+};
+const normalizeAudienceOrganization = (value) => {
+  const normalized = String(value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (normalized === "PIEE" || normalized === "PIIE" || normalized.includes("INDUSTRIALENG")) return "PIIE";
+  if (normalized === "IBITS" || normalized.includes("INFORMATIONTECH")) return "IBITS";
+  if (normalized === "ACES" || normalized.includes("COMPUTERENG")) return "ACES";
+  if (normalized === "SMS" || normalized.includes("MANAGEMENT")) return "SMS";
+  if (normalized === "HRSS" || normalized.includes("HUMANRESOURCE")) return "HRSS";
+  if (normalized === "YES" || normalized.includes("YOUNGEDUC")) return "YES";
+  return normalized;
+};
+const normalizeAudienceDepartment = (value) => {
+  const label = String(value || "").trim().toLowerCase();
+  const normalized = label.replace(/[^a-z0-9]/g, "");
+  if (normalized === "bsit" || label.includes("information technology")) return "bsit";
+  if (normalized === "bscpe" || label.includes("computer engineering")) return "bscpe";
+  if (normalized === "bsie" || label.includes("industrial engineering")) return "bsie";
+  if (normalized === "bsbahrm" || label.includes("human resource management")) return "bsbahrm";
+  if (label.includes("elementary") || normalized.includes("bselementary")) return "bselementaryeducation";
+  if (label.includes("secondary") || normalized === "bssecondary") return "bssecondary";
+  if (label.includes("psychology") || normalized === "bspsychology") return "bspsychology";
+  return normalized;
+};
+const isNotificationVisibleToOrganizer = (item) => {
+  const event = findNotificationEvent(item.eventId) || {};
+  const audience = String(
+    item.targetAudience || item.audience || event.targetAudience || event.audience || "",
+  ).toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (item.openForAll === true || event.openForAll === true ||
+      audience.startsWith("opentoall") || audience.startsWith("openforall")) return true;
+
+  const scopedNotification = { ...event, ...item };
+  const targetOrganizations = [
+    ...notificationValues(scopedNotification.organizationCodes),
+    ...notificationValues(scopedNotification.targetOrganizations),
+    ...notificationValues(scopedNotification.targetOrganization),
+    ...notificationValues(scopedNotification.audienceOrganizations),
+    ...notificationValues(scopedNotification.coOrganizerOrganizations),
+    ...notificationValues(scopedNotification.coOrganizerOrgIds),
+    ...notificationValues(scopedNotification.coOrganizerOrganization),
+    ...notificationValues(scopedNotification.collaboratorOrganizations),
+    ...notificationValues(scopedNotification.collaboratorOrgIds),
+    ...notificationValues(scopedNotification.collaboratorOrganization),
+    ...notificationValues(scopedNotification.collaborationOrganizations),
+    ...notificationValues(scopedNotification.collaborationOrgIds),
+    ...notificationValues(scopedNotification.collaboratingOrganizations),
+    ...notificationValues(scopedNotification.coOrganizers),
+    ...notificationValues(scopedNotification.coOrganizer),
+    ...notificationValues(scopedNotification.collaborators),
+    ...notificationValues(scopedNotification.collaborator),
+    ...notificationValues(scopedNotification.partnerOrganizations),
+    ...notificationValues(scopedNotification.organizationCode),
+    ...notificationValues(scopedNotification.organizationId),
+    ...notificationValues(scopedNotification.organizerOrganization),
+    ...notificationValues(scopedNotification.orgCode),
+    ...notificationValues(scopedNotification.orgId),
+    ...notificationValues(scopedNotification.organization),
+    ...notificationValues(scopedNotification.organizationName),
+    ...notificationValues(scopedNotification.orgName),
+  ].map(normalizeAudienceOrganization).filter(Boolean);
+  const organizerOrganizations = [
+    ...notificationValues(organizerProfile.organization),
+    ...notificationValues(organizerProfile.organizationCode),
+    ...notificationValues(organizerProfile.organizationId),
+    ...notificationValues(organizerProfile.orgCode),
+    ...notificationValues(organizerProfile.orgId),
+    ...notificationValues(organizerProfile.organizations),
+    ...notificationValues(organizerProfile.courseOrganizations),
+  ].map(normalizeAudienceOrganization).filter(Boolean);
+  const targetDepartments = [
+    ...notificationValues(scopedNotification.departmentCodes),
+    ...notificationValues(scopedNotification.targetDepartments),
+    ...notificationValues(scopedNotification.targetDepartment),
+    ...notificationValues(scopedNotification.targetDepartmentIds),
+    ...notificationValues(scopedNotification.departments),
+    ...notificationValues(scopedNotification.departmentIds),
+    ...notificationValues(scopedNotification.departmentCode),
+    ...notificationValues(scopedNotification.departmentId),
+    ...notificationValues(scopedNotification.department),
+  ].map(normalizeAudienceDepartment).filter(Boolean);
+  const organizerDepartments = [
+    ...notificationValues(organizerProfile.departmentCode),
+    ...notificationValues(organizerProfile.departmentId),
+    ...notificationValues(organizerProfile.department),
+    ...notificationValues(organizerProfile.departments),
+    ...notificationValues(organizerProfile.departmentIds),
+  ].map(normalizeAudienceDepartment).filter(Boolean);
+
+  return targetOrganizations.some((organization) =>
+    organizerOrganizations.includes(organization),
+  ) || targetDepartments.some((department) =>
+    organizerDepartments.includes(department),
+  );
+};
+const belongsToVisibleOrganizer = (item) =>
+  belongsToCurrentOrganizer(item) && isNotificationVisibleToOrganizer(item);
 const normalizeNotification = (item, id = item.id) => {
   const eventStatus = normalizedNotificationStatus(item);
   const createdAt = item.createdAt?.toDate
@@ -77,14 +217,14 @@ const normalizeNotification = (item, id = item.id) => {
 };
 let notifications = Array.isArray(savedNotifications)
   ? savedNotifications.filter(
-      (item) => isEventStatusNotification(item) && belongsToCurrentOrganizer(item),
+      (item) => isEventStatusNotification(item) && belongsToVisibleOrganizer(item),
     )
   : [];
 notifications = notifications.map((item) => normalizeNotification(item));
 deletedNotifications = deletedNotifications.filter(
   (item) =>
     isEventStatusNotification(item) &&
-    belongsToCurrentOrganizer(item),
+    belongsToVisibleOrganizer(item),
 );
 deletedNotifications = deletedNotifications.map((item) => normalizeNotification(item));
 
@@ -111,7 +251,7 @@ function refreshNotificationsFromStorage() {
   );
   notifications = Array.isArray(stored)
     ? stored.filter(
-        (item) => isEventStatusNotification(item) && belongsToCurrentOrganizer(item),
+        (item) => isEventStatusNotification(item) && belongsToVisibleOrganizer(item),
       )
     : [];
   notifications = notifications.map((item) => normalizeNotification(item));
@@ -123,7 +263,7 @@ function saveNotifications() {
     localStorage.getItem(notificationStorageKey) || "[]",
   );
   const others = Array.isArray(stored)
-    ? stored.filter((item) => !belongsToCurrentOrganizer(item))
+    ? stored.filter((item) => !belongsToCurrentOrganizer(item) || !isNotificationVisibleToOrganizer(item))
     : [];
   localStorage.setItem(
     notificationStorageKey,
@@ -138,7 +278,7 @@ function saveDeletedNotifications() {
     localStorage.getItem(deletedNotificationStorageKey) || "[]",
   );
   const others = Array.isArray(stored)
-    ? stored.filter((item) => !belongsToCurrentOrganizer(item))
+    ? stored.filter((item) => !belongsToCurrentOrganizer(item) || !isNotificationVisibleToOrganizer(item))
     : [];
   localStorage.setItem(
     deletedNotificationStorageKey,
@@ -169,10 +309,10 @@ function addOrganizerIdentifiers(user, profile = {}) {
 function persistFirestoreNotifications() {
   const stored = JSON.parse(localStorage.getItem(notificationStorageKey) || "[]");
   const otherNotifications = Array.isArray(stored)
-    ? stored.filter((item) => !belongsToCurrentOrganizer(item))
+    ? stored.filter((item) => !belongsToCurrentOrganizer(item) || !isNotificationVisibleToOrganizer(item))
     : [];
   const localNotifications = Array.isArray(stored)
-    ? stored.filter((item) => belongsToCurrentOrganizer(item) && item.source !== "firestore")
+    ? stored.filter((item) => belongsToVisibleOrganizer(item) && item.source !== "firestore")
     : [];
   localStorage.setItem(
     notificationStorageKey,
@@ -245,7 +385,7 @@ async function listenForFirestoreNotifications() {
                 { ...document.data(), id: document.id, source: "firestore" },
                 document.id,
               );
-              if (isEventStatusNotification(notification) && belongsToCurrentOrganizer(notification)) {
+              if (isEventStatusNotification(notification) && belongsToVisibleOrganizer(notification)) {
                 queryResults.set(document.id, notification);
               }
             });

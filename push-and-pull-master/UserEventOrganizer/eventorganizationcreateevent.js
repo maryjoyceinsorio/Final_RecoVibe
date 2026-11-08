@@ -3205,6 +3205,9 @@ loadCachedOrganizations();
                   startAt: `${formPayload.date || ""} ${formPayload.timeStart || ""}`.trim(),
                   endAt: `${formPayload.dateEnd || formPayload.date || ""} ${formPayload.timeEnd || ""}`.trim(),
                   approvers: [...state.selectedApprovers],
+                  ...(isOrganizerPage && urlParams.get("resubmit")
+                    ? { resubmissionOf: urlParams.get("resubmit") }
+                    : {}),
                 });
                 eventPayload.createdAt = serverTimestamp();
                 eventPayload.updatedAt = serverTimestamp();
@@ -3256,7 +3259,7 @@ loadCachedOrganizations();
                   console.error(`Could not save event ${eventId} to localStorage key ${storageKeyEvents}.`);
                 }
                 state.dirty = false;
-                const successNotice = "Event saved to Firestore as pending. The reviewer approval chain and notifications were not created.";
+                const successNotice = "Event saved to Firestore as pending. The reviewer approval chain was not created. Admins will receive a proposal notification.";
                 submissionStage = "redirecting after successful Firestore write";
                 window.setTimeout(() => {
                   window.location.href = `${redirectListUrl}?new=${encodeURIComponent(eventId)}`;
@@ -6854,7 +6857,32 @@ loadCachedOrganizations();
     return saved;
   }
 
-  // 30. Check Query Param for Direct Edit Mode (?eventId=xxx)
+  // 30. Restore a rejected proposal as a new submission for review.
+  const resubmitEventId = urlParams.get("resubmit");
+  let resubmitEvent = null;
+  if (resubmitEventId) {
+    try {
+      const savedProposal = sessionStorage.getItem("recovibeProposalResubmit");
+      const proposal = savedProposal ? JSON.parse(savedProposal) : null;
+      const ownerIds = [proposal?.organizerUid, proposal?.organizerId, proposal?.createdBy]
+        .filter(Boolean)
+        .map(String);
+      if (
+        !proposal ||
+        String(proposal.eventId || proposal.id) !== resubmitEventId ||
+        !ownerIds.includes(String(userIdentifier))
+      ) {
+        throw new Error("The proposal could not be verified for this organizer.");
+      }
+      resubmitEvent = proposal;
+      sessionStorage.removeItem("recovibeProposalResubmit");
+    } catch (error) {
+      console.error("Could not restore proposal details for resubmission:", error);
+      showToast(error.message || "Could not load this proposal for resubmission.");
+    }
+  }
+
+  // 31. Check Query Param for Direct Edit Mode (?eventId=xxx)
   const queryEventId = urlParams.get("eventId");
   if (queryEventId) {
     const past = loadCurrentUserEvents();
@@ -6915,6 +6943,11 @@ loadCachedOrganizations();
   render();
   renderAdminDocuments();
   renderApprovers();
+
+  if (resubmitEvent) {
+    state.editingEventId = null;
+    prefillFormFromEvent(resubmitEvent, true);
+  }
 
   if (state.editingEventId) {
     const past = loadCurrentUserEvents();

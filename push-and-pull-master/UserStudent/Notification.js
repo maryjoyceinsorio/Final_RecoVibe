@@ -5,6 +5,148 @@ const deletedNotificationLifetime = 7 * 24 * 60 * 60 * 1000;
 
 const defaultNotifications = [];
 
+function notificationValues(value) {
+  const values = Array.isArray(value) ? value : [value];
+  return values.flatMap((entry) => {
+    if (typeof entry === "string") {
+      return entry.split(",").map((item) => item.trim()).filter(Boolean);
+    }
+    if (entry && typeof entry === "object") {
+      return [
+        entry.organizationCode,
+        entry.organizationId,
+        entry.orgCode,
+        entry.orgId,
+        entry.departmentCode,
+        entry.departmentId,
+        entry.code,
+        entry.id,
+        entry.value,
+        entry.name,
+        entry.label,
+      ].filter(Boolean).map(String);
+    }
+    return [];
+  });
+}
+
+function notificationEvent(eventId) {
+  if (!eventId) return null;
+  const sources = [window.RECOVIBE_EVENTS];
+  ["recovibeEventsCache", "recovibeOrganizerEvents", "recovibeTeacherEvents"].forEach((key) => {
+    try {
+      const cached = JSON.parse(localStorage.getItem(key) || "[]");
+      if (Array.isArray(cached)) sources.push(cached);
+    } catch (error) {
+      console.warn(`Could not read ${key} for notification audience filtering:`, error);
+    }
+  });
+  return sources.flatMap((source) => Array.isArray(source) ? source : []).find(
+    (event) => String(event.id || event.eventId || "") === String(eventId),
+  ) || null;
+}
+
+function normalizeNotificationOrganization(value) {
+  const normalized = String(value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (normalized === "PIEE" || normalized === "PIIE" || normalized.includes("INDUSTRIALENG")) return "PIIE";
+  if (normalized === "IBITS" || normalized.includes("INFORMATIONTECH")) return "IBITS";
+  if (normalized === "ACES" || normalized.includes("COMPUTERENG")) return "ACES";
+  if (normalized === "SMS" || normalized.includes("MANAGEMENT")) return "SMS";
+  if (normalized === "HRSS" || normalized.includes("HUMANRESOURCE")) return "HRSS";
+  if (normalized === "YES" || normalized.includes("YOUNGEDUC")) return "YES";
+  return normalized;
+}
+
+function normalizeNotificationDepartment(value) {
+  const label = String(value || "").trim().toLowerCase();
+  const normalized = label.replace(/[^a-z0-9]/g, "");
+  if (normalized === "bsit" || label.includes("information technology")) return "bsit";
+  if (normalized === "bscpe" || label.includes("computer engineering")) return "bscpe";
+  if (normalized === "bsie" || label.includes("industrial engineering")) return "bsie";
+  if (normalized === "bsbahrm" || label.includes("human resource management")) return "bsbahrm";
+  if (label.includes("elementary") || normalized.includes("bselementary")) return "bselementaryeducation";
+  if (label.includes("secondary") || normalized === "bssecondary") return "bssecondary";
+  if (label.includes("psychology") || normalized === "bspsychology") return "bspsychology";
+  return normalized;
+}
+
+function isNotificationVisibleToStudent(notification) {
+  const event = notificationEvent(notification.eventId) || {};
+  const audience = String(
+    notification.targetAudience || notification.audience || event.targetAudience || event.audience || "",
+  ).toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (notification.openForAll === true || event.openForAll === true ||
+      audience.startsWith("opentoall") || audience.startsWith("openforall")) return true;
+
+  let profile = {};
+  try {
+    profile = JSON.parse(localStorage.getItem("recovibeCurrentUser") || "null") || {};
+  } catch (error) {
+    console.warn("Could not read student profile for notification filtering:", error);
+  }
+  const scopedNotification = { ...event, ...notification };
+  const targetOrganizations = [
+    ...notificationValues(scopedNotification.organizationCodes),
+    ...notificationValues(scopedNotification.targetOrganizations),
+    ...notificationValues(scopedNotification.targetOrganization),
+    ...notificationValues(scopedNotification.audienceOrganizations),
+    ...notificationValues(scopedNotification.coOrganizerOrganizations),
+    ...notificationValues(scopedNotification.coOrganizerOrgIds),
+    ...notificationValues(scopedNotification.coOrganizerOrganization),
+    ...notificationValues(scopedNotification.collaboratorOrganizations),
+    ...notificationValues(scopedNotification.collaboratorOrgIds),
+    ...notificationValues(scopedNotification.collaboratorOrganization),
+    ...notificationValues(scopedNotification.collaborationOrganizations),
+    ...notificationValues(scopedNotification.collaborationOrgIds),
+    ...notificationValues(scopedNotification.collaboratingOrganizations),
+    ...notificationValues(scopedNotification.coOrganizers),
+    ...notificationValues(scopedNotification.coOrganizer),
+    ...notificationValues(scopedNotification.collaborators),
+    ...notificationValues(scopedNotification.collaborator),
+    ...notificationValues(scopedNotification.partnerOrganizations),
+    ...notificationValues(scopedNotification.organizationCode),
+    ...notificationValues(scopedNotification.organizationId),
+    ...notificationValues(scopedNotification.organizerOrganization),
+    ...notificationValues(scopedNotification.orgCode),
+    ...notificationValues(scopedNotification.orgId),
+    ...notificationValues(scopedNotification.organization),
+    ...notificationValues(scopedNotification.organizationName),
+    ...notificationValues(scopedNotification.orgName),
+  ].map(normalizeNotificationOrganization).filter(Boolean);
+  const studentOrganizations = [
+    ...notificationValues(profile.organization),
+    ...notificationValues(profile.courseOrganization),
+    ...notificationValues(profile.organizationCode),
+    ...notificationValues(profile.organizationId),
+    ...notificationValues(profile.orgCode),
+    ...notificationValues(profile.orgId),
+    ...notificationValues(profile.organizations),
+    ...notificationValues(profile.courseOrganizations),
+  ].map(normalizeNotificationOrganization).filter(Boolean);
+  const targetDepartments = [
+    ...notificationValues(scopedNotification.departmentCodes),
+    ...notificationValues(scopedNotification.targetDepartments),
+    ...notificationValues(scopedNotification.targetDepartment),
+    ...notificationValues(scopedNotification.targetDepartmentIds),
+    ...notificationValues(scopedNotification.departments),
+    ...notificationValues(scopedNotification.departmentIds),
+    ...notificationValues(scopedNotification.departmentCode),
+    ...notificationValues(scopedNotification.departmentId),
+    ...notificationValues(scopedNotification.department),
+  ].map(normalizeNotificationDepartment).filter(Boolean);
+  const studentDepartments = [
+    ...notificationValues(profile.departmentCode),
+    ...notificationValues(profile.departmentId),
+    ...notificationValues(profile.department),
+    ...notificationValues(profile.departments),
+    ...notificationValues(profile.departmentIds),
+    ...notificationValues(profile.course),
+  ].map(normalizeNotificationDepartment).filter(Boolean);
+
+  return targetOrganizations.some((organization) => studentOrganizations.includes(organization)) ||
+    targetDepartments.some((department) => studentDepartments.includes(department));
+}
+
 const savedNotifications = JSON.parse(
   localStorage.getItem(notificationStorageKey) || "null",
 );
@@ -62,8 +204,9 @@ function renderDeletedNotifications() {
     saveDeletedNotifications();
   }
   const list = document.getElementById("deletedNotificationList");
-  list.innerHTML = deletedNotifications.length
-    ? deletedNotifications
+  const visibleDeletedNotifications = deletedNotifications.filter(isNotificationVisibleToStudent);
+  list.innerHTML = visibleDeletedNotifications.length
+    ? visibleDeletedNotifications
         .map(
           (item) => `
     <article class="notification-card deleted-notification-card type-${item.type}" data-deleted-notification-id="${item.id}">
@@ -86,6 +229,7 @@ function renderNotifications() {
     .value.trim()
     .toLowerCase();
   const visible = notifications.filter((item) => {
+    if (!isNotificationVisibleToStudent(item)) return false;
     const filterMatch =
       activeFilter === "all" ||
       (activeFilter === "read" ? item.read : !item.read);
@@ -116,14 +260,18 @@ function renderNotifications() {
         )
         .join("")
     : '<div class="empty-notifications">No notifications match your filters.</div>';
-  const unread = notifications.filter((item) => !item.read).length;
+  const unread = notifications.filter(
+    (item) => !item.read && isNotificationVisibleToStudent(item),
+  ).length;
   document.getElementById("navNotifBadge").textContent = unread;
   document.getElementById("navNotifBadge").hidden = unread === 0;
   renderDeletedNotifications();
 }
 
 function markAllRead() {
-  notifications = notifications.map((item) => ({ ...item, read: true }));
+  notifications = notifications.map((item) =>
+    isNotificationVisibleToStudent(item) ? { ...item, read: true } : item,
+  );
   saveNotifications();
   renderNotifications();
 }

@@ -143,6 +143,7 @@ import {
   let activeEvent = null;
   let activeApproval = null;
   let activeFirestoreReview = false;
+  let firestoreProposalLoadError = "";
 
   let queueListenerRef = null;
   let decisionsListenerRef = null;
@@ -152,6 +153,7 @@ import {
   let activeFirestoreEventUnsubscribe = null;
   let toastTimer = null;
   let firestorePendingEventsTimeout = null;
+  let firestoreProposalLoadTimeout = null;
 
   // Initialize Page Header Today's Date
   const todayElement = document.querySelector("[data-today]");
@@ -694,12 +696,14 @@ import {
     // Check URL parameters for direct review link: ?review={eventId}
     const urlParams = new URLSearchParams(window.location.search);
     const reviewId = urlParams.get("review") || urlParams.get("event") || urlParams.get("id");
+    const reviewSource = urlParams.get("source");
 
     subscribeFirestorePendingEvents();
     subscribeRecentDecisions();
 
     if (reviewId) {
-      openReviewScreen(reviewId);
+      if (reviewSource === "firestore") openFirestoreProposalReview(reviewId);
+      else openReviewScreen(reviewId);
     } else {
       renderReviewQueue();
     }
@@ -773,16 +777,20 @@ import {
               ...(eventSnapshot.data() || {}),
               id: eventSnapshot.id,
             }));
-            firestorePendingEvents = pendingEvents.flatMap((event) => {
-              const currentStageKey = getFirestoreCurrentStageKey(event);
-              const currentStage = getConfiguredFirestoreStages(event)
-                .find((stage) => stage.key === currentStageKey);
-              if (!currentStage || !isCurrentUserAssignedToStage(event, currentStage)) return [];
-              return [{
+            firestorePendingEvents = pendingEvents.map((event) => {
+              const currentStageKey = getFirestoreCurrentStageKey(event) ||
+                getConfiguredFirestoreStages(event).find((stage) => {
+                  const status = String(stage.source?.status || "")
+                    .trim()
+                    .toLowerCase()
+                    .replace(/[\s_-]+/g, " ");
+                  return !["ok", "approved", "complete", "completed"].includes(status);
+                })?.key;
+              return {
                 ...event,
-                currentApprovalStage: currentStageKey,
-                pipelineStatus: "action-required",
-              }];
+                currentApprovalStage: currentStageKey || null,
+                pipelineStatus: isFirestoreActionRequired(event) ? "action-required" : "incoming",
+              };
             });
             firestorePendingEventsError = "";
           } catch (error) {
@@ -1277,9 +1285,11 @@ import {
             const eventDate = event.date || event.dateStart || event.startAt || "Date TBA";
             const eventVenue = event.venue || event.location || "Venue TBA";
             const adminDocumentsLink = getAdminDocumentsLink(event.adminDocuments);
-            const currentStage = getStageLabel(event.currentApprovalStage);
+            const currentStage = event.currentApprovalStage
+              ? getStageLabel(event.currentApprovalStage)
+              : "Approval status unavailable";
             return `
-              <article class="queue-card queue-card--${incoming ? "incoming" : "action"}" data-firestore-event-id="${esc(event.id)}" tabindex="0" aria-label="Open approval tracker for ${esc(eventName)}">
+              <article class="queue-card queue-card--${incoming ? "incoming" : "action"}" data-firestore-event-id="${esc(event.id)}" tabindex="0" aria-label="${incoming ? "Preview" : "Review"} proposal ${esc(eventName)}">
                 <div>
                   <div class="queue-card-header">
                     <span class="queue-step-tag">Currently with ${esc(currentStage)}</span>
@@ -1292,7 +1302,7 @@ import {
                   </div>
                 </div>
                 <div class="queue-card-footer">
-                  <button type="button" class="btn-queue-review" data-action="review-firestore" data-id="${esc(event.id)}">${incoming ? "View tracker" : "Review proposal"}</button>
+                  <button type="button" class="btn-queue-review" data-action="review-firestore" data-id="${esc(event.id)}">${incoming ? "Preview proposal" : "Review proposal"}</button>
                   ${
                     adminDocumentsLink
                       ? `<a class="btn-queue-review" href="${esc(adminDocumentsLink)}" target="_blank" rel="noopener noreferrer">Review admin documents</a>`
@@ -1314,18 +1324,28 @@ import {
             ? `<div class="admin-loading">Loading pending Firestore proposals…</div>`
             : firestorePendingEventsError
               ? `<div class="queue-empty-box" role="alert"><p>${esc(firestorePendingEventsError)}</p></div>`
-              : `<section class="approval-pipeline-group" aria-label="Proposals requiring a decision">
+              : `
+                <section class="approval-pipeline-group" aria-label="Proposals requiring your action">
                   <div class="approval-pipeline-heading">
+                    <div>
+                      <h4>Require Your Action</h4>
+                      <p>Proposals currently at your approval step.</p>
+                    </div>
                     <span class="approval-pipeline-count">${actionableFirestoreEvents.length}</span>
                   </div>
                   ${renderFirestoreProposalCards(actionableFirestoreEvents, false)}
                 </section>
-                <section class="approval-pipeline-group approval-pipeline-group--incoming" aria-label="Incoming proposals">
+                <section class="approval-pipeline-group approval-pipeline-group--incoming" aria-label="Incoming and pending review proposals">
                   <div class="approval-pipeline-heading">
+                    <div>
+                      <h4>Incoming / Pending Review</h4>
+                      <p>Preview submitted proposals not currently assigned to your approval step.</p>
+                    </div>
                     <span class="approval-pipeline-count">${incomingFirestoreEvents.length}</span>
                   </div>
                   ${renderFirestoreProposalCards(incomingFirestoreEvents, true)}
-                </section>`
+                </section>
+              `
         }
       </section>
     `;
@@ -1421,11 +1441,16 @@ import {
   // VIEW 2: REVIEW SCREEN
   // =========================================================================
   function openReviewScreen(eventId) {
+    if (firestoreProposalLoadTimeout) {
+      clearTimeout(firestoreProposalLoadTimeout);
+      firestoreProposalLoadTimeout = null;
+    }
     if (activeFirestoreEventUnsubscribe) {
       activeFirestoreEventUnsubscribe();
       activeFirestoreEventUnsubscribe = null;
     }
     activeFirestoreReview = false;
+    firestoreProposalLoadError = "";
     activeReviewEventId = eventId;
     window.history.pushState(null, "", `AdminApproval.html?review=${encodeURIComponent(eventId)}`);
 
@@ -1509,17 +1534,69 @@ import {
     };
   }
 
+  function isFirestoreActionRequired(event) {
+    const approval = getFirestoreApproval(event);
+    const members = Object.values(approval.members || {});
+    const activeStage = members.find((member) => member.status !== "ok");
+    const currentStageKey = getFirestoreCurrentStageKey(event);
+    const explicitCurrentStep = Number(
+      event.currentStep ??
+      event.approvalCurrentStep ??
+      approval.currentStep ??
+      approval.approvalCurrentStep,
+    );
+    const declaredStageKey = currentStageKey ||
+      members.find((member) => Number(member.step) === explicitCurrentStep)?.key ||
+      members.find((member) => member.status === "review")?.key ||
+      null;
+    const assignedRole = getApprovalStageForProfile(currentAdminProfile);
+
+    return Boolean(
+      activeStage &&
+      activeStage.status === "review" &&
+      approval.status !== "revision" &&
+      (!assignedRole || assignedRole.key === activeStage.key) &&
+      (!declaredStageKey || declaredStageKey === activeStage.key) &&
+      (!Number.isInteger(explicitCurrentStep) || explicitCurrentStep < 1 ||
+        explicitCurrentStep === activeStage.step) &&
+      isCurrentUserAssignedToStage(event, activeStage) &&
+      currentStageKey === activeStage.key
+    );
+  }
+
   function openFirestoreProposalReview(eventId) {
-    const event = firestorePendingEvents.find((item) => item.id === eventId);
-    if (!event || !db) return;
-    if (activeEventRef) off(activeEventRef);
-    if (activeApprovalRef) off(activeApprovalRef);
-    if (activeFirestoreEventUnsubscribe) activeFirestoreEventUnsubscribe();
+    if (firestoreProposalLoadTimeout) {
+      clearTimeout(firestoreProposalLoadTimeout);
+      firestoreProposalLoadTimeout = null;
+    }
+    if (activeEventRef) {
+      off(activeEventRef);
+      activeEventRef = null;
+    }
+    if (activeApprovalRef) {
+      off(activeApprovalRef);
+      activeApprovalRef = null;
+    }
+    if (activeFirestoreEventUnsubscribe) {
+      activeFirestoreEventUnsubscribe();
+      activeFirestoreEventUnsubscribe = null;
+    }
 
     activeReviewEventId = eventId;
     activeFirestoreReview = true;
-    window.history.pushState(null, "", `AdminApproval.html?review=${encodeURIComponent(eventId)}`);
+    activeEvent = null;
+    activeApproval = null;
+    firestoreProposalLoadError = "";
+    const reviewUrl = new URL("AdminApproval.html", window.location.href);
+    reviewUrl.searchParams.set("review", eventId);
+    reviewUrl.searchParams.set("source", "firestore");
+    window.history.pushState(null, "", reviewUrl.href);
 
+    if (!db) {
+      firestoreProposalLoadError = "Proposal details could not be loaded. Please try again.";
+      renderReviewScreen();
+      return;
+    }
     const renderFirestoreEvent = (eventData) => {
       activeEvent = {
         ...eventData,
@@ -1529,28 +1606,73 @@ import {
         source: eventData.source || eventData.eventSource || eventData.campus || eventData.office || "Firestore submission",
       };
       activeApproval = getFirestoreApproval(eventData);
+      firestoreProposalLoadError = "";
       renderReviewScreen();
     };
-    renderFirestoreEvent(event);
-    activeFirestoreEventUnsubscribe = onSnapshot(
-      doc(db, "events", eventId),
-      (snapshot) => {
-        if (!snapshot.exists()) {
+    renderReviewScreen();
+    firestoreProposalLoadTimeout = setTimeout(() => {
+      firestoreProposalLoadTimeout = null;
+      if (activeReviewEventId !== eventId || activeEvent) return;
+      firestoreProposalLoadError = "Proposal details could not be loaded. Please try again.";
+      if (activeFirestoreEventUnsubscribe) {
+        activeFirestoreEventUnsubscribe();
+        activeFirestoreEventUnsubscribe = null;
+      }
+      renderReviewScreen();
+    }, 12000);
+    try {
+      activeFirestoreEventUnsubscribe = onSnapshot(
+        doc(db, "events", eventId),
+        (snapshot) => {
+          if (firestoreProposalLoadTimeout) {
+            clearTimeout(firestoreProposalLoadTimeout);
+            firestoreProposalLoadTimeout = null;
+          }
+          if (!snapshot.exists()) {
+            activeEvent = null;
+            activeApproval = null;
+            firestoreProposalLoadError = "Proposal details not found.";
+            renderReviewScreen();
+            return;
+          }
+          try {
+            renderFirestoreEvent(snapshot.data());
+          } catch (error) {
+            console.error("Could not load Firestore proposal details:", error);
+            activeEvent = null;
+            activeApproval = null;
+            firestoreProposalLoadError = "Proposal details could not be loaded. Please try again.";
+            renderReviewScreen();
+          }
+        },
+        (error) => {
+          if (firestoreProposalLoadTimeout) {
+            clearTimeout(firestoreProposalLoadTimeout);
+            firestoreProposalLoadTimeout = null;
+          }
+          console.error("Could not load Firestore proposal details:", error);
           activeEvent = null;
           activeApproval = null;
+          firestoreProposalLoadError = "Proposal details could not be loaded. Please try again.";
           renderReviewScreen();
-          return;
-        }
-        renderFirestoreEvent(snapshot.data());
-      },
-      (error) => {
-        console.error("Could not load Firestore proposal details:", error);
-        showToast("Could not refresh this proposal. Check your connection.");
-      },
-    );
+        },
+      );
+    } catch (error) {
+      if (firestoreProposalLoadTimeout) {
+        clearTimeout(firestoreProposalLoadTimeout);
+        firestoreProposalLoadTimeout = null;
+      }
+      console.error("Could not load Firestore proposal details:", error);
+      firestoreProposalLoadError = "Proposal details could not be loaded. Please try again.";
+      renderReviewScreen();
+    }
   }
 
   function closeReviewScreen() {
+    if (firestoreProposalLoadTimeout) {
+      clearTimeout(firestoreProposalLoadTimeout);
+      firestoreProposalLoadTimeout = null;
+    }
     if (activeFirestoreEventUnsubscribe) {
       activeFirestoreEventUnsubscribe();
       activeFirestoreEventUnsubscribe = null;
@@ -1559,6 +1681,7 @@ import {
     activeReviewEventId = null;
     activeEvent = null;
     activeApproval = null;
+    firestoreProposalLoadError = "";
 
     if (activeEventRef) {
       off(activeEventRef);
@@ -1585,7 +1708,7 @@ import {
               ← Back to queue
             </button>
           </div>
-          <div class="admin-loading">Loading proposal details...</div>
+          <div class="admin-loading">${firestoreProposalLoadError || "Loading proposal details..."}</div>
         </div>
       `;
       root.querySelector("#btnBackToQueue")?.addEventListener("click", closeReviewScreen);
@@ -1629,17 +1752,18 @@ import {
       sortedMembers.find((member) => member.status === "review")?.key ||
       null;
     const assignedRole = getApprovalStageForProfile(currentAdminProfile);
-    const isMyTurn = Boolean(
-      activeStage &&
-      activeStage.status === "review" &&
-      activeApproval.status !== "revision" &&
-      (!assignedRole || assignedRole.key === activeStage.key) &&
-      (!declaredStageKey || declaredStageKey === activeStage.key) &&
-      (!Number.isInteger(explicitCurrentStep) || explicitCurrentStep < 1 ||
-        explicitCurrentStep === activeStage.step) &&
-      isCurrentUserAssignedToStage(activeEvent, activeStage) &&
-      (!activeFirestoreReview || firestoreCurrentStageKey === activeStage.key)
-    );
+    const isMyTurn = activeFirestoreReview
+      ? isFirestoreActionRequired(activeEvent)
+      : Boolean(
+          activeStage &&
+          activeStage.status === "review" &&
+          activeApproval.status !== "revision" &&
+          (!assignedRole || assignedRole.key === activeStage.key) &&
+          (!declaredStageKey || declaredStageKey === activeStage.key) &&
+          (!Number.isInteger(explicitCurrentStep) || explicitCurrentStep < 1 ||
+            explicitCurrentStep === activeStage.step) &&
+          isCurrentUserAssignedToStage(activeEvent, activeStage)
+        );
 
     // Header Tag
     let turnTagHtml = "";
@@ -1648,7 +1772,7 @@ import {
     } else if (activeStage && !["approved", "rejected", "cancelled"].includes(
       String(activeApproval.status || "").toLowerCase(),
     )) {
-      turnTagHtml = `<div class="not-waiting-notice">Waiting for the assigned approver for Step ${activeStage.step}: ${esc(activeStage.label)}.</div>`;
+      turnTagHtml = `<div class="not-waiting-notice">${activeFirestoreReview ? "Preview only · " : ""}Waiting for the assigned approver for Step ${activeStage.step}: ${esc(activeStage.label)}.</div>`;
     } else if (activeFirestoreReview) {
       turnTagHtml = `<div class="not-waiting-notice">Approval tracker · review actions are available from the assigned approver queue.</div>`;
     } else {

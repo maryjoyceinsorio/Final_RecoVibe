@@ -221,7 +221,7 @@ import { loadCalendarData } from "../calendarDataService.js";
       .slice(0, 4)
       .map(
         (event) =>
-          `<span class="admin-dot" style="background:${color(sourceName(event))}" title="${esc(event.title || "Untitled event")}"></span>`,
+          `<span class="admin-dot" style="background:${color(event)}" title="${esc(event.title || "Untitled event")}"></span>`,
       )
       .join("");
     const cellClass = ["admin-day", klass, isOnlyHoliday ? "only-holiday" : ""].filter(Boolean).join(" ");
@@ -377,17 +377,14 @@ import { loadCalendarData } from "../calendarDataService.js";
     );
     overlay.querySelector(".admin-day-dialog").focus();
   }
-  function color(source) {
+  function color(event) {
+    if (isHolidayEvent(event)) return "#d97706";
     return (
       {
-        "PUP Official": "#6b1220",
-        "PUP Biñan": "#3a76a6",
-        "PUP CITE": "#d6ae4a",
-        Organizational: "#765092",
-        CSC: "#31845b",
-        "Teachers / Faculty": "#c64a52",
-        "Others / External": "#8c8787",
-      }[source] || "#8c8787"
+        Academic: "#3a76a6",
+        Organization: "#765092",
+        Institutional: "#6b1220",
+      }[eventCategory(event)] || "#6b1220"
     );
   }
   function participants(id) {

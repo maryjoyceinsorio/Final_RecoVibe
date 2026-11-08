@@ -5,7 +5,20 @@ function listValues(value) {
       return entry.split(",").map((item) => item.trim()).filter(Boolean);
     }
     if (entry && typeof entry === "object") {
-      return [entry.code, entry.value, entry.name, entry.label]
+      return [
+        entry.organizationCode,
+        entry.organizationId,
+        entry.orgCode,
+        entry.orgId,
+        entry.departmentCode,
+        entry.departmentId,
+        entry.code,
+        entry.id,
+        entry.value,
+        entry.name,
+        entry.label,
+        entry.subtitle,
+      ]
         .filter((item) => typeof item === "string" && item.trim())
         .map((item) => item.trim());
     }
@@ -15,7 +28,6 @@ function listValues(value) {
 
 function normalizeOrganization(value) {
   const raw = String(value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
-  // Standardize common student organization abbreviations and aliases
   if (raw === "PIEE" || raw === "PIIE" || raw.includes("INDUSTRIALENG")) return "PIIE";
   if (raw === "IBITS" || raw.includes("INFORMATIONTECH")) return "IBITS";
   if (raw === "ACES" || raw.includes("COMPUTERENG")) return "ACES";
@@ -53,35 +65,38 @@ function normalizeDepartment(value) {
   return normalized;
 }
 
-function eventOrganizationTargets(event, audienceKey) {
+function eventOrganizationTargets(event) {
   const explicitTargets = [
     ...listValues(event.targetOrganizations),
     ...listValues(event.targetOrganization),
     ...listValues(event.audienceOrganizations),
+    ...listValues(event.coOrganizerOrganizations),
+    ...listValues(event.coOrganizerOrgIds),
+    ...listValues(event.coOrganizerOrganization),
+    ...listValues(event.collaboratorOrganizations),
+    ...listValues(event.collaboratorOrgIds),
+    ...listValues(event.collaboratorOrganization),
+    ...listValues(event.collaborationOrganizations),
+    ...listValues(event.collaborationOrgIds),
+    ...listValues(event.collaborationOrganization),
+    ...listValues(event.collaboratingOrganizations),
+    ...listValues(event.collaboratingOrganization),
+    ...listValues(event.coOrganizer),
+    ...listValues(event.collaborator),
+    ...listValues(event.coOrganizers),
+    ...listValues(event.collaborators),
   ];
 
-  const creatorRole = String(event.creatorRole || event.createdByRole || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, "");
-  const isOrganizationCreated =
-    ["eventorganizer", "organizer", "eo"].includes(creatorRole) ||
-    /organizational|organization/i.test(String(event.source || event.eventSource || ""));
-  const shouldMatchOwnerOrganization =
-    audienceKey === "organizationmembersonly" ||
-    audienceKey === "mixedaudience" ||
-    (!audienceKey && isOrganizationCreated);
-  const ownerOrganizations = shouldMatchOwnerOrganization
-    ? [
-        event.organizationCode,
-        event.organizerOrganization,
-        event.orgCode,
-        event.organization,
-        event.organizationName,
-        event.orgName,
-        event.organizerName,
-      ].filter((value) => typeof value === "string" && value.trim())
-    : [];
+  const ownerOrganizations = [
+    event.organizationCode,
+    event.organizationId,
+    event.organizerOrganization,
+    event.orgCode,
+    event.orgId,
+    event.organization,
+    event.organizationName,
+    event.orgName,
+  ].filter((value) => typeof value === "string" && value.trim());
   return [...explicitTargets, ...ownerOrganizations];
 }
 
@@ -89,30 +104,42 @@ export function isEventVisibleToStudent(eventData, studentProfile) {
   const event = eventData?.raw || eventData || {};
   const audienceValue = String(event.targetAudience || "").trim().toLowerCase();
   const audienceKey = audienceValue.replace(/[^a-z0-9]/g, "");
-  if (audienceKey.startsWith("opentoall")) return true;
+  if (audienceKey.startsWith("opentoall") || audienceKey.startsWith("openforall")) return true;
 
   const targetDepartments = [
     ...listValues(event.targetDepartments),
     ...listValues(event.targetDepartment),
+    ...listValues(event.targetDepartmentIds),
     ...listValues(event.departments),
+    ...listValues(event.departmentCode),
+    ...listValues(event.departmentId),
+    ...listValues(event.department),
   ].map(normalizeDepartment).filter(Boolean);
   const studentDepartments = [
     ...listValues(studentProfile?.departmentCode),
+    ...listValues(studentProfile?.departmentId),
     ...listValues(studentProfile?.department),
+    ...listValues(studentProfile?.departments),
+    ...listValues(studentProfile?.departmentIds),
     ...listValues(studentProfile?.course),
   ].map(normalizeDepartment).filter(Boolean);
   const matchesDepartment = targetDepartments.some((target) =>
     studentDepartments.includes(target),
   );
 
-  const targetOrganizations = eventOrganizationTargets(event, audienceKey)
+  const targetOrganizations = eventOrganizationTargets(event)
     .map(normalizeOrganization)
     .filter(Boolean);
   const studentOrganizations = [
     ...listValues(studentProfile?.organization),
     ...listValues(studentProfile?.courseOrganization),
     ...listValues(studentProfile?.organizationCode),
+    ...listValues(studentProfile?.organizationId),
+    ...listValues(studentProfile?.organizationName),
+    ...listValues(studentProfile?.organizerOrganization),
     ...listValues(studentProfile?.orgCode),
+    ...listValues(studentProfile?.orgId),
+    ...listValues(studentProfile?.orgName),
     ...listValues(studentProfile?.organizations),
     ...listValues(studentProfile?.courseOrganizations),
   ].map(normalizeOrganization).filter(Boolean);
@@ -120,21 +147,7 @@ export function isEventVisibleToStudent(eventData, studentProfile) {
     studentOrganizations.includes(target),
   );
 
-  let isVisible = true;
-  if (audienceKey === "organizationmembersonly") {
-    if (!targetOrganizations.length || !matchesOrganization) isVisible = false;
-    else isVisible = !targetDepartments.length || matchesDepartment;
-  } else if (audienceKey === "mixedaudience") {
-    if (!targetDepartments.length && !targetOrganizations.length) isVisible = false;
-    else isVisible = matchesDepartment || matchesOrganization;
-  } else {
-    if (!targetDepartments.length && !targetOrganizations.length) isVisible = true;
-    else {
-      isVisible =
-        (!targetDepartments.length || matchesDepartment) &&
-        (!targetOrganizations.length || matchesOrganization);
-    }
-  }
+  const isVisible = matchesDepartment || matchesOrganization;
 
   console.log(
     `[Audience Filter] Event: "${event.eventName || event.title || event.name || event.id}" | Audience: "${event.targetAudience || 'Default'}" | TargetOrgs: [${targetOrganizations.join(', ')}] | StudentOrgs: [${studentOrganizations.join(', ')}] => Visible: ${isVisible}`

@@ -5,7 +5,16 @@ import {
   update,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import { auth, rtdb, isRtdbConfigured } from "../UserStudent/firebaseConfig.js";
+import {
+  collection,
+  doc,
+  getDoc,
+  onSnapshot as onFirestoreSnapshot,
+  query,
+  updateDoc,
+  where,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { auth, db, rtdb, isRtdbConfigured } from "../UserStudent/firebaseConfig.js";
 
 (() => {
   "use strict";
@@ -28,10 +37,16 @@ import { auth, rtdb, isRtdbConfigured } from "../UserStudent/firebaseConfig.js";
     search = "",
     undoSnapshot = null,
     undoTimer,
-    currentAdminUid = identity,
+    currentAdminUid = null,
+    currentAdminOrganizationCodes = [],
+    currentAdminDepartmentCodes = [],
     rtdbNotifications = [],
+    firestoreNotifications = [],
+    firestoreNotificationsLoading = false,
+    firestoreNotificationsError = "",
     notifListenerRef = null,
-    queueListenerRef = null;
+    queueListenerRef = null,
+    firestoreNotifUnsubscribe = null;
   document.querySelector("[data-name]").textContent = (
     profile.name || identity
   ).toUpperCase();
@@ -88,6 +103,119 @@ import { auth, rtdb, isRtdbConfigured } from "../UserStudent/firebaseConfig.js";
       .toLowerCase()
       .replace(/[ _-]+/g, "_");
   }
+  function getNotificationOrganizationCode(value) {
+    return String(value || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "");
+  }
+  function getNotificationProfileValues(source, keys) {
+    const values = [];
+    keys.forEach((key) => {
+      const value = source?.[key];
+      (Array.isArray(value) ? value : [value]).forEach((entry) => {
+        if (typeof entry === "string") {
+          values.push(entry);
+        } else if (entry && typeof entry === "object") {
+          [
+            entry.organizationCode,
+            entry.organizationId,
+            entry.orgCode,
+            entry.orgId,
+            entry.departmentCode,
+            entry.departmentId,
+            entry.code,
+            entry.id,
+            entry.name,
+            entry.label,
+          ]
+            .filter(Boolean)
+            .forEach((item) => values.push(item));
+        }
+      });
+    });
+    return [...new Set(values.map(getNotificationOrganizationCode).filter(Boolean))];
+  }
+  function getEventNotificationAudience(event) {
+    const audience = String(event.targetAudience || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "");
+    const openForAll = event.openForAll === true || audience.startsWith("opentoall");
+    const organizationCodes = new Set(getNotificationProfileValues(event, [
+      "organizationCode",
+      "organizationId",
+      "organizerOrganization",
+      "orgId",
+      "organization",
+      "organizationName",
+      "orgName",
+    ]));
+    const partners = [
+      ...(Array.isArray(event.partnerOrganizations) ? event.partnerOrganizations : []),
+      ...(Array.isArray(event.targetOrganizations) ? event.targetOrganizations : []),
+    ];
+    if (event.isCollaboration === true || partners.length > 0) {
+      partners.forEach((organization) => {
+        getNotificationProfileValues(
+          typeof organization === "string" ? { organization } : organization,
+          [
+            "organizationCode",
+            "organizationId",
+            "orgCode",
+            "orgId",
+            "code",
+            "id",
+            "organizationName",
+            "name",
+            "subtitle",
+          ],
+        ).forEach((code) => organizationCodes.add(code));
+      });
+    }
+    const departmentCodes = new Set(getNotificationProfileValues(event, [
+      "targetDepartments",
+      "targetDepartment",
+      "departments",
+      "departmentCode",
+      "departmentId",
+      "departmentIds",
+    ]));
+    return {
+      openForAll,
+      organizationCodes: [...organizationCodes],
+      departmentCodes: [...departmentCodes],
+    };
+  }
+  function notificationVisibleToAdmin(item) {
+    if (!item.eventId && !String(item.type || "").startsWith("proposal-")) return true;
+    if (item.openForAll === true) return true;
+    let organizationCodes = Array.isArray(item.organizationCodes)
+      ? item.organizationCodes.map(getNotificationOrganizationCode).filter(Boolean)
+      : [];
+    if (!organizationCodes.length && item.eventId) {
+      const event = getEvents().find(
+        (candidate) =>
+          String(candidate.eventId || candidate.id) === String(item.eventId),
+      );
+      if (event) {
+        const audience = getEventNotificationAudience(event);
+        if (audience.openForAll) return true;
+        organizationCodes = audience.organizationCodes;
+      }
+    }
+    const departmentCodes = Array.isArray(item.departmentCodes)
+      ? item.departmentCodes.map(getNotificationOrganizationCode).filter(Boolean)
+      : [];
+    if (organizationCodes.length) {
+      return organizationCodes.some((code) =>
+        currentAdminOrganizationCodes.includes(code),
+      );
+    }
+    return departmentCodes.some((code) =>
+      currentAdminDepartmentCodes.includes(code),
+    );
+  }
   function snapshots() {
     const current = read(key, []),
       known = new Set(
@@ -95,6 +223,12 @@ import { auth, rtdb, isRtdbConfigured } from "../UserStudent/firebaseConfig.js";
       ),
       next = Array.isArray(current) ? current : [];
     getEvents().forEach((event) => {
+      const eventAudience = getEventNotificationAudience(event);
+      if (!notificationVisibleToAdmin({
+        eventId: event.eventId || event.id,
+        type: "approval",
+        ...eventAudience,
+      })) return;
       const id = String(event.eventId || event.id);
       const add = (type, title, message) => {
         const stamp =
@@ -110,6 +244,9 @@ import { auth, rtdb, isRtdbConfigured } from "../UserStudent/firebaseConfig.js";
           createdAt: stamp || new Date().toISOString(),
           read: false,
           sourceStore: event._store,
+          organizationCodes: eventAudience.organizationCodes,
+          departmentCodes: eventAudience.departmentCodes,
+          openForAll: eventAudience.openForAll,
         });
       };
       const state = status(event);
@@ -171,9 +308,17 @@ import { auth, rtdb, isRtdbConfigured } from "../UserStudent/firebaseConfig.js";
         next.unshift(item);
       }
     });
+    firestoreNotifications.forEach((item) => {
+      const idx = next.findIndex((x) => x.id === item.id);
+      if (idx !== -1) {
+        next[idx] = { ...next[idx], ...item };
+      } else {
+        next.unshift(item);
+      }
+    });
     next.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
     localStorage.setItem(key, JSON.stringify(next));
-    return next;
+    return next.filter(notificationVisibleToAdmin);
   }
 
   function subscribeToRtdbNotifications(uid) {
@@ -205,6 +350,87 @@ import { auth, rtdb, isRtdbConfigured } from "../UserStudent/firebaseConfig.js";
         console.warn("RTDB notifications error:", err);
       },
     );
+  }
+
+  function subscribeToFirestoreNotifications(uid) {
+    if (firestoreNotifUnsubscribe) {
+      firestoreNotifUnsubscribe();
+      firestoreNotifUnsubscribe = null;
+    }
+    if (!db || !uid) {
+      firestoreNotifications = [];
+      firestoreNotificationsLoading = false;
+      firestoreNotificationsError = db
+        ? ""
+        : "Proposal notifications are unavailable because Firestore is not configured.";
+      render();
+      return;
+    }
+
+    firestoreNotificationsLoading = true;
+    firestoreNotificationsError = "";
+    render();
+    try {
+      const notificationQuery = query(
+        collection(db, "notifications"),
+        where("recipientUid", "==", uid),
+      );
+      firestoreNotifUnsubscribe = onFirestoreSnapshot(
+        notificationQuery,
+        (snapshot) => {
+          try {
+            firestoreNotifications = snapshot.docs.map((notification) => {
+              const data = notification.data() || {};
+              const timestamp = data.createdAt?.toDate
+                ? data.createdAt.toDate()
+                : new Date(data.createdAt || Date.now());
+              return {
+                id: notification.id,
+                eventId: data.proposalId || data.eventId || "",
+                proposalId: data.proposalId || data.eventId || "",
+                type: data.type || "approval",
+                title: data.title || "Proposal Update",
+                message: data.message || "",
+                createdAt: Number.isNaN(timestamp.getTime())
+                  ? new Date().toISOString()
+                  : timestamp.toISOString(),
+                read: data.read === true,
+                source: "firestore",
+                organizationCodes: Array.isArray(data.organizationCodes)
+                  ? data.organizationCodes
+                  : [],
+                departmentCodes: Array.isArray(data.departmentCodes)
+                  ? data.departmentCodes
+                  : [],
+                openForAll: data.openForAll === true,
+              };
+            });
+            firestoreNotificationsLoading = false;
+            firestoreNotificationsError = "";
+            render();
+          } catch (error) {
+            console.error("Could not process Firestore admin notifications:", error);
+            firestoreNotificationsLoading = false;
+            firestoreNotificationsError =
+              "Could not display proposal notifications. Please retry.";
+            render();
+          }
+        },
+        (error) => {
+          console.error("Could not load Firestore admin notifications:", error);
+          firestoreNotificationsLoading = false;
+          firestoreNotificationsError =
+            "Could not load proposal notifications. Check your connection and permissions.";
+          render();
+        },
+      );
+    } catch (error) {
+      console.error("Could not subscribe to Firestore admin notifications:", error);
+      firestoreNotificationsLoading = false;
+      firestoreNotificationsError =
+        "Could not load proposal notifications. Check your connection and permissions.";
+      render();
+    }
   }
 
   function subscribeToQueue(uid) {
@@ -320,7 +546,18 @@ import { auth, rtdb, isRtdbConfigured } from "../UserStudent/firebaseConfig.js";
         )
         .join(
           "",
-        )}</div><div class="notification-actions"><button type="button" id="toggleTrash">${deleted ? "All Notifications" : "Recently Deleted"}</button><button type="button" id="markRead">${deleted ? "Delete All Permanently" : "Mark All As Read"}</button></div></div><section class="admin-section"><div class="admin-section-heading"><h2>${deleted ? "Recently Deleted" : "All Notifications"}</h2></div><div class="admin-cards">${visible.map((item) => (deleted ? `<article class="admin-notification-card" data-notification="${esc(item.id)}"><h2>${esc(item.title)}</h2><p>${esc(item.message)}</p><small>${age(item.createdAt)}</small><div class="admin-card-actions"><button data-restore="${esc(item.id)}">Restore</button><button data-permanent="${esc(item.id)}">Delete permanently</button></div></article>` : `<article class="admin-notification-card ${item.read ? "is-read" : ""}" data-type="${esc(item.type)}" data-notification="${esc(item.id)}" tabindex="0"><h2>${esc(item.title)}</h2><p>${esc(item.message)}</p><div class="admin-notification-time" title="${esc(new Date(item.createdAt).toLocaleString("en-US", { timeZone: "Asia/Manila", dateStyle: "full", timeStyle: "short" }))}">${age(item.createdAt)}</div><div class="admin-card-actions"><button data-delete="${esc(item.id)}">Delete</button></div></article>`)).join("") || `<div class="admin-empty">${deleted ? "Recently Deleted is empty." : "You have no notifications."}</div>`}</div></section>`;
+        )}</div><div class="notification-actions"><button type="button" id="toggleTrash">${deleted ? "All Notifications" : "Recently Deleted"}</button><button type="button" id="markRead">${deleted ? "Delete All Permanently" : "Mark All As Read"}</button></div></div><section class="admin-section"><div class="admin-section-heading"><h2>${deleted ? "Recently Deleted" : "All Notifications"}</h2></div><div class="admin-cards">${visible.map((item) => (deleted ? `<article class="admin-notification-card" data-notification="${esc(item.id)}"><h2>${esc(item.title)}</h2><p>${esc(item.message)}</p><small>${age(item.createdAt)}</small><div class="admin-card-actions"><button data-restore="${esc(item.id)}">Restore</button><button data-permanent="${esc(item.id)}">Delete permanently</button></div></article>`         : `<article class="admin-notification-card ${item.read ? "is-read" : "is-unread"}" data-type="${esc(item.type)}" data-notification="${esc(item.id)}" tabindex="0"><h2>${esc(item.title)}</h2><p>${esc(item.message)}</p><div class="admin-notification-time" title="${esc(new Date(item.createdAt).toLocaleString("en-US", { timeZone: "Asia/Manila", dateStyle: "full", timeStyle: "short" }))}">${age(item.createdAt)}</div><span class="admin-notification-status ${item.read ? "is-read" : "is-unread"}">${item.read ? "Read" : "Unread"}</span>${item.source === "firestore" ? "" : `<div class="admin-card-actions"><button data-delete="${esc(item.id)}">Delete</button></div>`}</article>`)).join("") || `<div class="admin-empty">${deleted ? "Recently Deleted is empty." : "You have no notifications."}</div>`}</div></section>`;
+      if (firestoreNotificationsError) {
+        root.insertAdjacentHTML(
+          "afterbegin",
+          `<div class="admin-error" role="alert">${esc(firestoreNotificationsError)}${currentAdminUid ? ' <button class="admin-row-action" id="retryFirestoreNotifications">Retry</button>' : ""}</div>`,
+        );
+      } else if (firestoreNotificationsLoading) {
+        root.insertAdjacentHTML(
+          "afterbegin",
+          '<div class="admin-loading" role="status">Loading proposal notifications...</div>',
+        );
+      }
       document.querySelector("[data-notification-count]").textContent = String(
         live.filter((item) => !item.read).length,
       );
@@ -341,6 +578,13 @@ import { auth, rtdb, isRtdbConfigured } from "../UserStudent/firebaseConfig.js";
     localStorage.setItem(trashKey, JSON.stringify(list));
   }
   function wire() {
+    const retryFirestoreNotifications = root.querySelector(
+      "#retryFirestoreNotifications",
+    );
+    if (retryFirestoreNotifications) {
+      retryFirestoreNotifications.onclick = () =>
+        subscribeToFirestoreNotifications(currentAdminUid);
+    }
     root.querySelector("#notificationSearch").oninput = (event) => {
       search = event.target.value;
       render();
@@ -375,6 +619,19 @@ import { auth, rtdb, isRtdbConfigured } from "../UserStudent/firebaseConfig.js";
           } catch (e) {
             console.warn("Unable to update read state in RTDB:", e);
           }
+        }
+      }
+      if (db && currentAdminUid) {
+        try {
+          await Promise.all(
+            firestoreNotifications
+              .filter((item) => !item.read)
+              .map((item) => updateDoc(doc(db, "notifications", item.id), { read: true })),
+          );
+        } catch (error) {
+          console.error("Could not mark Firestore notifications as read:", error);
+          window.alert("Some proposal notifications could not be marked as read. Please try again.");
+          return;
         }
       }
       const localList = read(key, []);
@@ -434,6 +691,15 @@ import { auth, rtdb, isRtdbConfigured } from "../UserStudent/firebaseConfig.js";
           item = list.find((note) => note.id === card.dataset.notification);
         if (!item) return;
         item.read = true;
+        if (item.source === "firestore" && db && currentAdminUid) {
+          try {
+            await updateDoc(doc(db, "notifications", item.id), { read: true });
+          } catch (error) {
+            console.error("Could not mark Firestore notification as read:", error);
+            window.alert("This notification could not be marked as read. Please try again.");
+            return;
+          }
+        }
         if (item.source === "rtdb" && currentAdminUid && rtdb) {
           try {
             await update(ref(rtdb, `notifications/${currentAdminUid}/${item.id}`), {
@@ -449,8 +715,14 @@ import { auth, rtdb, isRtdbConfigured } from "../UserStudent/firebaseConfig.js";
           localItem.read = true;
           save(localList);
         }
-        if (item.eventId) {
-          location.href = `AdminApproval.html?review=${encodeURIComponent(item.eventId)}`;
+        const proposalId = item.proposalId || item.eventId;
+        if (proposalId) {
+          const reviewUrl = new URL("AdminApproval.html", window.location.href);
+          reviewUrl.searchParams.set("review", proposalId);
+          if (item.source === "firestore") {
+            reviewUrl.searchParams.set("source", "firestore");
+          }
+          location.href = reviewUrl.href;
         } else {
           render();
         }
@@ -479,8 +751,19 @@ import { auth, rtdb, isRtdbConfigured } from "../UserStudent/firebaseConfig.js";
     toast.innerHTML = `${esc(message)} <button type="button">Undo</button>`;
     toast.hidden = false;
     clearTimeout(undoTimer);
-    toast.querySelector("button").onclick = () => {
+    toast.querySelector("button").onclick = async () => {
       if (undoSnapshot) {
+        try {
+          await Promise.all(
+            undoSnapshot
+              .filter((item) => item.source === "firestore")
+              .map((item) => updateDoc(doc(db, "notifications", item.id), { read: item.read })),
+          );
+        } catch (error) {
+          console.error("Could not restore Firestore notification read states:", error);
+          window.alert("Could not undo the notification read changes. Please refresh and try again.");
+          return;
+        }
         save(undoSnapshot);
         undoSnapshot = null;
         render();
@@ -496,22 +779,114 @@ import { auth, rtdb, isRtdbConfigured } from "../UserStudent/firebaseConfig.js";
   window.addEventListener("focus", render);
 
   if (auth) {
-    onAuthStateChanged(auth, (user) => {
+    onAuthStateChanged(auth, async (user) => {
       if (user) {
         currentAdminUid = user.uid;
+        currentAdminOrganizationCodes = getNotificationProfileValues(profile, [
+          "organizationCode",
+          "organizationId",
+          "orgCode",
+          "orgId",
+          "organization",
+          "organizationName",
+          "orgName",
+          "organizations",
+          "courseOrganization",
+          "courseOrganizations",
+        ]);
+        currentAdminDepartmentCodes = getNotificationProfileValues(profile, [
+          "departmentCode",
+          "departmentId",
+          "department",
+          "departments",
+          "departmentIds",
+          "course",
+        ]);
+        if (db) {
+          try {
+            const [adminProfileSnapshot, approverOrganizationSnapshot] =
+              await Promise.all([
+                getDoc(doc(db, "adminUser", user.uid)),
+                getDoc(doc(db, "approverOrganizations", user.uid)),
+              ]);
+            if (auth.currentUser?.uid !== user.uid) return;
+            const adminProfile = adminProfileSnapshot.exists()
+              ? adminProfileSnapshot.data() || {}
+              : {};
+            const approverOrganization = approverOrganizationSnapshot.exists()
+              ? approverOrganizationSnapshot.data() || {}
+              : {};
+            currentAdminOrganizationCodes = [
+              ...new Set([
+                ...currentAdminOrganizationCodes,
+                ...getNotificationProfileValues(adminProfile, [
+                  "organizationCode",
+                  "organizationId",
+                  "orgCode",
+                  "orgId",
+                  "organization",
+                  "organizationName",
+                  "orgName",
+                  "organizations",
+                  "courseOrganization",
+                  "courseOrganizations",
+                ]),
+                ...getNotificationProfileValues(approverOrganization, [
+                  "organizationCode",
+                  "organizationId",
+                  "orgCode",
+                  "orgId",
+                  "organization",
+                  "organizationName",
+                  "orgName",
+                  "organizations",
+                ]),
+              ]),
+            ];
+            currentAdminDepartmentCodes = [
+              ...new Set([
+                ...currentAdminDepartmentCodes,
+                ...getNotificationProfileValues(adminProfile, [
+                  "departmentCode",
+                  "departmentId",
+                  "department",
+                  "departments",
+                  "departmentIds",
+                  "course",
+                ]),
+              ]),
+            ];
+          } catch (error) {
+            console.error("Could not load the signed-in admin's organization profile:", error);
+          }
+        }
+        if (auth.currentUser?.uid !== user.uid) return;
+        render();
         subscribeToRtdbNotifications(user.uid);
+        subscribeToFirestoreNotifications(user.uid);
         subscribeToQueue(user.uid);
+      } else {
+        currentAdminUid = null;
+        currentAdminOrganizationCodes = [];
+        currentAdminDepartmentCodes = [];
+        if (notifListenerRef) off(notifListenerRef);
+        notifListenerRef = null;
+        if (queueListenerRef) off(queueListenerRef);
+        queueListenerRef = null;
+        rtdbNotifications = [];
+        if (firestoreNotifUnsubscribe) firestoreNotifUnsubscribe();
+        firestoreNotifUnsubscribe = null;
+        firestoreNotifications = [];
+        firestoreNotificationsLoading = false;
+        firestoreNotificationsError = "";
+        render();
       }
     });
   }
-  if (currentAdminUid) {
-    subscribeToRtdbNotifications(currentAdminUid);
-    subscribeToQueue(currentAdminUid);
-  }
-
   window.addEventListener("beforeunload", () => {
     if (notifListenerRef) off(notifListenerRef);
     if (queueListenerRef) off(queueListenerRef);
+    if (firestoreNotifUnsubscribe) firestoreNotifUnsubscribe();
   });
 
   render();

@@ -10,6 +10,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 import { httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
 import {
+  arrayUnion,
   collection,
   deleteDoc,
   doc,
@@ -785,6 +786,9 @@ import {
 
           const isDraft = normalizeStatus(event.status) === "draft";
           const canPublish = effStatus === "approved";
+          const canDeleteEvent = !getEventStatusValues(event)
+            .some((status) => ["pending", "published"].includes(status)) &&
+            !["pending", "published"].includes(normalizeStatus(effStatus));
           const showAttendanceAction = ["published", "completed"].includes(
             normalizeStatus(effStatus),
           );
@@ -814,7 +818,7 @@ import {
               </td>
               <td data-label="Actions">
                 ${event.firestoreSubmission
-                  ? `<div class="event-actions"><button type="button" class="event-action" data-action="view" data-event-id="${eventId}">View tracker</button>${canPublish ? `<button type="button" class="event-action event-action-primary" data-action="publish" data-event-id="${eventId}" title="Publish this event to students">Publish</button>` : ""}${showAttendanceAction ? `<a class="event-action" href="EventOrganizerScanAttendance.html?${scanParams.toString()}">Scan attendance</a>` : ""}<button type="button" class="event-action event-action-danger" data-action="delete-event" data-event-id="${eventId}">Delete</button></div>`
+                  ? `<div class="event-actions"><button type="button" class="event-action" data-action="view" data-event-id="${eventId}">View tracker</button>${canPublish ? `<button type="button" class="event-action event-action-primary" data-action="publish" data-event-id="${eventId}" title="Publish this event to students">Publish</button>` : ""}${showAttendanceAction ? `<a class="event-action" href="EventOrganizerScanAttendance.html?${scanParams.toString()}">Scan attendance</a>` : ""}${canDeleteEvent ? `<button type="button" class="event-action event-action-danger" data-action="delete-event" data-event-id="${eventId}">Delete</button>` : ""}</div>`
                   : isDraft
                     ? `<div class="event-actions"><a class="event-action" href="EventOrganizerCreateEvent.html?draft=${eventId}">Continue editing</a><button type="button" class="event-action event-action-danger" data-action="delete-draft" data-event-id="${eventId}">Delete</button></div>`
                     : getActionMarkup(event)}
@@ -1102,7 +1106,7 @@ import {
     }
 
     if (btnTrackerResubmit) {
-      const isRevisionState = effStatus === "revision" || anyChangesRequested;
+      const isRevisionState = ["revision", "rejected"].includes(effStatus) || anyChangesRequested;
       btnTrackerResubmit.disabled = !isRevisionState || hasUnreplacedFiles;
       if (hasUnreplacedFiles) {
         btnTrackerResubmit.title = "Please replace every requested document before resubmitting.";
@@ -1294,24 +1298,80 @@ import {
     }
   }
 
+  async function getOwnedFirestoreEvent(eventId) {
+    const event = findOrganizerEvent(eventId);
+    const activeUser = auth?.currentUser;
+    if (!event || !event.firestoreSubmission || !firestoreDb || !activeUser ||
+        activeUser.uid !== organizerId) {
+      throw new Error("Couldn't verify that you own this event. Refresh the page and try again.");
+    }
+
+    const activeEventId = String(event.eventId || event.id);
+    const eventRef = doc(firestoreDb, "events", activeEventId);
+    const snapshot = await getDoc(eventRef);
+    if (!snapshot.exists()) {
+      throw new Error("This event is no longer available.");
+    }
+    const latestEvent = snapshot.data();
+    const isOwner = [latestEvent.organizerUid, latestEvent.organizerId, latestEvent.createdBy]
+      .some((ownerId) => String(ownerId || "") === activeUser.uid);
+    if (!isOwner) {
+      throw new Error("You don't have permission to update this event.");
+    }
+    if (auth?.currentUser?.uid !== activeUser.uid || organizerId !== activeUser.uid) {
+      throw new Error("Your sign-in session changed. Please refresh and try again.");
+    }
+
+    return { event, eventRef, latestEvent, activeUser, activeEventId };
+  }
+
   async function handleCancelEvent(eventId) {
-    const confirmed = window.confirm("Are you sure you want to cancel this event proposal?");
-    if (!confirmed) return;
+    const event = findOrganizerEvent(eventId);
+    if (!event) {
+      window.alert("This event is no longer available. Refresh your submissions and try again.");
+      return;
+    }
+    if (!window.confirm("Are you sure you want to cancel this event proposal?")) return;
 
     try {
-      if (functions) {
-        const cancelFn = httpsCallable(functions, "cancelEvent");
-        await cancelFn({ eventId, reason: "Cancelled by organizer." });
+      let activeEventId;
+      if (event.firestoreSubmission) {
+        const ownedEvent = await getOwnedFirestoreEvent(eventId);
+        const { eventRef, latestEvent, activeUser } = ownedEvent;
+        activeEventId = ownedEvent.activeEventId;
+        if (normalizeStatus(latestEvent.status) === "completed") {
+          throw new Error("Completed events cannot be cancelled.");
+        }
+
+        const now = Date.now();
+        await updateDoc(eventRef, {
+          status: "cancelled",
+          approvalStatus: "cancelled",
+          cancelledAt: now,
+          updatedAt: now,
+          approvalHistory: arrayUnion({
+            action: "cancelled",
+            by: activeUser.displayName || activeUser.email || "Event Organizer",
+            at: now,
+            note: "Cancelled by organizer.",
+          }),
+        });
+        event.status = "cancelled";
+        event.approvalStatus = "cancelled";
+      } else {
+        if (!functions) throw new Error("The cancellation service is unavailable. Try again later.");
+        await httpsCallable(functions, "cancelEvent")({
+          eventId,
+          reason: "Cancelled by organizer.",
+        });
+        event.status = "cancelled";
+        activeEventId = String(event.eventId || event.id);
       }
-      const event = organizerEvents.find((e) => String(e.eventId || e.id) === String(eventId));
-      if (event) event.status = "cancelled";
+
       const approval = getApprovalForEvent(event);
       if (approval) approval.status = "cancelled";
-
       renderEvents();
-      if (activeTrackingEventId === eventId) {
-        closeApprovalTracker();
-      }
+      if (String(activeTrackingEventId) === activeEventId) closeApprovalTracker();
       window.alert("Event proposal has been cancelled.");
     } catch (err) {
       console.error("Cancel event error:", err);
@@ -1320,46 +1380,109 @@ import {
   }
 
   async function handleResubmitEvent(eventId) {
-    const note = window.prompt("Optional message for the reviewer regarding your updates:", "Changes updated as requested.");
-    if (note === null) return; // User pressed cancel on prompt
+    const event = findOrganizerEvent(eventId);
+    if (!event) {
+      window.alert("This event is no longer available. Refresh your submissions and try again.");
+      return;
+    }
+    if (!window.confirm("Review and update this proposal before submitting it again? Your existing proposal will remain unchanged.")) return;
 
     try {
-      if (functions) {
-        const resubmitFn = httpsCallable(functions, "resubmitEvent");
-        await resubmitFn({ eventId, note });
+      const { latestEvent, activeUser } = event.firestoreSubmission
+        ? await getOwnedFirestoreEvent(eventId)
+        : { latestEvent: event, activeUser: auth?.currentUser };
+      if (!activeUser || activeUser.uid !== organizerId) {
+        throw new Error("Your sign-in session is unavailable. Please sign in again and retry.");
       }
-      const event = organizerEvents.find((e) => String(e.eventId || e.id) === String(eventId));
-      if (event) event.status = "pending";
-      const approval = getApprovalForEvent(event);
-      if (approval) {
-        approval.status = "pending";
-        if (approval.members) {
-          Object.values(approval.members).forEach((m) => {
-            if (m.status === "rev") m.status = "review";
-          });
-        }
-      }
-      renderEvents();
-      if (activeTrackingEventId === eventId) {
-        renderTrackerContent(event, approval);
-      }
-      window.alert("Proposal resubmitted for review!");
+
+      const eventToEdit = {
+        ...latestEvent,
+        id: String(event.eventId || event.id),
+        eventId: String(event.eventId || event.id),
+        organizerId: activeUser.uid,
+        organizerUid: activeUser.uid,
+        createdBy: activeUser.uid,
+        participantDocuments: [
+          latestEvent.participantDocuments,
+          latestEvent.attachments,
+          Array.isArray(latestEvent.approvalDocuments)
+            ? latestEvent.approvalDocuments
+            : [],
+        ].find((documents) => Array.isArray(documents) && documents.length)
+          ?.map((document) => document && typeof document === "object"
+            ? {
+                ...document,
+                url: document.url || document.href || document.path ||
+                  document.downloadURL || document.downloadUrl || document.fileUrl || "",
+              }
+            : document) || [],
+        partnerOrganizations: Array.isArray(latestEvent.partnerOrganizations) &&
+          latestEvent.partnerOrganizations.length
+          ? latestEvent.partnerOrganizations
+          : (Array.isArray(latestEvent.targetOrganizations)
+            ? latestEvent.targetOrganizations.map((organization) =>
+                typeof organization === "string"
+                  ? { id: organization, name: organization }
+                  : organization,
+              )
+            : []),
+      };
+      sessionStorage.setItem("recovibeProposalResubmit", JSON.stringify(eventToEdit));
+      window.location.href = `EventOrganizerCreateEvent.html?resubmit=${encodeURIComponent(eventToEdit.eventId)}`;
     } catch (err) {
-      console.error("Resubmit error:", err);
-      window.alert(err.message || "Could not resubmit proposal.");
+      console.error("Could not prepare proposal for resubmission:", err);
+      window.alert(err.message || "Could not prepare this proposal for resubmission.");
     }
   }
 
   async function handleRemindApprovers(eventId) {
     try {
-      if (functions) {
-        const remindFn = httpsCallable(functions, "remindApprovers");
-        await remindFn({ eventId });
+      const event = findOrganizerEvent(eventId);
+      if (!event) throw new Error("This event is no longer available. Refresh your submissions and try again.");
+      let eventRef = null;
+      let activeUser = null;
+      let approval;
+      if (event.firestoreSubmission) {
+        const ownedEvent = await getOwnedFirestoreEvent(eventId);
+        eventRef = ownedEvent.eventRef;
+        activeUser = ownedEvent.activeUser;
+        approval = buildFirestoreApproval(ownedEvent.latestEvent);
+      } else {
+        approval = getApprovalForEvent(event) || buildFirestoreApproval(event);
       }
-      window.alert("Reminder notification sent to active approvers.");
+      const activeReviewers = Object.values(approval.members || {})
+        .filter((member) => member.status === "review");
+      if (!activeReviewers.length) {
+        window.alert("There are no active approvers to remind right now.");
+        return;
+      }
+
+      const reviewerNames = activeReviewers.map((member) => member.label).join(", ");
+      if (!window.confirm(`Send a reminder to ${reviewerNames}?`)) return;
+
+      const now = Date.now();
+      if (eventRef) {
+        await updateDoc(eventRef, {
+          updatedAt: now,
+          approvalHistory: arrayUnion({
+            action: "reminded",
+            by: activeUser.displayName || activeUser.email || "Event Organizer",
+            at: now,
+            note: `Reminder sent to ${reviewerNames}.`,
+            targetApprovers: activeReviewers.map(({ key, label }) => ({ key, label })),
+          }),
+        });
+      } else {
+        if (!functions) throw new Error("The reminder service is unavailable. Try again later.");
+        await httpsCallable(functions, "remindApprovers")({
+          eventId,
+          keys: activeReviewers.map(({ key }) => key),
+        });
+      }
+      window.alert(`Reminder logged for ${reviewerNames}.`);
     } catch (err) {
-      console.warn("Remind approver notice:", err);
-      window.alert("Reminder sent to approver.");
+      console.error("Could not log approver reminder:", err);
+      window.alert(err.message || "Could not send the approver reminder.");
     }
   }
 

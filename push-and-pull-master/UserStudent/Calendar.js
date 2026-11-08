@@ -1,4 +1,5 @@
 import { loadCalendarData } from "../calendarDataService.js";
+import { isEventVisibleToStudent } from "./eventAudience.js";
 
 (() => {
   const monthNames = [
@@ -442,7 +443,18 @@ import { loadCalendarData } from "../calendarDataService.js";
           .filter((input) => input.checked)
           .map((input) => input.dataset.source)
       : [];
-    return events.filter((event) => checked.includes(eventSource(event)));
+    let studentProfile = {};
+    try {
+      studentProfile = JSON.parse(
+        localStorage.getItem("recovibeCurrentUser") || "null",
+      ) || {};
+    } catch (error) {
+      console.warn("Could not read student audience profile:", error);
+    }
+    return events.filter((event) =>
+      (isHolidayEvent(event) || isEventVisibleToStudent(event, studentProfile)) &&
+      checked.includes(eventSource(event)),
+    );
   }
 
   function buildUpcomingList() {

@@ -1458,6 +1458,330 @@ async function verifyOrganizerEventOwnership(authData, eventId) {
   return { role, eventData };
 }
 
+function getProposalNotificationAudience(eventData) {
+  const audience = normalizeApprovalKey(eventData.targetAudience);
+  const openForAll = eventData.openForAll === true || audience.startsWith("opentoall");
+  const organizationCodes = new Set();
+  const departmentCodes = new Set();
+  getNotificationProfileValues(eventData, [
+    "organizationCode",
+    "organizationId",
+    "orgCode",
+    "orgId",
+    "organizerOrganization",
+    "organization",
+    "organizationName",
+    "orgName",
+  ]).forEach((code) => organizationCodes.add(code));
+  const addScopeValues = (target, values) => {
+    (Array.isArray(values) ? values : values ? [values] : []).forEach((value) => {
+      if (Array.isArray(value)) {
+        addScopeValues(target, value);
+        return;
+      }
+      if (typeof value === "string") {
+        const code = value.trim().replace(/\s+/g, " ").toUpperCase();
+        if (code) target.add(code);
+      } else if (value && typeof value === "object") {
+        [
+          value.organizationCode,
+          value.organizationId,
+          value.orgCode,
+          value.orgId,
+          value.departmentCode,
+          value.departmentId,
+          value.code,
+          value.id,
+          value.value,
+          value.name,
+          value.label,
+          value.subtitle,
+        ].forEach((item) => {
+          const code = String(item || "").trim().replace(/\s+/g, " ").toUpperCase();
+          if (code) target.add(code);
+        });
+      }
+    });
+  };
+
+  const partners = [
+    ...(Array.isArray(eventData.partnerOrganizations) ? eventData.partnerOrganizations : []),
+    ...(Array.isArray(eventData.targetOrganizations) ? eventData.targetOrganizations : []),
+  ];
+  if (eventData.isCollaboration === true || partners.length > 0) {
+    addScopeValues(organizationCodes, partners);
+  }
+
+  addScopeValues(departmentCodes, [
+    eventData.targetDepartments,
+    eventData.targetDepartment,
+    eventData.targetDepartmentIds,
+    eventData.departments,
+  ]);
+  return {
+    openForAll,
+    organizationCodes: [...organizationCodes],
+    departmentCodes: [...departmentCodes],
+  };
+}
+
+function getNotificationProfileValues(profile, keys) {
+  const values = [];
+  keys.forEach((key) => {
+    const value = profile?.[key];
+    (Array.isArray(value) ? value : [value]).forEach((entry) => {
+      if (typeof entry === "string") {
+        values.push(entry);
+      } else if (entry && typeof entry === "object") {
+        [
+          entry.organizationCode,
+          entry.organizationId,
+          entry.orgCode,
+          entry.orgId,
+          entry.departmentCode,
+          entry.departmentId,
+          entry.code,
+          entry.id,
+          entry.value,
+          entry.name,
+          entry.label,
+        ].filter(Boolean).forEach((item) => values.push(item));
+      }
+    });
+  });
+  return [...new Set(values.map((value) => String(value).trim().replace(/\s+/g, " ").toUpperCase()).filter(Boolean))];
+}
+
+async function createAdminProposalNotifications(eventId, eventData, type, message, notificationKey) {
+  const { openForAll, organizationCodes, departmentCodes } =
+    getProposalNotificationAudience(eventData);
+  const adminProfiles = await admin.firestore().collection("adminUser").get();
+  const recipients = (await Promise.all(adminProfiles.docs.map(async (snapshot) => {
+    const profile = snapshot.data() || {};
+    const role = normalizeApprovalKey(profile.role || profile.userRole);
+    const status = String(profile.status || "active").trim().toLowerCase();
+    const activeAdmin = ["admin", "superadmin"].includes(role) &&
+      !["disabled", "inactive", "suspended"].includes(status);
+    if (!activeAdmin || openForAll) return activeAdmin ? snapshot : null;
+
+    let profileOrganizationCodes = getNotificationProfileValues(profile, [
+      "organizationCode",
+      "organizationId",
+      "orgCode",
+      "orgId",
+      "organization",
+      "organizationName",
+      "orgName",
+      "organizations",
+      "courseOrganization",
+      "courseOrganizations",
+    ]);
+    let profileDepartmentCodes = getNotificationProfileValues(profile, [
+      "departmentCode",
+      "departmentId",
+      "department",
+      "departments",
+      "course",
+      "departmentIds",
+    ]);
+    if (!profileOrganizationCodes.length) {
+      const approverOrganization = await admin.firestore()
+        .collection("approverOrganizations")
+        .doc(snapshot.id)
+        .get();
+      if (approverOrganization.exists) {
+        profileOrganizationCodes = getNotificationProfileValues(
+          approverOrganization.data(),
+            [
+              "organizationCode",
+              "organizationId",
+              "orgCode",
+              "orgId",
+              "organization",
+              "organizationName",
+              "orgName",
+            ],
+          );
+      }
+    }
+    const matchesOrganization = organizationCodes.some((code) =>
+      profileOrganizationCodes.includes(code),
+    );
+    const matchesDepartment = departmentCodes.some((code) =>
+      profileDepartmentCodes.includes(code),
+    );
+    return (organizationCodes.length ? matchesOrganization : matchesDepartment)
+      ? snapshot
+      : null;
+  }))).filter(Boolean);
+  if (!recipients.length) return;
+
+  const eventName = String(eventData.eventName || eventData.title || eventData.name || "Untitled event");
+  await Promise.all(recipients.map(async (recipient) => {
+    const notificationId = `${eventId}_${type}_${notificationKey}_${recipient.id}`
+      .replace(/[^a-zA-Z0-9_-]/g, "_")
+      .slice(0, 140);
+    const notificationRef = admin.firestore().collection("notifications").doc(notificationId);
+    try {
+      await notificationRef.create({
+        recipientUid: recipient.id,
+        eventId: String(eventId),
+        eventName,
+        organizationCodes,
+        departmentCodes,
+        openForAll,
+        type,
+        title: ({
+          "proposal-submitted": "New Event Proposal",
+          "proposal-resubmitted": "Proposal Resubmitted",
+          "proposal-reminder": "Approver Reminder",
+          "proposal-cancelled": "Proposal Cancelled",
+          "proposal-approved": "Proposal Approved",
+        })[type] || "Proposal Update",
+        message: String(message),
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        read: false,
+      });
+    } catch (error) {
+      if (error.code !== 6 && error.code !== "already-exists") throw error;
+    }
+  }));
+}
+
+async function isEventOrganizerProposal(eventData) {
+  const uid = String(eventData.organizerUid || eventData.organizerId || eventData.createdBy || "");
+  const declaredRole = normalizeApprovalKey(
+    eventData.createdByRole || eventData.creatorRole || "",
+  );
+  if (!uid) return false;
+  if (["eventorganizer", "organizer", "eo"].includes(declaredRole)) return true;
+
+  const [roleSnapshot, organizerProfile, adminProfile] = await Promise.all([
+    admin.database().ref(`roles/${uid}`).once("value"),
+    admin.firestore().collection("eventOrganizations").doc(uid).get(),
+    admin.firestore().collection("adminUser").doc(uid).get(),
+  ]);
+  const profileRole = normalizeApprovalKey(
+    (adminProfile.exists ? adminProfile.data()?.role || adminProfile.data()?.userRole : "") ||
+    (organizerProfile.exists ? organizerProfile.data()?.role || organizerProfile.data()?.userRole : ""),
+  );
+  return ["eventorganizer", "organizer", "eo"].includes(normalizeApprovalKey(roleSnapshot.val())) ||
+    ["eventorganizer", "organizer", "eo"].includes(profileRole) ||
+    organizerProfile.exists;
+}
+
+exports.notifyAdminsOfProposalSubmission = functions.region("asia-southeast1")
+  .firestore.document("events/{eventId}")
+  .onCreate(async (snapshot, context) => {
+    const eventData = snapshot.data() || {};
+    if (!["pending", "pending approval", "pending_approval"].includes(
+      String(eventData.status || eventData.approvalStatus || "").trim().toLowerCase(),
+    )) return;
+    if (!await isEventOrganizerProposal(eventData)) return;
+
+    const eventName = String(eventData.eventName || eventData.title || eventData.name || "Untitled event");
+    let resubmission = false;
+    if (eventData.resubmissionOf) {
+      const originalSnapshot = await admin.firestore()
+        .collection("events")
+        .doc(String(eventData.resubmissionOf))
+        .get();
+      const original = originalSnapshot.exists ? originalSnapshot.data() || {} : {};
+      const originalStatuses = [
+        original.status,
+        original.approvalStatus,
+        ...(Array.isArray(original.approvalStages)
+          ? original.approvalStages
+          : Object.values(original.approvalStages || {}))
+          .flatMap((stage) => [stage?.status, stage?.approvalStatus, stage?.decision]),
+      ].map((status) => String(status || "").trim().toLowerCase().replace(/[\s_-]+/g, " "));
+      const originalOwner = String(original.organizerUid || original.organizerId || original.createdBy || "");
+      const newOwner = String(eventData.organizerUid || eventData.organizerId || eventData.createdBy || "");
+      resubmission = originalStatuses.some((status) =>
+        ["rejected", "revision", "changes requested"].includes(status),
+      ) &&
+        originalOwner !== "" && originalOwner === newOwner;
+    }
+    const type = resubmission ? "proposal-resubmitted" : "proposal-submitted";
+    const message = resubmission
+      ? `“${eventName}” was resubmitted for review.`
+      : `“${eventName}” was submitted for approval.`;
+    await createAdminProposalNotifications(
+      context.params.eventId,
+      eventData,
+      type,
+      message,
+      "submitted",
+    );
+  });
+
+exports.notifyAdminsOfProposalUpdates = functions.region("asia-southeast1")
+  .firestore.document("events/{eventId}")
+  .onUpdate(async (change, context) => {
+    const before = change.before.data() || {};
+    const after = change.after.data() || {};
+    if (!await isEventOrganizerProposal(after)) return;
+
+    const beforeStatus = String(before.status || before.approvalStatus || "").trim().toLowerCase().replace(/[\s_-]+/g, " ");
+    const afterStatus = String(after.status || after.approvalStatus || "").trim().toLowerCase().replace(/[\s_-]+/g, " ");
+    const eventName = String(after.eventName || after.title || after.name || "Untitled event");
+    const historyBefore = Array.isArray(before.approvalHistory) ? before.approvalHistory : [];
+    const historyAfter = Array.isArray(after.approvalHistory) ? after.approvalHistory : [];
+    const latestHistory = historyAfter[historyAfter.length - 1] || {};
+
+    if (
+      ["approved", "published"].includes(afterStatus) &&
+      !["approved", "published"].includes(beforeStatus)
+    ) {
+      await createAdminProposalNotifications(
+        context.params.eventId,
+        after,
+        "proposal-approved",
+        `“${eventName}” was approved.`,
+        String(change.after.updateTime.toMillis()),
+      );
+      return;
+    }
+
+    if (afterStatus === "cancelled" && beforeStatus !== "cancelled") {
+      await createAdminProposalNotifications(
+        context.params.eventId,
+        after,
+        "proposal-cancelled",
+        `“${eventName}” was cancelled by the Event Organizer.`,
+        after.cancelledAt || String(change.after.updateTime.toMillis()),
+      );
+      return;
+    }
+
+    if (
+      historyAfter.length > historyBefore.length &&
+      String(latestHistory.action || "").toLowerCase() === "reminded"
+    ) {
+      await createAdminProposalNotifications(
+        context.params.eventId,
+        after,
+        "proposal-reminder",
+        `The Event Organizer sent a reminder for “${eventName}”.`,
+        latestHistory.at || String(change.after.updateTime.toMillis()),
+      );
+      return;
+    }
+
+    if (
+      ["rejected", "revision", "changes requested"].includes(beforeStatus) &&
+      ["pending", "pending approval", "pending_approval"].includes(afterStatus)
+    ) {
+      await createAdminProposalNotifications(
+        context.params.eventId,
+        after,
+        "proposal-resubmitted",
+        `“${eventName}” was resubmitted for review.`,
+        String(change.after.updateTime.toMillis()),
+      );
+    }
+  });
+
 exports.getApproverDirectory = functions.region("asia-southeast1").https.onCall(async (data, context) => {
   await ensureApproverDirectory();
   const dirSnap = await admin.database().ref("approverDirectory").once("value");
@@ -2049,7 +2373,7 @@ exports.resubmitEvent = functions.region("asia-southeast1").https.onCall(async (
   if (!eventId) {
     throw new functions.https.HttpsError("invalid-argument", "Event ID is required.");
   }
-  const { eventData } = await verifyOrganizerEventOwnership(context.auth, eventId);
+  const { role, eventData } = await verifyOrganizerEventOwnership(context.auth, eventId);
 
   const approvalRef = admin.database().ref(`approvals/${eventId}`);
   const approvalSnap = await approvalRef.once("value");
@@ -2134,6 +2458,15 @@ exports.resubmitEvent = functions.region("asia-southeast1").https.onCall(async (
     at: now,
     note: note || "Proposal resubmitted with requested updates.",
   });
+  if (role === "event_organizer") {
+    await createAdminProposalNotifications(
+      eventId,
+      eventData,
+      "proposal-resubmitted",
+      `“${eventData.name || "Untitled event"}” was resubmitted for review.`,
+      now,
+    );
+  }
 
   return ({ success: true });
 });
@@ -2330,7 +2663,7 @@ exports.cancelEvent = functions.region("asia-southeast1").https.onCall(async (da
   if (!eventId) {
     throw new functions.https.HttpsError("invalid-argument", "Event ID is required.");
   }
-  const { eventData } = await verifyOrganizerEventOwnership(context.auth, eventId);
+  const { role, eventData } = await verifyOrganizerEventOwnership(context.auth, eventId);
 
   if (eventData.status === "completed") {
     throw new functions.https.HttpsError("failed-precondition", "Completed events cannot be cancelled.");
@@ -2357,6 +2690,15 @@ exports.cancelEvent = functions.region("asia-southeast1").https.onCall(async (da
     at: now,
     note: reason || "Event cancelled by organizer.",
   });
+  if (role === "event_organizer") {
+    await createAdminProposalNotifications(
+      eventId,
+      eventData,
+      "proposal-cancelled",
+      `“${eventData.name || "Untitled event"}” was cancelled by the Event Organizer.`,
+      now,
+    );
+  }
 
   return ({ success: true });
 });
@@ -2451,7 +2793,7 @@ exports.reopenEvent = functions.region("asia-southeast1").https.onCall(async (da
   if (!eventId) {
     throw new functions.https.HttpsError("invalid-argument", "Event ID is required.");
   }
-  const { role, eventData } = await verifyOrganizerEventOwnership(context.auth, eventId);
+  const { eventData } = await verifyOrganizerEventOwnership(context.auth, eventId);
 
   if (eventData.status !== "completed") {
     throw new functions.https.HttpsError("failed-precondition", "Only completed events can be reopened.");
@@ -2993,6 +3335,20 @@ exports.decideApproval = functions.region("asia-southeast1").https.onCall(async 
   }
 
   await rootRef.update(updates);
+  if (
+    decision === "approve" &&
+    Object.values(members).length > 0 &&
+    Object.values(members).every((member) => member.status === "ok") &&
+    await isEventOrganizerProposal(event)
+  ) {
+    await createAdminProposalNotifications(
+      eventId,
+      event,
+      "proposal-approved",
+      `“${event.name || "Untitled event"}” was approved.`,
+      now,
+    );
+  }
   return ({ success: true, decision });
 });
 
@@ -3108,7 +3464,7 @@ exports.remindApprovers = functions.region("asia-southeast1").https.onCall(async
   if (!eventId) {
     throw new functions.https.HttpsError("invalid-argument", "Event ID is required.");
   }
-  const { eventData } = await verifyOrganizerEventOwnership(context.auth, eventId);
+  const { role, eventData } = await verifyOrganizerEventOwnership(context.auth, eventId);
 
   const approvalSnap = await admin.database().ref(`approvals/${eventId}`).once("value");
   const approvalData = approvalSnap.val() || {};
@@ -3125,6 +3481,15 @@ exports.remindApprovers = functions.region("asia-southeast1").https.onCall(async
     at: now,
     note: `Reminder sent to ${targetKeys.map((k) => members[k]?.label || k).join(", ")}.`,
   });
+  if (role === "event_organizer") {
+    await createAdminProposalNotifications(
+      eventId,
+      eventData,
+      "proposal-reminder",
+      `The Event Organizer sent a reminder for “${eventData.name || "Untitled event"}”.`,
+      now,
+    );
+  }
 
   return ({ success: true, count: targetKeys.length });
 });

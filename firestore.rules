@@ -160,14 +160,13 @@ service cloud.firestore {
     }
     match /notifications/{notificationId} {
       allow read: if request.auth != null
-        && (
-          resource.data.get("recipientUid", "") == request.auth.uid
-          || resource.data.get("recipientUserId", "") == request.auth.uid
-          || resource.data.get("recipientId", "") == request.auth.uid
-          || resource.data.get("userId", "") == request.auth.uid
-          || resource.data.get("organizerUid", "") == request.auth.uid
-          || resource.data.get("organizerId", "") == request.auth.uid
-        );
+        && isAdminAccount()
+        && resource.data.get("recipientUid", "") == request.auth.uid;
+      allow update: if request.auth != null
+        && isAdminAccount()
+        && resource.data.get("recipientUid", "") == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["read"])
+        && request.resource.data.get("read", false) is bool;
     }
     match /events/{eventId} {
       allow read: if canReadEvent(resource.data);

@@ -17,6 +17,7 @@ import {
   isRtdbConfigured,
 } from "../UserStudent/firebaseConfig.js";
 import { fetchMonthHolidays } from "../holidayService.js";
+import { isEventVisibleToStudent } from "../UserStudent/eventAudience.js";
 
 (() => {
   const monthNames = [
@@ -361,7 +362,10 @@ import { fetchMonthHolidays } from "../holidayService.js";
       map.set(String(hol.id), hol);
     });
 
-    return [...map.values()];
+    return [...map.values()].filter((event) =>
+      event.categoryKey === "holiday" ||
+      isEventVisibleToStudent(event, state.organizerProfile || {}),
+    );
   }
 
   function getFilteredEvents() {
