@@ -198,7 +198,7 @@ ul {
   gap: 12px;
   padding: 10px 12px;
   border-radius: 9px;
-  color: #e9d6db;
+  color: #d6ae4a;
   font-size: 14.5px;
   line-height: 1.2;
   font-weight: 500;
@@ -209,12 +209,12 @@ ul {
 }
 .nav-item:hover {
   background: rgba(255, 255, 255, 0.08);
-  color: #fff;
+  color: #d6ae4a;
 }
 .nav-item.is-active {
   background: rgba(255, 255, 255, 0.14);
   border-left: 3px solid var(--gold-400);
-  color: #fff;
+  color: #d6ae4a;
   font-weight: 600;
   padding-left: 9px;
 }
@@ -234,7 +234,7 @@ ul {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  color: #fff;
+  color: #d6ae4a;
 }
 .nav-icon svg {
   width: 100%;

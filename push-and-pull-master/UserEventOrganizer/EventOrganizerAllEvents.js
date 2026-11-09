@@ -21,6 +21,7 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
   let unsubscribeEvents;
   const happeningNowRows = document.getElementById("happeningNowEvents");
   const upcomingRows = document.getElementById("upcomingEvents");
+  const upcomingHeading = document.querySelector("#upcomingEventsSection h2");
   const search = document.getElementById("eventSearch");
   const status = document.getElementById("eventStatusFilter");
   const category = document.getElementById("eventCategoryFilter");
@@ -31,7 +32,6 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
     category: "all",
     date: "all",
     status: "all",
-    availability: "all",
   };
   const initialEventId = new URLSearchParams(window.location.search).get(
     "eventId",
@@ -61,7 +61,6 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
   const sourceMatches = {
     "PUP Official": ["pup official", "pup biñan", "pup biñan campus", "pup cite", "pup main"],
     CSC: ["csc"],
-    "Teacher / Faculty": ["teacher / faculty", "teachers/faculty", "teacher", "faculty"],
     Organizational: ["organizational", "organization", "event organizer", "ibits", "organizer"],
     "Others / External": ["others / external", "other / external", "others/external", "admin", "external"],
   };
@@ -96,16 +95,10 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
     const date = eventDate
       ? new Date(`${String(eventDate).slice(0, 10)}T00:00:00`)
       : null;
-    const openSlots = Number(event.capacity || 0);
     const categoryValues = categoryMatches[state.category] || [];
     const dateMatches =
       state.date === "all" ||
       (date && date.getMonth() === Number(state.date.replace("month-", "")));
-    const availabilityMatches =
-      state.availability === "all" ||
-      (state.availability === "available" && openSlots > 20) ||
-      (state.availability === "limited" && openSlots > 0 && openSlots <= 20) ||
-      (state.availability === "full" && openSlots <= 0);
     const eventStatus = String(event.status || "")
       .trim()
       .toLowerCase()
@@ -134,7 +127,6 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
       !isRescheduled;
     const statusMatches =
       state.status === "all" ||
-      (state.status === "happening" && isHappening) ||
       (state.status === "upcoming" && isUpcoming) ||
       (state.status === "canceled" && isCancelled) ||
       (state.status === "completed" && isCompleted) ||
@@ -153,7 +145,6 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
         )) &&
       dateMatches &&
       statusMatches &&
-      availabilityMatches &&
       (!query ||
         `${event.title} ${event.category} ${event.location}`
           .toLowerCase()
@@ -219,6 +210,12 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
       return date && date.getTime() === today.getTime();
     });
     const upcoming = visible.filter((event) => !happeningNow.includes(event));
+    if (upcomingHeading) {
+      const headingLabel = state.status === "all"
+        ? "All Events"
+        : state.status.charAt(0).toUpperCase() + state.status.slice(1);
+      upcomingHeading.textContent = `${headingLabel} (${upcoming.length})`;
+    }
     renderList(happeningNowRows, happeningNow);
     renderList(upcomingRows, upcoming);
   }
@@ -278,7 +275,6 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
         "All Sources",
         "PUP Official",
         "CSC",
-        "Teacher / Faculty",
         "Organizational",
         "Others / External",
       ].map((value) => ({ value, label: value }))),
@@ -308,16 +304,10 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
       ]),
       createDropdown("status", "Event Status", [
         { value: "all", label: "All Statuses" },
-        { value: "happening", label: "Happening" },
         { value: "upcoming", label: "Upcoming" },
         { value: "canceled", label: "Canceled" },
         { value: "completed", label: "Completed" },
         { value: "rescheduled", label: "Rescheduled" },
-      ]),
-      createDropdown("availability", "Availability", [
-        { value: "all", label: "All" },
-        { value: "available", label: "Available" },
-        { value: "full", label: "Full" },
       ]),
     );
     toolbar.insertBefore(filterBar, status);

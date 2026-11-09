@@ -205,17 +205,7 @@ function getPublicDocumentLinks(event) {
     if (url) documents.push({ name: entry.name || entry.fileName || fallbackName, url });
   };
 
-  if (event.adminDocuments && typeof event.adminDocuments === "object") {
-    const adminDocument = event.adminDocuments;
-    if (adminDocument.url || adminDocument.downloadURL || adminDocument.downloadUrl || adminDocument.fileUrl || adminDocument.path) {
-      addDocument(adminDocument, "Proposal documents");
-    } else {
-      Object.values(adminDocument).forEach((entry, index) => addDocument(entry, `Proposal document ${index + 1}`));
-    }
-  } else {
-    addDocument(event.adminDocuments, "Proposal documents");
-  }
-  [event.approvalDocuments, event.participantDocuments, event.attachments].forEach((list) => {
+  [event.participantDocuments].forEach((list) => {
     if (Array.isArray(list)) list.forEach((entry, index) => addDocument(entry, `Event document ${index + 1}`));
   });
   const seen = new Set();
@@ -449,7 +439,7 @@ function getEventClassification(ev, now) {
 --------------------------------------------------------- */
 function loadStudentProfileFromStorage() {
   try {
-    const raw = localStorage.getItem("recovibeCurrentUser");
+    const raw = localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser");
     if (raw) {
       const u = JSON.parse(raw);
       if (u) {
@@ -1124,12 +1114,12 @@ function renderCalendar() {
     if (!ev.startMs) return;
     const dStart = new Date(ev.startMs);
     const dEnd = new Date(ev.endMs || ev.startMs);
-    const startIso = `${dStart.getFullYear()}-${String(dStart.getMonth() + 1).padStart(2, "0")}-${String(dStart.getDate()).padStart(2, "0")}`;
-    const endIso = `${dEnd.getFullYear()}-${String(dEnd.getMonth() + 1).padStart(2, "0")}-${String(dEnd.getDate()).padStart(2, "0")}`;
+    const startDay = new Date(dStart.getFullYear(), dStart.getMonth(), dStart.getDate()).getTime();
+    const endDay = new Date(dEnd.getFullYear(), dEnd.getMonth(), dEnd.getDate()).getTime();
 
     for (let d = 1; d <= lastDate; d++) {
-      const dayIso = `${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-      if (dayIso >= startIso && dayIso <= endIso) {
+      const dayTime = new Date(year, month, d).getTime();
+      if (dayTime >= startDay && dayTime <= endDay) {
         if (!dayEventsMap.has(d)) dayEventsMap.set(d, []);
         dayEventsMap.get(d).push(ev);
       }
@@ -1427,6 +1417,7 @@ async function handleRegister(eventId) {
     const message = err?.message || "Could not register for this event. Please try again.";
     showToast(message);
     announce(message);
+    return false;
   } finally {
     pendingRegistrationIds.delete(eventId);
     renderHappeningNow();
@@ -1434,6 +1425,7 @@ async function handleRegister(eventId) {
     renderRecommended();
     renderCalendar();
   }
+  return true;
 }
 
 async function handleCancelRegistration(eventId) {
@@ -1735,6 +1727,11 @@ function wireEvents() {
       e.preventDefault();
       const eventId = detailsBtn.getAttribute("data-event-id");
       if (eventId) {
+        const event = rawEventsMap.get(eventId);
+        if (event && window.RecovibeStudentEventDetails) {
+          window.RecovibeStudentEventDetails.open(event);
+          return;
+        }
         if (openDetailsEventIds.has(eventId)) {
           openDetailsEventIds.delete(eventId);
         } else {

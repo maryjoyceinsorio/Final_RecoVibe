@@ -55,6 +55,13 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
     });
 
     if (selectedProfile) {
+      const profile = selectedProfile.data;
+      const fullName = [profile.firstName, profile.middleName, profile.lastName]
+        .filter(Boolean)
+        .join(" ") || profile.name || profile.fullName || user.displayName || "Super Admin";
+      document.querySelectorAll("#sidebar-user-name").forEach((element) => { element.textContent = fullName; });
+      document.querySelectorAll("#sidebar-user-avatar").forEach((element) => { element.textContent = fullName.charAt(0).toUpperCase() || "S"; });
+      document.querySelectorAll("#sidebar-user-role").forEach((element) => { element.textContent = "Super Admin account"; });
       window.dispatchEvent(
         new CustomEvent("superadmin-profile-authorized", {
           detail: {
@@ -79,6 +86,20 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
       }
     });
   });
+
+  try {
+    const savedProfile = JSON.parse(localStorage.getItem("recovibeAdminProfile") || "null");
+    if (savedProfile) {
+      const fullName = [savedProfile.firstName, savedProfile.middleName, savedProfile.lastName]
+        .filter(Boolean)
+        .join(" ") || savedProfile.name || savedProfile.fullName || "Super Admin";
+      document.querySelectorAll("#sidebar-user-name").forEach((element) => { element.textContent = fullName; });
+      document.querySelectorAll("#sidebar-user-avatar").forEach((element) => { element.textContent = fullName.charAt(0).toUpperCase() || "S"; });
+      document.querySelectorAll("#sidebar-user-role").forEach((element) => { element.textContent = "Super Admin account"; });
+    }
+  } catch (error) {
+    console.info("[SuperAdminGuard] Sidebar profile unavailable.");
+  }
 
   if (!isFirebaseConfigured || !auth || !db) {
     console.info("[SuperAdminGuard] Firebase is unavailable; dashboard remains mounted.");

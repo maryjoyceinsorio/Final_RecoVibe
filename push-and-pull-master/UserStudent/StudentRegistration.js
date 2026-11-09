@@ -3,6 +3,8 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
   doc,
+  getDocs,
+  collection,
   serverTimestamp,
   setDoc,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -32,7 +34,7 @@ const noMiddleNameBox = document.getElementById("no-middle-name");
 const namePattern = /^[\p{L}\p{M}]+(?:[ .'-][\p{L}\p{M}]+)*\.?$/u;
 const emailPattern =
   /^(?=.{1,254}$)(?!.*\.\.)[A-Z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,}$/i;
-const studentNumberPattern = /^[A-Z0-9-]{1,20}$/;
+const studentNumberPattern = /^\d{4}-\d{5}-BN-\d$/;
 const contactPattern = /^09[0-9]{9}$/;
 const yearPattern = /^[1-5]-[1-5]$/;
 const touchedFields = new Set();
@@ -42,7 +44,6 @@ const defaultPreferences = {
   sources: [
     "PUP Official",
     "CSC",
-    "Teacher / Faculty",
     "Organizational",
     "Others / External",
   ],
@@ -112,7 +113,7 @@ function normalizePhone(value) {
 }
 
 function normalizeStudentNumber(value) {
-  return value.replace(/[^A-Za-z0-9-]/g, "").slice(0, 20).toUpperCase();
+  return value.trim().toUpperCase();
 }
 
 function normalizeWithCaret(control, normalize) {
@@ -220,11 +221,11 @@ function validateField(name) {
   }
 
   if (name === "studentId") {
-    const valid = studentNumberPattern.test(value.toUpperCase());
+    const valid = studentNumberPattern.test(value.trim().toUpperCase());
     setInvalid(
       "field-reg-student-id",
       !valid,
-      "Make sure the Student Number is valid.",
+      "Student number must follow the format 2023-00123-BN-0.",
     );
     return valid;
   }
@@ -618,16 +619,32 @@ form.addEventListener("submit", async (event) => {
   submitButton.textContent = "Creating account...";
 
   try {
-    const user =
-      auth.currentUser?.email?.toLowerCase() === email
-        ? auth.currentUser
-        : (
-            await createUserWithEmailAndPassword(
-              auth,
-              email,
-              fields.password.value,
-            )
-          ).user;
+    const existingUsers = await getDocs(collection(db, "users"));
+    const duplicateEmail = existingUsers.docs.some((userDoc) =>
+      String(userDoc.data()?.email || "").trim().toLowerCase() === email,
+    );
+    if (duplicateEmail) {
+      setInvalid("field-reg-email", true, "This email is already registered.");
+      fields.email.focus();
+      return;
+    }
+    const duplicateStudentNumber = existingUsers.docs.some((userDoc) =>
+      String(userDoc.data()?.studentNumber || userDoc.data()?.studentId || "")
+        .trim()
+        .toUpperCase() === studentNumber,
+    );
+    if (duplicateStudentNumber) {
+      setInvalid("field-reg-student-id", true, "This Student Number is already registered.");
+      fields.studentId.focus();
+      return;
+    }
+    const user = (
+      await createUserWithEmailAndPassword(
+        auth,
+        email,
+        fields.password.value,
+      )
+    ).user;
     profile.uid = user.uid;
     await setDoc(doc(db, "users", user.uid), profile);
 

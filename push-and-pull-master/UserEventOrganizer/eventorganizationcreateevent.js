@@ -2117,7 +2117,7 @@ loadCachedOrganizations();
                 </div>
 
                 <div class="ce-field" id="wrap-eventSource">
-                  <label for="eventSource">Event Source <span class="ce-readonly-tag">(Auto-linked)</span></label>
+                <label for="eventSource">Event Source <span class="ce-readonly-tag">(Auto-filled)</span></label>
                   <input type="text"
                          id="eventSource"
                          name="eventSource"
@@ -2316,9 +2316,9 @@ loadCachedOrganizations();
                   <p class="ce-error" id="error-maxCapacity" hidden></p>
                 </div>
 
-                <!-- Venue Type: Read-Only & Auto-Linked to Venue -->
+                <!-- Venue Type: Read-Only & Auto-filled from Venue -->
                 <div class="ce-field" id="wrap-weatherContingency">
-                  <label for="weatherContingency">Venue Type <span class="ce-readonly-tag">(Auto-linked)</span></label>
+                  <label for="weatherContingency">Venue Type <span class="ce-readonly-tag">(Auto-filled)</span></label>
                   <input type="text"
                          id="weatherContingency"
                          name="weatherContingency"

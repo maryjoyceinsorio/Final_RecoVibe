@@ -16,7 +16,13 @@ body {
 }
 
 #notificationPage .sidebar .nav-icon {
-  color: #fff;
+  color: #d6ae4a;
+}
+
+#notificationPage .sidebar .nav-item,
+#notificationPage .sidebar .nav-item:hover,
+#notificationPage .sidebar .nav-item.is-active {
+  color: #d6ae4a;
 }
 
 #notificationPage .sidebar .nav-item.is-active .nav-icon {

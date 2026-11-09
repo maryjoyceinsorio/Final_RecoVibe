@@ -205,10 +205,10 @@
 
         <div class="sidebar-bottom">
           <div class="user-card">
-            <div class="avatar" id="userAvatar">EO</div>
+            <div class="avatar" id="userAvatar"></div>
             <div class="user-meta">
-              <div class="user-name" id="userName">Event Organizer</div>
-              <div class="user-role" id="userRole">IBITS account</div>
+              <div class="user-name" id="userName"></div>
+              <div class="user-role" id="userRole"></div>
             </div>
           </div>
           <a
@@ -311,7 +311,6 @@
                   <th scope="col">Approval progress</th>
                   <th scope="col">Date &amp; time</th>
                   <th scope="col">Current status</th>
-                  <th scope="col">Actions</th>
                 </tr>
               </thead>
               <tbody id="eventTableBody"></tbody>
@@ -380,6 +379,9 @@
         <!-- Tracker Footer Actions -->
         <footer class="tracker-footer">
           <div class="tracker-footer-left">
+            <button type="button" class="tracker-btn tracker-btn-outline" id="btnTrackerEdit" hidden>Continue editing</button>
+            <button type="button" class="tracker-btn tracker-btn-danger" id="btnTrackerDelete" hidden>Delete</button>
+            <a class="tracker-btn tracker-btn-outline" id="btnTrackerScan" href="#" hidden>Scan attendance</a>
             <button type="button" class="tracker-btn tracker-btn-outline" id="btnTrackerRemind">
               Remind Approver
             </button>

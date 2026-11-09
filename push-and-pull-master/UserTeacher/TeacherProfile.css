@@ -1,5 +1,19 @@
 @import url("../UserEventOrganizer/EventOrganizerAllEvents.css");
 
+.organizer-sidebar .organizer-nav a,
+.organizer-sidebar .nav-item,
+.organizer-sidebar .organizer-nav a:hover,
+.organizer-sidebar .nav-item:hover,
+.organizer-sidebar .organizer-nav a.is-active,
+.organizer-sidebar .nav-item.is-active {
+  color: #d6ae4a;
+}
+
+.organizer-sidebar .organizer-nav-icon,
+.organizer-sidebar .nav-icon {
+  color: #d6ae4a;
+}
+
 /* ==========================================================================
    RecoVibe - Teacher Profile Styles
    Design Specification: PUP Biñan Campus Faculty Profile

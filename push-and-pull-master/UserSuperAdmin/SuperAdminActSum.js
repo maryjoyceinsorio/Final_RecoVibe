@@ -21,23 +21,20 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
   }
 
   // Profile resolution
-  let superAdminFullName = "Joshua Alen Lopez";
-  let superAdminRoleTitle = "Super Admin";
+  let superAdminFullName = "Super Admin";
+  let superAdminRoleTitle = "Super Admin account";
 
   const savedProfile =
     readStorage("recovibeSuperAdminProfile", null) ||
     readStorage("recovibeAdminProfile", null);
   if (savedProfile) {
     const fn =
-      savedProfile.name ||
-      savedProfile.fullName ||
       [savedProfile.firstName, savedProfile.middleName, savedProfile.lastName]
         .filter(Boolean)
-        .join(" ");
+        .join(" ") ||
+      savedProfile.name ||
+      savedProfile.fullName;
     if (fn) superAdminFullName = fn;
-    if (savedProfile.role || savedProfile.title) {
-      superAdminRoleTitle = savedProfile.role || savedProfile.title;
-    }
   }
 
   const avatarEl = document.getElementById("sidebar-user-avatar");
@@ -48,11 +45,7 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
     if (nameEl) nameEl.textContent = fullName;
     if (roleEl) roleEl.textContent = role;
     if (avatarEl) {
-      const parts = fullName.trim().split(/\s+/).filter(Boolean);
-      avatarEl.textContent =
-        parts.length > 1
-          ? `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase()
-          : fullName.slice(0, 2).toUpperCase() || "SA";
+      avatarEl.textContent = fullName.trim().charAt(0).toUpperCase() || "S";
     }
   }
 
@@ -62,15 +55,15 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
     const { profile, user } = event.detail || {};
     if (profile) {
       const fn =
-        profile.fullName ||
-        profile.name ||
         [profile.firstName, profile.middleName, profile.lastName]
           .filter(Boolean)
           .join(" ") ||
+        profile.name ||
+        profile.fullName ||
         user?.displayName ||
         superAdminFullName;
       superAdminFullName = fn;
-      superAdminRoleTitle = profile.role || profile.userRole || "Super Admin";
+      superAdminRoleTitle = "Super Admin account";
       updateSidebarProfile(superAdminFullName, superAdminRoleTitle);
       updateReportHeaderMeta();
     }

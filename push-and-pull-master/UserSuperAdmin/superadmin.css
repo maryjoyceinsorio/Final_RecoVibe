@@ -5,15 +5,15 @@
 :root {
   color-scheme: light;
   --maroon: #72141c;
-  --maroon-deep: #5d1017;
+  --maroon-deep: #4f1420;
   --maroon-overlay: #8a343c;
-  --gold: #d89f3a;
-  --canvas: #faf9f6;
+  --gold: #d6ae4a;
+  --canvas: #faf7f1;
   --surface: #ffffff;
   --line: #dcdcdc;
   --ink: #090909;
   --muted: #605b59;
-  --sidebar-width: 292px;
+  --sidebar-width: 264px;
 }
 
 html,
@@ -26,7 +26,7 @@ body {
 body {
   background: var(--canvas);
   color: var(--ink);
-  font-family: "Segoe UI", Inter, system-ui, sans-serif;
+  font-family: "Inter", sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -51,32 +51,28 @@ a {
   flex-direction: column;
   width: var(--sidebar-width);
   min-height: 100vh;
-  padding: 12px 16px 16px;
-  background: var(--maroon);
-  color: #fff;
+  padding: 20px 16px;
+  background: linear-gradient(180deg, #7a1f2e 0%, #4f1420 100%);
+  color: #f3e9dc;
 }
 
 .brand {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 78px;
-  padding: 0 0 12px;
+  margin-bottom: 28px;
   text-decoration: none;
 }
 
 .brand-mark {
   display: grid;
-  flex: 0 0 64px;
-  width: 64px;
-  height: 64px;
+  width: 38px;
+  height: 38px;
   place-items: center;
   border-radius: 9px;
-  background: var(--gold);
-  color: var(--maroon);
-  font-size: 28px;
-  font-weight: 900;
-  line-height: 1;
+  background: linear-gradient(160deg, #d6ae4a, #c79a2b);
+  color: #4f1420;
+  font: 700 16px/1 "Fraunces", Georgia, serif;
 }
 
 .brand-copy {
@@ -86,44 +82,49 @@ a {
 }
 
 .brand-copy strong {
-  font-size: 27px;
-  font-weight: 900;
-  line-height: 1;
+  color: #fff;
+  font: 600 19px/1.1 "Fraunces", Georgia, serif;
 }
 
 .brand-copy small {
-  font-size: 12px;
-  font-weight: 600;
+  margin-top: 2px;
+  color: #d9b9bf;
+  font: 400 11.5px/1.3 "Inter", sans-serif;
 }
 
 .primary-nav {
-  display: grid;
-  gap: 4px;
-  margin-top: 20px;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 3px;
 }
 
 .nav-link {
   display: flex;
   align-items: center;
-  gap: 10px;
-  min-height: 49px;
-  padding: 0 13px;
-  border-left: 4px solid transparent;
-  border-radius: 8px;
-  color: #fff;
-  font-size: 16px;
+  gap: 12px;
+  min-height: 43px;
+  padding: 10px 12px;
+  border-left: 3px solid transparent;
+  border-radius: 9px;
+  color: #d6ae4a;
+  font: 500 14.5px/1.2 "Inter", sans-serif;
   text-decoration: none;
   transition: background-color 140ms ease, border-color 140ms ease;
 }
 
 .nav-link:hover,
 .nav-link:focus-visible {
-  background: rgb(255 255 255 / 10%);
+  color: #d6ae4a;
+  background: rgb(255 255 255 / 14%);
 }
 
 .nav-link.is-active {
-  border-left-color: var(--gold);
-  background: rgb(255 255 255 / 13%);
+  border-left-color: #d6ae4a;
+  background: rgb(255 255 255 / 14%);
+  color: #d6ae4a;
+  font-weight: 600;
+  padding-left: 9px;
 }
 
 .nav-link svg,
@@ -135,35 +136,37 @@ a {
   stroke: currentColor;
   stroke-linecap: round;
   stroke-linejoin: round;
-  stroke-width: 1.5;
+  stroke-width: 1.4;
+  color: #d6ae4a;
 }
 
 .sidebar-footer {
-  display: grid;
-  gap: 12px;
-  margin: auto -16px 0;
-  padding: 14px 17px 0;
-  border-top: 1px solid rgb(255 255 255 / 38%);
+  display: flex;
+  flex-direction: column;
+  margin: auto 0 0;
+  padding: 14px 0 0;
+  border-top: 1px solid rgb(255 255 255 / 14%);
 }
 
 .account-summary {
   display: flex;
   align-items: center;
   gap: 10px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
   min-width: 0;
 }
 
 .account-badge {
   display: grid;
-  flex: 0 0 50px;
-  width: 50px;
-  height: 50px;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
   place-items: center;
   border-radius: 50%;
-  background: var(--gold);
-  color: var(--maroon);
-  font-size: 15px;
-  font-weight: 900;
+  background: linear-gradient(160deg, #d6ae4a, #c79a2b);
+  color: #4f1420;
+  font: 700 13px/1 "Inter", sans-serif;
 }
 
 .account-copy {
@@ -174,31 +177,36 @@ a {
 
 .account-copy strong {
   overflow: hidden;
-  font-size: 16px;
-  font-weight: 900;
-  line-height: 1.08;
+  color: #fff;
+  font: 600 14px/1.25 "Inter", sans-serif;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .account-copy small {
-  font-size: 12px;
+  margin-top: 1px;
+  color: #d9b9bf;
+  font: 400 11px/1.3 "Inter", sans-serif;
 }
 
 .logout-link {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 9px;
-  width: fit-content;
-  padding: 2px 8px;
-  color: #fff;
-  font-size: 15px;
+  gap: 12px;
+  width: auto;
+  min-height: 43px;
+  padding: 10px 12px;
+  border-left: 3px solid transparent;
+  border-radius: 9px;
+  color: #d6ae4a;
+  font: 500 14.5px/1.2 "Inter", sans-serif;
   text-decoration: none;
 }
 
 .logout-link:hover,
 .logout-link:focus-visible {
-  color: var(--gold);
+  color: #d6ae4a;
+  background: rgb(255 255 255 / 14%);
 }
 
 .main-content {
@@ -931,8 +939,8 @@ a {
   }
 
   .sidebar-footer {
-    margin-inline: -12px;
-    padding-inline: 13px;
+    margin-inline: 0;
+    padding-inline: 0;
   }
 
   .brand-copy strong {

@@ -203,7 +203,7 @@
                 <span class="live-count-badge" id="happeningLiveBadge" hidden>0 live</span>
               </div>
             </div>
-            <div class="event-list" id="happeningNowList" aria-labelledby="happeningHeading"><!-- injected by JS --></div>
+            <div class="event-list" id="happeningNowList" aria-labelledby="happeningHeading">Loading events...</div>
           </div>
 
           <!-- 2. UPCOMING EVENTS -->
@@ -212,7 +212,7 @@
               <h2 id="upcomingHeading">Upcoming events</h2>
               <a href="Events.html" class="link-see-all" data-view="events" id="seeAllEventsLink">See all events</a>
             </div>
-            <div class="event-list" id="upcomingEventsList" aria-labelledby="upcomingHeading"><!-- injected by JS --></div>
+            <div class="event-list" id="upcomingEventsList" aria-labelledby="upcomingHeading">Loading events...</div>
           </div>
 
           <!-- 3. CALENDAR PREVIEW -->
@@ -274,6 +274,7 @@
 
     <script src="events-data.js"></script>
     <script src="notification-count.js"></script>
+    <script src="../EventDetailsModal.js"></script>
     <script type="module" src="Dashboard.js"></script>
   </body>
 </html>

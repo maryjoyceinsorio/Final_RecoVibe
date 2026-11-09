@@ -1,4 +1,7 @@
 import {
+  browserLocalPersistence,
+  browserSessionPersistence,
+  setPersistence,
   signInWithEmailAndPassword,
   signOut,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
@@ -9,6 +12,8 @@ const currentUserStorageKey = "recovibeCurrentUser";
 const emailInput = document.getElementById("student-id");
 const passwordInput = document.getElementById("student-pass");
 const submitButton = document.getElementById("login-submit");
+const rememberMe = document.getElementById("remember-me");
+const rememberMessage = document.getElementById("remember-message");
 
 function setInvalid(fieldId, invalid) {
   document.getElementById(fieldId).classList.toggle("invalid", invalid);
@@ -89,6 +94,7 @@ async function signIn() {
   submitButton.setAttribute("aria-busy", "true");
 
   try {
+    await setPersistence(auth, rememberMe.checked ? browserLocalPersistence : browserSessionPersistence);
     await authReady;
     const credential = await signInWithEmailAndPassword(auth, email, password);
     const profileSnapshot = await getDoc(
@@ -119,7 +125,10 @@ async function signIn() {
       email: profile.email || credential.user.email || email,
       studentId: profile.studentNumber || profile.studentId || "",
     };
-    localStorage.setItem(currentUserStorageKey, JSON.stringify(currentUser));
+    const serializedUser = JSON.stringify(currentUser);
+    localStorage.removeItem(currentUserStorageKey);
+    sessionStorage.removeItem(currentUserStorageKey);
+    (rememberMe.checked ? localStorage : sessionStorage).setItem(currentUserStorageKey, serializedUser);
     window.location.assign("Dashboard.html");
   } catch (error) {
     console.error("[StudentLogin] Sign-in/profile lookup failed:", {
@@ -140,6 +149,10 @@ async function signIn() {
 }
 
 submitButton.addEventListener("click", signIn);
+rememberMe.addEventListener("change", () => {
+  rememberMessage.hidden = !rememberMe.checked;
+});
+rememberMessage.hidden = !rememberMe.checked;
 passwordInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();

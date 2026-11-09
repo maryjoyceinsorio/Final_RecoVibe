@@ -92,7 +92,6 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
   const reportGeneratedByText = document.getElementById("reportGeneratedByText");
   const reportPeriodBadge = document.getElementById("reportPeriodBadge");
 
-  const loadingState = document.getElementById("reportLoadingState");
   const errorState = document.getElementById("reportErrorState");
   const errorMessage = document.getElementById("reportErrorMessage");
   const retryBtn = document.getElementById("reportRetryBtn");
@@ -131,8 +130,6 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
       return;
     }
 
-    loadingState.hidden = false;
-    dataContainer.hidden = true;
     errorState.hidden = true;
 
     subscribeToEvents();
@@ -153,7 +150,6 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
   }
 
   function showError(msg) {
-    loadingState.hidden = true;
     dataContainer.hidden = true;
     errorState.hidden = false;
     errorMessage.textContent = msg;
@@ -162,7 +158,6 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
 
   retryBtn.addEventListener("click", () => {
     errorState.hidden = true;
-    loadingState.hidden = false;
     downloadCopyBtn.disabled = true;
     subscribeToEvents();
   });
@@ -186,7 +181,6 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
         q,
         (snapshot) => {
           allEvents = snapshot.docs.map((docSnap) => normalizeEvent(docSnap));
-          loadingState.hidden = true;
           errorState.hidden = true;
           dataContainer.hidden = false;
           downloadCopyBtn.disabled = false;

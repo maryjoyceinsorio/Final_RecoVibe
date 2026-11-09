@@ -6,7 +6,7 @@
 }
 .organizer-nav a,
 .organizer-sidebar .nav-item {
-  color: #e9d6db;
+  color: #d6ae4a;
   font:
     500 14.5px/1.2 Inter,
     sans-serif;
@@ -14,7 +14,7 @@
 .organizer-nav a:hover,
 .organizer-sidebar .nav-item:hover {
   background: rgba(255, 255, 255, 0.08);
-  color: #fff;
+  color: #d6ae4a;
 }
 .organizer-nav a.is-active,
 .organizer-sidebar .nav-item.is-active,
@@ -58,7 +58,7 @@
 }
 .organizer-nav-icon,
 .organizer-sidebar .nav-icon {
-  color: #fff;
+  color: #d6ae4a;
 }
 .organizer-nav a,
 .organizer-sidebar .nav-item {

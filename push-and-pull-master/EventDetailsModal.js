@@ -925,6 +925,11 @@
           if (blocked) throw new Error(blocked);
           if (selectedEvent.capacityMode !== "N/A" && available <= 0)
             throw new Error("No slots are available for this event.");
+          if (typeof window.recovibeRegisterForEvent === "function") {
+            if ((await window.recovibeRegisterForEvent(id)) === false) {
+              throw new Error("The registration could not be completed.");
+            }
+          }
           registrations.add(id);
           if (selectedEvent.capacityMode !== "N/A")
             savedSlots[id] = available - 1;
@@ -932,6 +937,11 @@
         } else {
           if (!registrations.has(id))
             throw new Error("You are not registered for this event.");
+          if (typeof window.recovibeCancelRegistration === "function") {
+            if ((await window.recovibeCancelRegistration(id)) === false) {
+              throw new Error("The registration could not be cancelled.");
+            }
+          }
           registrations.delete(id);
           if (limit !== null) savedSlots[id] = Math.min(limit, available + 1);
           else delete savedSlots[id];

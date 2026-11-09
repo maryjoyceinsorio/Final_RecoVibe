@@ -271,27 +271,6 @@ body {
   white-space: nowrap;
 }
 
-/* Loading & Skeletons */
-.report-loading-state {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 30px 0;
-}
-
-.skeleton-line {
-  height: 16px;
-  border-radius: 4px;
-  background: linear-gradient(90deg, #ece6de 25%, #f6f2ec 50%, #ece6de 75%);
-  background-size: 200% 100%;
-  animation: shimmer 1.4s infinite;
-}
-
-@keyframes shimmer {
-  0% { background-position: 200% 0; }
-  100% { background-position: -200% 0; }
-}
-
 .report-error-state {
   padding: 24px;
   text-align: center;
@@ -537,7 +516,6 @@ body {
     break-after: avoid-page;
     page-break-after: avoid;
   }
-  .report-loading-state,
   .report-error-state {
     display: none !important;
   }

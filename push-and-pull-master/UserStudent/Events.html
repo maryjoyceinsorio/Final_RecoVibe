@@ -2800,6 +2800,7 @@
         off,
       } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
       import { httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
+      import { loadApprovedFirestoreEvents } from "../calendarDataService.js";
 
       /* ---------------------------------------------------------
          STATE
@@ -2951,7 +2952,7 @@
       --------------------------------------------------------- */
       function hydrateUserProfile() {
         const user =
-          JSON.parse(localStorage.getItem("recovibeCurrentUser") || "null") ||
+            JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null") ||
           {};
         const storedFirstName = String(user.firstName || "").trim();
         const storedFullName = String(user.name || user.fullName || "").trim();
@@ -3982,6 +3983,13 @@
 
         if (!isRtdbConfigured) {
           useFallbackEvents();
+          loadApprovedFirestoreEvents().then((firestoreEvents) => {
+            firestoreEvents.forEach((item) => {
+              const ev = normalizeEvent(item.id || item.eventId, item);
+              if ((ev.status === "published" || ev.status === "completed") && isEventVisibleToStudent(ev, studentProfile)) rawEventsMap.set(ev.id, ev);
+            });
+            renderAll();
+          });
           return;
         }
 
@@ -4019,6 +4027,13 @@
 
           syncAttendanceListeners();
           renderAll();
+          loadApprovedFirestoreEvents().then((firestoreEvents) => {
+            firestoreEvents.forEach((item) => {
+              const ev = normalizeEvent(item.id || item.eventId, item);
+              if ((ev.status === "published" || ev.status === "completed") && isEventVisibleToStudent(ev, studentProfile)) rawEventsMap.set(ev.id, ev);
+            });
+            renderAll();
+          });
         };
 
         onValue(activePublicEventsRef, activePublicEventsListener, (err) => {
@@ -4500,8 +4515,10 @@
             const msg = err.message || "This event is full.";
             showToast(msg);
             announce(msg);
+            return false;
           }
         }
+        return true;
       }
 
       async function handleCancelRegistration(eventId) {
@@ -4698,7 +4715,7 @@
             const id = modalBtn.dataset.eventId;
             const ev = rawEventsMap.get(id);
             if (ev && window.RecovibeEventDetails) {
-              window.RecovibeEventDetails.open(ev.raw || ev, { showApprovalDocuments: true });
+              window.RecovibeStudentEventDetails?.open(ev.raw || ev);
             }
             return;
           }

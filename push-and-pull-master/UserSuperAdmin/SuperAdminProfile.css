@@ -1,0 +1,44 @@
+@import url("../UserTeacher/TeacherProfile.css");
+
+body {
+  background: #faf6f0;
+}
+
+.organizer-sidebar {
+  flex: 0 0 264px;
+  width: 264px;
+}
+
+.organizer-main {
+  background-color: #faf6f0;
+}
+
+.hero-subtitle,
+.hero-badge {
+  color: #faf6f0;
+}
+
+.hero-badge {
+  background-color: rgba(214, 174, 74, 0.22);
+}
+
+.profile-card {
+  background-color: #ffffff;
+}
+
+.full-width-card .label-lock {
+  width: 11px;
+  height: 11px;
+  flex-shrink: 0;
+}
+
+.full-width-card .badge-locked .label-lock {
+  width: 12px;
+  height: 12px;
+}
+
+.organizer-sidebar .nav-item.logout,
+.organizer-sidebar .nav-item.logout:hover,
+.organizer-sidebar .nav-item.logout:focus-visible {
+  color: #d6ae4a;
+}

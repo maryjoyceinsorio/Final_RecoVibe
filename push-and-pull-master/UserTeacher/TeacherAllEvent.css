@@ -121,7 +121,7 @@ a {
   padding: 11px 12px;
   border-left: 3px solid transparent;
   border-radius: 9px;
-  color: #e9d6db;
+  color: #d6ae4a;
   font:
     500 14.5px/1.2 Inter,
     sans-serif;
@@ -129,7 +129,7 @@ a {
 .teacher-nav-item:hover,
 .teacher-nav-item.is-active {
   background: rgba(255, 255, 255, 0.14);
-  color: #fff;
+  color: #d6ae4a;
 }
 .teacher-nav-item.is-active {
   border-left-color: var(--gold);
@@ -865,7 +865,7 @@ a {
   width: 20px;
   height: 20px;
   font-size: 0;
-  color: #fff;
+  color: #d6ae4a;
   flex: none;
 }
 .teacher-nav-item .nav-icon svg {
@@ -1074,10 +1074,10 @@ a {
 }
 
 .teacher-nav-item {
-  color: #e9d6db;
+  color: #d6ae4a;
 }
 .teacher-nav-item .nav-icon {
-  color: #fff;
+  color: #d6ae4a;
 }
 .teacher-nav-item.is-active .nav-icon {
   color: #d6ae4a;

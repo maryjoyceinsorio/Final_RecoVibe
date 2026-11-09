@@ -35,9 +35,14 @@ const escapeHtml = (value) =>
 
 function normalizeEvent(documentSnapshot) {
   const data = documentSnapshot.data();
-  const createdAt = data.createdAt?.toDate
-    ? data.createdAt.toDate().toISOString()
-    : data.createdAt || "";
+  const rawCreatedAt = data.createdAt;
+  const createdAt = rawCreatedAt?.toDate
+    ? rawCreatedAt.toDate().toISOString()
+    : rawCreatedAt?.seconds != null
+      ? new Date(Number(rawCreatedAt.seconds) * 1000).toISOString()
+      : typeof rawCreatedAt === "number"
+        ? new Date(rawCreatedAt).toISOString()
+        : rawCreatedAt || "";
   const dateISO = data.eventDate || data.dateISO || data.date || "";
   const startTime = data.startTime || "";
   const endTime = data.endTime || "";
@@ -115,10 +120,24 @@ function renderStatistics() {
       ),
     ).length,
   );
-  setCount(
-    "approvedEventsCount",
-    organizerEvents.filter((event) => status(event) === "approved").length,
-  );
+  const fullyApproved = (event) => {
+    const normalizedStatus = status(event);
+    const published = event.published === true || event.isPublished === true ||
+      ["published", "completed"].includes(normalizedStatus);
+    if (published || ["rejected", "pending", "needs revision", "draft"].includes(normalizedStatus)) return false;
+    const approvalGroups = [
+      Array.isArray(event.approvalStages) ? event.approvalStages : Object.values(event.approvalStages || {}),
+      Object.values(event.approval?.members || {}),
+      Object.values(event.approvalData?.members || {}),
+    ];
+    return approvalGroups.some((members) => {
+      const required = members.filter((member) => member && member.required !== false && member.enabled !== false);
+      return required.length === 4 && required.every((member) =>
+        ["approved", "ok"].includes(String(member.status || member.approvalStatus || member.state || member.decision || "").trim().toLowerCase()),
+      );
+    });
+  };
+  setCount("approvedEventsCount", organizerEvents.filter(fullyApproved).length);
   setCount(
     "completedEventsCount",
     organizerEvents.filter((event) => status(event) === "completed").length,

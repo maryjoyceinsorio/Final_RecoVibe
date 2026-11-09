@@ -38,7 +38,6 @@ import { isEventVisibleToStudent } from "../UserStudent/eventAudience.js";
   const CATEGORY_DEFS = [
     { key: "pup", label: "PUP Official", color: "#7A1F2E" },
     { key: "csc", label: "CSC", color: "#D9A93B" },
-    { key: "faculty", label: "Teachers/Faculty", color: "#10B981" },
     { key: "org", label: "Organizational", color: "#8B5CF6" },
     { key: "other", label: "Others/External", color: "#64748B" },
     { key: "holiday", label: "Holiday", color: "#D97706" },
@@ -362,7 +361,21 @@ import { isEventVisibleToStudent } from "../UserStudent/eventAudience.js";
       map.set(String(hol.id), hol);
     });
 
-    return [...map.values()].filter((event) =>
+    const deduplicated = new Map();
+    const duplicateRecords = [];
+    map.forEach((event) => {
+      const eventKey = [
+        String(event.title || "").trim().toLowerCase(),
+        event.startDay || "",
+        event.endDay || "",
+        String(event.venue || event.location || "").trim().toLowerCase(),
+      ].join("|");
+      if (!deduplicated.has(eventKey)) deduplicated.set(eventKey, event);
+      else duplicateRecords.push({ kept: deduplicated.get(eventKey).id, duplicate: event.id, title: event.title });
+    });
+    if (duplicateRecords.length) console.warn("[OrganizerCalendar] Duplicate event records hidden from display:", duplicateRecords);
+
+    return [...deduplicated.values()].filter((event) =>
       event.categoryKey === "holiday" ||
       isEventVisibleToStudent(event, state.organizerProfile || {}),
     );

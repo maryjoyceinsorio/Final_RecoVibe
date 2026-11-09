@@ -123,7 +123,6 @@ let isWalkInAllowed = false;
 let pendingWalkInToken = null;
 let pendingWalkInState = null;
 let pendingManualStudentNo = null;
-let isTeacherSession = false;
 
 // Initialize Date & Profile
 (() => {
@@ -137,19 +136,19 @@ let isTeacherSession = false;
 
   try {
     const orgProfile = JSON.parse(localStorage.getItem("recovibeOrganizerProfile") || "{}");
-    const teacherProfile = JSON.parse(localStorage.getItem("recovibeCurrentTeacher") || "{}");
-    const isTeacher = Boolean(teacherProfile.name || teacherProfile.fullName || localStorage.getItem("recovibeTeacherId"));
-    isTeacherSession = isTeacher;
-    const name = isTeacher
-      ? (teacherProfile.name || teacherProfile.fullName || "Teacher")
-      : (orgProfile.name || "Event Organizer");
-    const orgName = isTeacher
+    const name = orgProfile.fullName || orgProfile.name ||
+      [orgProfile.firstName, orgProfile.middleName, orgProfile.lastName].filter(Boolean).join(" ") || "Event Organizer";
+    const isTeacher = false;
+    /*
+    const orgName = `${orgProfile.organization || "PUP Biñan"} account`;
+    */
+    const legacyOrgName = isTeacher
       ? (teacherProfile.department || teacherProfile.role || "Faculty")
       : `${orgProfile.organization || "PUP Biñan"} organizer`;
     if (organizerName) organizerName.textContent = name;
-    if (organizerRole) organizerRole.textContent = orgName;
+    if (organizerRole) organizerRole.textContent = "";
     if (organizerAvatar) {
-      const initials = name.split(/\s+/).filter(Boolean).map(p => p[0]).slice(0, 2).join("").toUpperCase() || (isTeacher ? "TC" : "EO");
+      const initials = name.split(/\s+/).filter(Boolean).map(p => p[0]).slice(0, 2).join("").toUpperCase() || "EO";
       organizerAvatar.textContent = initials;
     }
 
@@ -176,6 +175,13 @@ let isTeacherSession = false;
       const emptyBtn = scanEmptyEventsBox?.querySelector("a");
       if (emptyBtn) emptyBtn.href = "../UserTeacher/TeacherMyEvent.html";
     }
+    const orgName = `${orgProfile.organization || "PUP BiÃ±an"} account · ${orgProfile.accountNumber || orgProfile.accountNo || orgProfile.organizerNumber || orgProfile.organizerNo || "EO"}`;
+    if (organizerName) organizerName.textContent = name;
+    if (organizerRole) organizerRole.textContent = orgName;
+    if (organizerAvatar) {
+      const initials = name.split(/\s+/).filter(Boolean).map(p => p[0]).slice(0, 2).join("").toUpperCase() || "EO";
+      organizerAvatar.textContent = initials;
+    }
   } catch (err) {
     console.warn("Could not read profile:", err);
   }
@@ -186,9 +192,8 @@ authReady.then(() => onAuthStateChanged(auth, async (user) => {
   if (!user) {
     // If running in development / demo mode with localStorage session, allow preview
     const localOrganizer = localStorage.getItem("recovibeOrganizerId");
-    const localTeacher = localStorage.getItem("recovibeTeacherId");
-    if (!localOrganizer && !localTeacher && isFirebaseConfigured) {
-      window.location.replace(isTeacherSession ? "../UserTeacher/TeacherLogin.html" : "EventOrganizerLogin.html");
+    if (!localOrganizer && isFirebaseConfigured) {
+      window.location.replace("EventOrganizerLogin.html");
       return;
     }
   } else if (rtdb) {
@@ -224,8 +229,10 @@ if (organizerLogout) {
       if (auth) await signOut(auth);
     } catch {}
     localStorage.removeItem("recovibeOrganizerId");
+    localStorage.removeItem("recovibeOrganizerProfile");
+    localStorage.removeItem("recovibeCurrentOrganizer");
     localStorage.removeItem("recovibeTeacherId");
-    window.location.href = isTeacherSession ? "../UserTeacher/TeacherLogin.html" : "EventOrganizerLogin.html";
+    window.location.href = "EventOrganizerLogin.html";
   });
 }
 

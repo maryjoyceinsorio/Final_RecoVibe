@@ -248,10 +248,17 @@ function isOrganizerEventHapApproved(event, hapNumber) {
 
 
 function canPublishOrganizerEvent(event) {
+  const stages = Array.isArray(event?.approvalStages)
+    ? event.approvalStages
+    : Object.values(event?.approvalStages || {});
+  const approvalMembers = Object.values(event?.approval?.members || event?.approvalData?.members || {});
+  const fourStagesApproved = [stages, approvalMembers].some((group) =>
+    group.length === 4 && group.every((stage) =>
+      ["approved", "ok"].includes(String(stage?.status || stage?.approvalStatus || stage?.state || stage?.decision || "").trim().toLowerCase()),
+    ),
+  );
   return (
-    isOrganizerEventHapApproved(event, 1) &&
-    isOrganizerEventHapApproved(event, 2) &&
-    isOrganizerEventHapApproved(event, 3) &&
+    fourStagesApproved &&
     event.status === "Approved" &&
     event.published !== true &&
     event.cancelled !== true

@@ -358,13 +358,6 @@
                 ><input
                   type="checkbox"
                   checked
-                  data-source="Teachers/Faculty"
-                /><span>Teachers/Faculty</span></label
-              >
-              <label class="filter-option"
-                ><input
-                  type="checkbox"
-                  checked
                   data-source="Others/External"
                 /><span>Others/External</span></label
               >
@@ -387,7 +380,6 @@
               <span class="legend-item"><span class="dot dot-binan" aria-hidden="true"></span>PUP Biñan</span>
               <span class="legend-item"><span class="dot dot-csc" aria-hidden="true"></span>CSC</span>
               <span class="legend-item"><span class="dot dot-organizational" aria-hidden="true"></span>Organizational</span>
-              <span class="legend-item"><span class="dot dot-faculty" aria-hidden="true"></span>Teachers/Faculty</span>
               <span class="legend-item"><span class="dot dot-external" aria-hidden="true"></span>Others/External</span>
               <span class="legend-item"><span class="dot dot-holiday" aria-hidden="true"></span>Holiday</span>
             </section>
@@ -460,7 +452,7 @@
         } catch {}
         let user = {};
         try {
-          user = JSON.parse(localStorage.getItem("recovibeCurrentUser") || "null") || {};
+        user = JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null") || {};
         } catch {
           user = {};
         }

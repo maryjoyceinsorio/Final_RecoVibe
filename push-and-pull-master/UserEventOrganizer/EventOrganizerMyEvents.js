@@ -81,6 +81,9 @@ import {
   const btnTrackerCancel = document.getElementById("btnTrackerCancel");
   const btnTrackerResubmit = document.getElementById("btnTrackerResubmit");
   const btnTrackerPublish = document.getElementById("btnTrackerPublish");
+  const btnTrackerEdit = document.getElementById("btnTrackerEdit");
+  const btnTrackerDelete = document.getElementById("btnTrackerDelete");
+  const btnTrackerScan = document.getElementById("btnTrackerScan");
 
   let activeTrackingEventId = null;
   let activeReplacingFileId = null;
@@ -686,7 +689,7 @@ import {
       if (eventTableBody) {
         eventTableBody.innerHTML = `
           <tr>
-            <td colspan="5"><div class="event-table-empty"><span>Checking authentication…</span></div></td>
+            <td colspan="4"><div class="event-table-empty"><span>Checking authentication…</span></div></td>
           </tr>`;
       }
       return;
@@ -696,7 +699,7 @@ import {
       if (eventTableBody) {
         eventTableBody.innerHTML = `
           <tr>
-            <td colspan="5">
+            <td colspan="4">
               <div class="event-table-empty">
                 <strong>Please log in as an Event Organizer.</strong>
                 <span>You need an active organizer session to view your event submissions.</span>
@@ -715,7 +718,7 @@ import {
       if (eventTableBody) {
         eventTableBody.innerHTML = `
           <tr>
-            <td colspan="5"><div class="event-table-empty"><span>Loading your event submissions…</span></div></td>
+            <td colspan="4"><div class="event-table-empty"><span>Loading your event submissions…</span></div></td>
           </tr>`;
       }
       return;
@@ -725,7 +728,7 @@ import {
       if (eventTableBody) {
         eventTableBody.innerHTML = `
           <tr>
-            <td colspan="5">
+            <td colspan="4">
               <div class="event-table-empty">
                 <strong>Couldn't load your events</strong>
                 <span>There was a problem loading your event submissions.</span>
@@ -748,7 +751,7 @@ import {
     if (eventTableBody) {
       eventTableBody.innerHTML = `
         <tr>
-          <td colspan="5">
+          <td colspan="4">
             <div class="event-table-empty">
               <strong>${escapeHtml(heading)}</strong>
               <span>${escapeHtml(message)}</span>
@@ -785,20 +788,6 @@ import {
           const category = event.category || "Academic & Learning";
 
           const isDraft = normalizeStatus(event.status) === "draft";
-          const canPublish = effStatus === "approved";
-          const canDeleteEvent = !getEventStatusValues(event)
-            .some((status) => ["pending", "published"].includes(status)) &&
-            !["pending", "published"].includes(normalizeStatus(effStatus));
-          const showAttendanceAction = ["published", "completed"].includes(
-            normalizeStatus(effStatus),
-          );
-          const scanParams = new URLSearchParams({
-            eventId: String(event.eventId || event.id),
-            eventName: String(event.title || event.eventName || event.name || "Untitled Event"),
-            eventDate: String(eventDate || ""),
-            eventTime: String(schedule || ""),
-            eventVenue: String(event.venue || event.location || "Venue TBA"),
-          });
           return `
             <tr data-event-id="${eventId}" data-draft="${String(isDraft)}"${new URLSearchParams(location.search).get("new") === String(eventId) ? ' class="new-event-highlight"' : ""}>
               <td data-label="Event">
@@ -815,13 +804,6 @@ import {
                 <span class="organizer-status ${statusClass}" aria-label="Status: ${escapeHtml(statusDisplay)}">
                   ${escapeHtml(statusDisplay)}
                 </span>
-              </td>
-              <td data-label="Actions">
-                ${event.firestoreSubmission
-                  ? `<div class="event-actions"><button type="button" class="event-action" data-action="view" data-event-id="${eventId}">View tracker</button>${canPublish ? `<button type="button" class="event-action event-action-primary" data-action="publish" data-event-id="${eventId}" title="Publish this event to students">Publish</button>` : ""}${showAttendanceAction ? `<a class="event-action" href="EventOrganizerScanAttendance.html?${scanParams.toString()}">Scan attendance</a>` : ""}${canDeleteEvent ? `<button type="button" class="event-action event-action-danger" data-action="delete-event" data-event-id="${eventId}">Delete</button>` : ""}</div>`
-                  : isDraft
-                    ? `<div class="event-actions"><a class="event-action" href="EventOrganizerCreateEvent.html?draft=${eventId}">Continue editing</a><button type="button" class="event-action event-action-danger" data-action="delete-draft" data-event-id="${eventId}">Delete</button></div>`
-                    : getActionMarkup(event)}
               </td>
             </tr>`;
         })
@@ -1124,6 +1106,30 @@ import {
         btnTrackerPublish.title = "Publish this event to students";
       }
     }
+
+    const isDraft = normalizeStatus(event.status) === "draft";
+    const isPublished = ["published", "completed"].includes(effStatus);
+    const isCancelled = effStatus === "cancelled";
+    const canDelete = !getEventStatusValues(event).some((value) =>
+      ["pending", "published"].includes(value),
+    ) && !["pending", "published"].includes(effStatus);
+    if (btnTrackerEdit) {
+      btnTrackerEdit.hidden = !isDraft;
+      btnTrackerEdit.textContent = "Continue editing";
+    }
+    if (btnTrackerDelete) btnTrackerDelete.hidden = !canDelete;
+    if (btnTrackerScan) {
+      btnTrackerScan.hidden = !isPublished;
+      const scanParams = new URLSearchParams({
+        eventId: String(event.eventId || event.id),
+        eventName: String(event.title || event.eventName || event.name || "Untitled Event"),
+        eventDate: String(getEventDate(event) || ""),
+        eventTime: String(getScheduleDisplay(event) || ""),
+        eventVenue: String(event.venue || event.location || "Venue TBA"),
+      });
+      btnTrackerScan.href = `EventOrganizerScanAttendance.html?${scanParams.toString()}`;
+    }
+    if (btnTrackerCancel) btnTrackerCancel.hidden = isPublished || isCancelled;
   }
 
   /* --------------------------------------------------------------------------
@@ -1545,7 +1551,7 @@ import {
       if (!btn) {
         if (e.target.closest("a")) return;
         const row = e.target.closest("tr[data-event-id]");
-        if (row && row.dataset.draft !== "true") {
+        if (row) {
           openApprovalTracker(row.dataset.eventId);
         }
         return;
@@ -1595,6 +1601,24 @@ import {
 
     btnTrackerRemind?.addEventListener("click", () => {
       if (activeTrackingEventId) handleRemindApprovers(activeTrackingEventId);
+    });
+
+    btnTrackerEdit?.addEventListener("click", () => {
+      if (activeTrackingEventId) window.location.href = `EventOrganizerCreateEvent.html?draft=${encodeURIComponent(activeTrackingEventId)}`;
+    });
+
+    btnTrackerDelete?.addEventListener("click", () => {
+      if (!activeTrackingEventId) return;
+      const event = findOrganizerEvent(activeTrackingEventId);
+      if (event && normalizeStatus(event.status) === "draft") {
+        if (!window.confirm("Delete this draft? This cannot be undone.")) return;
+        remove(ref(rtdb, `drafts/${organizerId}/${activeTrackingEventId}`)).catch((error) => {
+          console.error("Could not delete event draft:", error);
+          showEventNotice("Couldn't delete this draft. Please try again.");
+        });
+      } else {
+        handleDeleteEvent(activeTrackingEventId);
+      }
     });
 
     // Replace the flagged document with a validated Google Drive link.

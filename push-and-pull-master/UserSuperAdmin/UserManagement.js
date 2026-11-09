@@ -353,7 +353,7 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
         createCell("User", user.fullName, true),
         createCell("Account No.", user.accountNumber, true),
         createCell("Email", user.email),
-        createCell("Role", user.role),
+        createCell("Role", user.role === "student" ? "Student" : user.role),
       );
       const statusCell = document.createElement("td");
       statusCell.dataset.label = "Status";

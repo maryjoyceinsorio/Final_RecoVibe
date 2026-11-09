@@ -37,6 +37,7 @@ const DEFAULT_STUDENT = {
 };
 
 function getDepartmentShort(dept) {
+  dept = String(dept || "").trim().replace(/[()]+$/g, "");
   if (!dept) return "BSIT";
   const map = {
     "Bachelor of Science in Information Technology": "BSIT",
@@ -77,8 +78,12 @@ function unformatPhone(formatted) {
   return digits.slice(0, 11);
 }
 
+function normalizeStudentNumber(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
 function hydrateUserProfile() {
-  const local = JSON.parse(localStorage.getItem("recovibeCurrentUser") || "null");
+  const local = JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null");
   const user =
     local && Object.keys(local).length > 0 ? { ...DEFAULT_STUDENT, ...local } : DEFAULT_STUDENT;
   const storedFirstName = String(user.firstName || "").trim();
@@ -108,9 +113,9 @@ function hydrateUserProfile() {
     Array.from(firstName || displayName || avatarFallback || "M")[0]?.toUpperCase() || "M";
   const organization = String(user.organization || "IBITS").trim() || "IBITS";
   const role = organization;
-  const studentNo = String(user.studentNo || user.studentNumber || user.studentId || "2025-00790-BN-1").trim();
+  const studentNo = normalizeStudentNumber(user.studentNo || user.studentNumber || user.studentId || "2025-00790-BN-1");
   const yearSec = String(user.yearSection || user.year || "1-1").replace(/^Year\s+/i, "").trim() || "1-1";
-  const department = String(user.department || "Bachelor of Science in Information Technology").trim();
+  const department = String(user.department || "Bachelor of Science in Information Technology").trim().replace(/[()]+$/g, "");
   const deptShort = getDepartmentShort(department);
   const email = String(user.email || "reyes.mcjoben@pup.edu.ph").trim().toLowerCase();
   const contact = String(user.contactNumber || user.contact || "09123456789").trim();
@@ -204,7 +209,7 @@ function hydrateUserProfile() {
 
 (() => {
   hydrateUserProfile();
-  const localUser = JSON.parse(localStorage.getItem("recovibeCurrentUser") || "null");
+  const localUser = JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null");
   const user =
     localUser && Object.keys(localUser).length > 0 ? { ...DEFAULT_STUDENT, ...localUser } : DEFAULT_STUDENT;
   const preferenceKey = "recovibePreferences";
@@ -226,7 +231,6 @@ function hydrateUserProfile() {
   const sources = [
     "PUP Official",
     "CSC",
-    "Teacher / Faculty",
     "Organizational",
     "Others / External",
   ];
@@ -337,19 +341,19 @@ function hydrateUserProfile() {
       (nameParts.length > 2 ? nameParts.slice(1, -1).join(" ") : "—"),
   );
   setText("profileLastName", lastName);
-  setText("profileStudentId", user.studentNumber || user.studentId || "2025-00790-BN-1");
+  setText("profileStudentId", studentNo);
   setText("profileEmail", user.email || "reyes.mcjoben@pup.edu.ph");
   setText("profileContact", user.contactNumber || user.contact || "09123456789");
-  setText("profileDepartment", user.department || "Bachelor of Science in Information Technology");
+  setText("profileDepartment", department);
   setText("profileYear", user.year || "Year 1-2");
   setText("profileOrganization", user.organization || "IBITS");
-  setText("profileStudentIdBanner", user.studentNumber || user.studentId || "2025-00790-BN-1");
+  setText("profileStudentIdBanner", studentNo);
   setText("profileYearBanner", user.year || "Year 1-2");
-  setText("profileDepartmentBanner", user.department || "Bachelor of Science in Information Technology");
+  setText("profileDepartmentBanner", department);
   setText("heroOrgBadge", user.organization || "IBITS");
   setText("heroDeptBadge", user.department?.includes("Information Technology") ? "BSIT" : "BSIT");
   setText("qrCardStudentName", storedName || "Mc Joben Reyes");
-  setText("qrCardStudentNumber", user.studentNumber || user.studentId || "2025-00790-BN-1");
+  setText("qrCardStudentNumber", normalizeStudentNumber(user.studentNumber || user.studentId) || "2025-00790-BN-1");
   setText("qrCardStudentOrg", user.organization || "IBITS");
   setText(
     "todayDate",
@@ -1253,8 +1257,15 @@ function hydrateUserProfile() {
     const current = document.getElementById("currentPassword").value;
     const next = document.getElementById("newPassword").value;
     const confirmation = document.getElementById("confirmPassword").value;
+    if (!current) {
+      passwordFormStatus.style.color = "var(--red-500)";
+      passwordFormStatus.textContent = "Enter your current password.";
+      return;
+    }
     if (
       next.length < 8 ||
+      next.length > 64 ||
+      /\s/.test(next) ||
       !/[A-Z]/.test(next) ||
       !/[a-z]/.test(next) ||
       !/\d/.test(next) ||
@@ -1262,7 +1273,12 @@ function hydrateUserProfile() {
     ) {
       passwordFormStatus.style.color = "var(--red-500)";
       passwordFormStatus.textContent =
-        "Use at least 8 characters with uppercase, lowercase, a number, and a special character.";
+        "Use 8–64 characters with uppercase, lowercase, a number, and a special character, without spaces.";
+      return;
+    }
+    if (next === current) {
+      passwordFormStatus.style.color = "var(--red-500)";
+      passwordFormStatus.textContent = "The new password must be different from the current password.";
       return;
     }
     if (next !== confirmation) {
@@ -1677,14 +1693,14 @@ function hydrateUserProfile() {
     };
 
     try {
+      const preferenceWrites = [];
       if (isFirebaseConfigured && rtdb && user.uid) {
-        await update(ref(rtdb, `users/${user.uid}/preferences`), newPreferences);
+        preferenceWrites.push(update(ref(rtdb, `users/${user.uid}/preferences`), newPreferences));
       }
       if (isFirebaseConfigured && db && user.uid) {
-        await updateDoc(doc(db, "users", user.uid), { preferences: newPreferences }).catch((err) => {
-          console.warn("Firestore preferences update error:", err);
-        });
+        preferenceWrites.push(updateDoc(doc(db, "users", user.uid), { preferences: newPreferences }));
       }
+      await Promise.all(preferenceWrites);
 
       preferences = newPreferences;
       user.preferences = newPreferences;
@@ -1986,7 +2002,7 @@ function renderMyQr(canvas, options = {}) {
       if (!token) {
         let u = {};
         try {
-          const local = JSON.parse(localStorage.getItem("recovibeCurrentUser") || "null");
+          const local = JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null");
           u = local && Object.keys(local).length > 0 ? { ...DEFAULT_STUDENT, ...local } : DEFAULT_STUDENT;
         } catch {
           u = DEFAULT_STUDENT;
@@ -2122,7 +2138,7 @@ window.renderMyQr = renderMyQr;
     let user = userObj;
     if (!user) {
       try {
-        const local = JSON.parse(localStorage.getItem("recovibeCurrentUser") || "null");
+        const local = JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null");
         user = local && Object.keys(local).length > 0 ? { ...DEFAULT_STUDENT, ...local } : DEFAULT_STUDENT;
       } catch {
         user = DEFAULT_STUDENT;
@@ -2137,7 +2153,7 @@ window.renderMyQr = renderMyQr;
       .join(" ");
     const studentName = storedFullName || nameFromProfile || "Mc Joben Reyes";
     const studentNumber =
-      String(user.studentNumber || user.studentId || user.username || "").trim() || "2025-00790-BN-1";
+      normalizeStudentNumber(user.studentNumber || user.studentId || user.username) || "2025-00790-BN-1";
     const organization = String(user.organization || "IBITS").trim() || "IBITS";
 
     if (nameEl) nameEl.textContent = studentName;
@@ -2171,7 +2187,7 @@ window.renderMyQr = renderMyQr;
   function getStudentDownloadInfo() {
     let u = {};
     try {
-      const local = JSON.parse(localStorage.getItem("recovibeCurrentUser") || "null");
+      const local = JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null");
       u = local && Object.keys(local).length > 0 ? { ...DEFAULT_STUDENT, ...local } : DEFAULT_STUDENT;
     } catch {
       u = DEFAULT_STUDENT;
@@ -2184,7 +2200,7 @@ window.renderMyQr = renderMyQr;
       .join(" ");
     return {
       name: storedFullName || nameFromProfile || "Mc Joben Reyes",
-      studentNo: String(u.studentNumber || u.studentId || u.username || "").trim() || "2025-00790-BN-1",
+      studentNo: normalizeStudentNumber(u.studentNumber || u.studentId || u.username) || "2025-00790-BN-1",
       organization: String(u.organization || "IBITS").trim() || "IBITS",
     };
   }
@@ -2222,7 +2238,7 @@ window.renderMyQr = renderMyQr;
       if (!newToken) {
         let u = {};
         try {
-          const local = JSON.parse(localStorage.getItem("recovibeCurrentUser") || "null");
+          const local = JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null");
           u = local && Object.keys(local).length > 0 ? { ...DEFAULT_STUDENT, ...local } : DEFAULT_STUDENT;
         } catch {
           u = DEFAULT_STUDENT;
@@ -2348,7 +2364,7 @@ window.renderMyQr = renderMyQr;
     if (!rtdb) return;
     let u = {};
     try {
-      u = JSON.parse(localStorage.getItem("recovibeCurrentUser") || "null") || {};
+      u = JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null") || {};
     } catch {}
     const uid = auth?.currentUser?.uid || u.uid;
     if (!uid) return;
@@ -2385,16 +2401,20 @@ window.renderMyQr = renderMyQr;
           const profileData = snap.data();
           let current = {};
           try {
-            current = JSON.parse(localStorage.getItem("recovibeCurrentUser") || "null") || {};
+            current = JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null") || {};
           } catch {}
           const merged = {
-            ...profileData,
             ...current,
+            ...profileData,
             uid: user.uid,
             email: profileData.email || user.email || current.email || "",
-            studentId: profileData.studentNumber || profileData.studentId || current.studentId || "",
+            studentNumber: normalizeStudentNumber(profileData.studentNumber || profileData.studentId || current.studentNumber || current.studentId),
+            studentId: normalizeStudentNumber(profileData.studentNumber || profileData.studentId || current.studentNumber || current.studentId),
           };
-          localStorage.setItem("recovibeCurrentUser", JSON.stringify(merged));
+          const currentUserStorage = localStorage.getItem("recovibeCurrentUser")
+            ? localStorage
+            : sessionStorage;
+          currentUserStorage.setItem("recovibeCurrentUser", JSON.stringify(merged));
 
           // Re-hydrate personal details
           hydrateUserProfile();
@@ -2407,7 +2427,7 @@ window.renderMyQr = renderMyQr;
           setText("profileFirstName", merged.firstName || nParts[0] || "");
           setText("profileMiddleName", merged.middleName || (nParts.length > 2 ? nParts.slice(1, -1).join(" ") : ""));
           setText("profileLastName", merged.lastName || (nParts.length > 1 ? nParts.at(-1) : ""));
-          setText("profileStudentId", merged.studentNumber || merged.studentId);
+          setText("profileStudentId", normalizeStudentNumber(merged.studentNumber || merged.studentId));
           setText("profileEmail", merged.email);
           setText("profileContact", merged.contactNumber || merged.contact);
           setText("profileDepartment", merged.department);
@@ -2433,7 +2453,7 @@ window.renderMyQr = renderMyQr;
 
     let u = {};
     try {
-      u = JSON.parse(localStorage.getItem("recovibeCurrentUser") || "null") || {};
+      u = JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null") || {};
     } catch {}
     const sName = u.name || u.fullName || "Student";
 

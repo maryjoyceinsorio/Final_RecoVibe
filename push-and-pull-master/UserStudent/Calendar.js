@@ -222,7 +222,7 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
     let rawList = null;
     try {
       const user =
-        JSON.parse(localStorage.getItem("recovibeCurrentUser") || "null") || {};
+        JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null") || {};
       const preferenceKey = "recovibePreferences";
       const accountPreferenceKey = `recovibePreferences:${user.uid || user.email || "student"}`;
 
@@ -265,7 +265,6 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
         "PUP Biñan",
         "CSC",
         "Organizational",
-        "Teachers/Faculty",
         "Others/External",
       ];
     }
@@ -274,6 +273,7 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
     const seen = new Set();
     for (const item of rawList) {
       const meta = resolveSourceMeta(item);
+      if (meta.key === "Teachers/Faculty") continue;
       if (!seen.has(meta.key)) {
         seen.add(meta.key);
         metas.push(meta);
@@ -446,7 +446,7 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
     let studentProfile = {};
     try {
       studentProfile = JSON.parse(
-        localStorage.getItem("recovibeCurrentUser") || "null",
+        localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null",
       ) || {};
     } catch (error) {
       console.warn("Could not read student audience profile:", error);

@@ -307,8 +307,8 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
       .filter(Boolean)
       .join(" ");
     return String(
-      profile.fullName ||
       firstLastName ||
+      profile.fullName ||
       profile.name ||
       profile.displayName ||
       user.displayName ||
@@ -320,8 +320,9 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
   function renderAuthenticatedProfile(profile, user) {
     const fullName = fullNameFromProfile(profile, user);
     const lastName =
-      String(profile.lastName || "").trim() || fullName.trim().split(/\s+/).at(-1);
-    const role = String(profile.role || profile.userRole || "Super Admin").trim();
+      String(profile.lastName || "").trim() ||
+      (fullName === "Super Admin" ? fullName : fullName.trim().split(/\s+/).at(-1));
+    const role = "Super Admin account";
     const greeting = document.getElementById("dashboard-greeting");
     const sidebarName = document.getElementById("sidebar-user-name");
     const sidebarRole = document.getElementById("sidebar-user-role");
@@ -330,7 +331,7 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
     if (greeting) greeting.textContent = `${greetingForCurrentHour()}, ${lastName}!`;
     if (sidebarName) sidebarName.textContent = fullName;
     if (sidebarRole) sidebarRole.textContent = role;
-    if (sidebarAvatar) sidebarAvatar.textContent = nameInitials(fullName);
+    if (sidebarAvatar) sidebarAvatar.textContent = fullName.trim().charAt(0).toUpperCase() || "S";
   }
 
   function renderTableError(table, message) {
@@ -374,17 +375,24 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
     });
   }
 
+  window.addEventListener("superadmin-profile-authorized", (event) => {
+    const { profile, user } = event.detail || {};
+    renderAuthenticatedProfile(profile || {}, user || {});
+  });
+
+  try {
+    const storedProfile = JSON.parse(localStorage.getItem("recovibeAdminProfile") || "null");
+    renderAuthenticatedProfile(storedProfile || {}, {});
+  } catch (error) {
+    renderAuthenticatedProfile({}, {});
+  }
+
   if (!isFirebaseConfigured || !db) {
     console.info("[SuperAdminDashboard] Firebase unavailable; retaining static dashboard content.");
     return;
   }
 
   const unsubscribers = [];
-  window.addEventListener("superadmin-profile-authorized", (event) => {
-    const { profile, user } = event.detail || {};
-    if (profile && user) renderAuthenticatedProfile(profile, user);
-  });
-
   /* ── Accounts Overview panel ──────────────────────── */
 
   const aoPanel = document.getElementById("accounts-overview-panel");

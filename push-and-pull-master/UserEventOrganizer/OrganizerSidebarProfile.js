@@ -17,10 +17,10 @@ function ensureSidebarProfileCard() {
   const card = document.createElement("div");
   card.className = "organizer-account organizer-shared-profile-card";
   card.innerHTML = `
-    <div class="organizer-avatar" id="organizerAvatar">EO</div>
+    <div class="organizer-avatar" id="organizerAvatar"></div>
     <div class="organizer-account-copy">
-      <strong id="organizerName">Event Organizer</strong>
-      <small id="organizerRole">Event Organizer account</small>
+      <strong id="organizerName"></strong>
+      <small id="organizerRole"></small>
     </div>`;
   footer.prepend(card);
 
@@ -49,7 +49,7 @@ function renderOrganizerProfile(user, profile = {}, preferAuth = false) {
   const nameCandidates = preferAuth
     ? [user.displayName, ...cachedProfileName, user.email]
     : [...cachedProfileName, user.displayName, user.email];
-  const name = firstValue(...nameCandidates) || "Event Organizer";
+  const name = firstValue(...nameCandidates);
   const organization = firstValue(
     profile.organization,
     profile.orgName,
@@ -61,6 +61,9 @@ function renderOrganizerProfile(user, profile = {}, preferAuth = false) {
     profile.accountNo,
     profile.organizerNumber,
     profile.organizerNo,
+    profile.eoId,
+    profile.organizerId,
+    localStorage.getItem("recovibeOrganizerId"),
   );
   const accountDetails = [
     organization ? `${organization} account` : "",
@@ -136,5 +139,7 @@ onAuthStateChanged(auth, async (user) => {
   const adminProfile = results[1].status === "fulfilled" && results[1].value.exists()
     ? results[1].value.data()
     : {};
-  renderOrganizerProfile(user, { ...cachedProfile, ...userProfile, ...adminProfile });
+  const latestProfile = { ...cachedProfile, ...userProfile, ...adminProfile };
+  localStorage.setItem("recovibeOrganizerProfile", JSON.stringify(latestProfile));
+  renderOrganizerProfile(user, latestProfile);
 });
