@@ -6,6 +6,7 @@ if (!admin.apps.length) {
   admin.initializeApp();
 }
 
+const REGION = "asia-southeast1";
 const COOLDOWN_MS = 180000; // 3-minute refresh cooldown
 const QR_SECRET = process.env.QR_SECRET || "recovibe-secret-pup-binan-qr-key-2026";
 
@@ -1459,8 +1460,18 @@ async function verifyOrganizerEventOwnership(authData, eventId) {
 }
 
 function getProposalNotificationAudience(eventData) {
-  const audience = normalizeApprovalKey(eventData.targetAudience);
-  const openForAll = eventData.openForAll === true || audience.startsWith("opentoall");
+  const audience = normalizeApprovalKey(
+    eventData.targetAudience ||
+      eventData.target_audience ||
+      eventData.audienceType ||
+      eventData.audience_type ||
+      eventData.audience,
+  );
+  const openForAll = eventData.openForAll === true ||
+    audience === "all" ||
+    audience.startsWith("opentoall") ||
+    audience.startsWith("openforall") ||
+    audience.startsWith("pupstudentsonly");
   const organizationCodes = new Set();
   const departmentCodes = new Set();
   getNotificationProfileValues(eventData, [
@@ -1505,9 +1516,14 @@ function getProposalNotificationAudience(eventData) {
   };
 
   const partners = [
-    ...(Array.isArray(eventData.partnerOrganizations) ? eventData.partnerOrganizations : []),
-    ...(Array.isArray(eventData.targetOrganizations) ? eventData.targetOrganizations : []),
-  ];
+    eventData.partnerOrganizations,
+    eventData.partnerOrganization,
+    eventData.targetOrganizations,
+    eventData.targetOrganization,
+    eventData.target_organizations,
+    eventData.target_organization,
+    eventData.audienceOrganizations,
+  ].flatMap((values) => Array.isArray(values) ? values : values ? [values] : []);
   if (eventData.isCollaboration === true || partners.length > 0) {
     addScopeValues(organizationCodes, partners);
   }
@@ -1516,7 +1532,10 @@ function getProposalNotificationAudience(eventData) {
     eventData.targetDepartments,
     eventData.targetDepartment,
     eventData.targetDepartmentIds,
+    eventData.target_departments,
+    eventData.target_department,
     eventData.departments,
+    eventData.departmentCodes,
   ]);
   return {
     openForAll,
@@ -1669,6 +1688,355 @@ async function isEventOrganizerProposal(eventData) {
     ["eventorganizer", "organizer", "eo"].includes(profileRole) ||
     organizerProfile.exists;
 }
+
+function normalizeStudentOrganizationValue(value) {
+  const normalized = normalizeApprovalKey(value);
+  if (normalized === "piee" || normalized === "piie" || normalized.includes("industrialeng")) return "piie";
+  if (normalized.includes("ibits") || normalized.includes("informationtechnology")) return "ibits";
+  if (normalized === "aces" || normalized.includes("computerengineering")) return "aces";
+  if (normalized === "sms" || normalized.includes("management")) return "sms";
+  if (normalized === "hrss" || normalized.includes("humanresource")) return "hrss";
+  if (normalized === "yes" || normalized.includes("youngeduc")) return "yes";
+  return normalized;
+}
+
+function normalizeStudentDepartmentValue(value) {
+  const normalized = normalizeApprovalKey(value);
+  if (normalized.includes("bsit") || normalized.includes("informationtechnology")) return "bsit";
+  if (normalized.includes("bscpe") || normalized.includes("computerengineering")) return "bscpe";
+  if (normalized.includes("bsie") || normalized.includes("industrialengineering")) return "bsie";
+  if (normalized.includes("bsbahrm") || normalized.includes("humanresourcemanagement")) return "bsbahrm";
+  return normalized;
+}
+
+function studentProfileMatchesEventAudience(profile, audience) {
+  const role = normalizeApprovalKey(profile.role || profile.userRole || "student");
+  if (role !== "student") return false;
+  if (audience.openForAll) return true;
+
+  const profileOrganizations = getNotificationProfileValues(profile, [
+    "organizationCode",
+    "organizationId",
+    "orgCode",
+    "orgId",
+    "organization",
+    "organizationName",
+    "orgName",
+    "organizations",
+    "courseOrganization",
+    "courseOrganizations",
+    "StudentOrgs",
+    "studentOrgs",
+  ]).map(normalizeStudentOrganizationValue);
+  const profileDepartments = getNotificationProfileValues(profile, [
+    "departmentCode",
+    "departmentId",
+    "department",
+    "departments",
+    "course",
+    "program",
+    "departmentIds",
+  ]).map(normalizeStudentDepartmentValue);
+  const organizationMatch = audience.organizationCodes
+    .map(normalizeStudentOrganizationValue)
+    .some((value) => profileOrganizations.includes(value));
+  const departmentMatch = audience.departmentCodes
+    .map(normalizeStudentDepartmentValue)
+    .some((value) => profileDepartments.includes(value));
+  return organizationMatch || departmentMatch;
+}
+
+async function createStudentEventNotifications(eventId, eventData) {
+  const audienceType = normalizeApprovalKey(
+    eventData.targetAudience ||
+      eventData.target_audience ||
+      eventData.audienceType ||
+      eventData.audience_type ||
+      eventData.audience ||
+      "",
+  );
+  const hasExplicitTargets =
+    getNotificationProfileValues(eventData, [
+      "targetOrganizations",
+      "targetOrganization",
+      "target_organizations",
+      "target_organization",
+      "audienceOrganizations",
+    ]).length > 0 ||
+    getNotificationProfileValues(eventData, [
+      "targetDepartments",
+      "targetDepartment",
+      "target_departments",
+      "target_department",
+      "targetDepartmentIds",
+      "departmentCodes",
+    ]).length > 0;
+  if (audienceType.includes("mixed") && !hasExplicitTargets) {
+    console.warn("[Notifications] Mixed-audience event has no targets:", {
+      eventId,
+      title: eventData.eventName || eventData.title || eventData.name || "",
+    });
+    return;
+  }
+  const audience = getProposalNotificationAudience(eventData);
+  if (!audience.openForAll &&
+      !audience.organizationCodes.length &&
+      !audience.departmentCodes.length) {
+    console.warn("[Notifications] Published event has no audience targets:", {
+      eventId,
+      title: eventData.eventName || eventData.title || eventData.name || "",
+    });
+    return;
+  }
+
+  const users = await admin.firestore().collection("users").get();
+  const eventName = String(eventData.eventName || eventData.title || eventData.name || "New event");
+  const recipients = users.docs.filter((user) =>
+    studentProfileMatchesEventAudience(user.data() || {}, audience),
+  );
+  for (let index = 0; index < recipients.length; index += 400) {
+    await Promise.all(recipients.slice(index, index + 400).map(async (recipient) => {
+      const notificationId = `new_event_${eventId}_${recipient.id}`
+        .replace(/[^a-zA-Z0-9_-]/g, "_")
+        .slice(0, 140);
+      try {
+        await admin.firestore().collection("notifications").doc(notificationId).create({
+          recipientUid: recipient.id,
+          eventId: String(eventId),
+          eventName,
+          organizationCodes: audience.organizationCodes,
+          departmentCodes: audience.departmentCodes,
+          openForAll: audience.openForAll,
+          type: "new-event",
+          title: "New Event",
+          message: `${eventName} is now available.`,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          read: false,
+        });
+      } catch (error) {
+        if (error.code !== 6 && error.code !== "already-exists") throw error;
+      }
+    }));
+  }
+  console.log("[Notifications] Published event notifications created:", {
+    eventId,
+    count: recipients.length,
+  });
+}
+
+function normalizeEventStatus(eventData) {
+  const statuses = [
+    eventData.status,
+    eventData.approvalStatus,
+    eventData.publicationStatus,
+  ].map(normalizeApprovalKey);
+  if (statuses.some((status) => ["cancelled", "canceled"].includes(status)) ||
+      eventData.cancelled === true ||
+      eventData.canceled === true) {
+    return "cancelled";
+  }
+  if (statuses.some((status) => ["unpublished", "unpublish", "draft"].includes(status)) ||
+      eventData.published === false ||
+      eventData.isPublished === false) {
+    return "unpublished";
+  }
+  return "";
+}
+
+function isEventPublished(eventData) {
+  const statuses = [
+    eventData.status,
+    eventData.approvalStatus,
+    eventData.publicationStatus,
+  ].map(normalizeApprovalKey);
+  return statuses.some((status) =>
+    ["approved", "published", "rescheduled"].includes(status),
+  ) ||
+    eventData.published === true ||
+    eventData.isPublished === true ||
+    eventData.isLive === true;
+}
+
+function getEventStatusChange(before, after, deleted) {
+  if (deleted) return "deleted";
+  const nextStatus = normalizeEventStatus(after);
+  if (nextStatus === "cancelled") {
+    return normalizeEventStatus(before) === "cancelled" ? "" : "cancelled";
+  }
+  if (
+    isEventPublished(before) &&
+    nextStatus === "unpublished"
+  ) {
+    return "unpublished";
+  }
+  if (!isEventPublished(after)) return "";
+
+  const fields = {
+    title: ["eventName", "eventTitle", "title", "name"],
+    dates: [
+      "dateISO", "eventDate", "event_date", "date", "startDate", "start_date",
+      "dateStart", "eventDateEnd", "endDateISO", "eventEndDate", "endDate",
+      "end_date", "dateEnd", "schedule.startDate", "schedule.endDate",
+      "dailySchedule", "dailySchedules",
+    ],
+    times: [
+      "time", "startTime", "start_time", "timeStart", "time_start",
+      "endTime", "end_time", "timeEnd", "time_end",
+      "schedule.startTime", "schedule.endTime", "dailySchedules",
+    ],
+    location: [
+      "location", "venue", "venueOther", "venueName", "customVenueName",
+      "customVenueAddress", "venueAddress", "building", "roomNumber",
+    ],
+  };
+  const readPath = (object, path) =>
+    path.split(".").reduce((value, part) => value?.[part], object);
+  const serialize = (value) => {
+    if (value && typeof value.toMillis === "function") return value.toMillis();
+    if (value instanceof Date) return value.getTime();
+    if (Array.isArray(value)) return value.map(serialize);
+    if (value && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, child]) => [key, serialize(child)]),
+      );
+    }
+    return value;
+  };
+  for (const keys of Object.values(fields)) {
+    if (keys.some((key) =>
+      JSON.stringify(serialize(readPath(before, key))) !==
+      JSON.stringify(serialize(readPath(after, key))),
+    )) return "updated";
+  }
+  return "";
+}
+
+function notificationStatusLabel(status) {
+  return ({
+    cancelled: "Cancelled",
+    unpublished: "Unpublished",
+    updated: "Updated",
+    deleted: "Removed",
+  })[status];
+}
+
+async function notifyRegisteredStudentsOfEventStatus(
+  eventId,
+  eventData,
+  status,
+  triggerEventId,
+) {
+  const registrations = await admin.firestore()
+    .collection("events")
+    .doc(String(eventId))
+    .collection("registrations")
+    .get();
+  const recipients = registrations.docs.filter((registration) =>
+    registration.data()?.status === "registered",
+  );
+  const eventTitle = String(
+    eventData.eventName || eventData.title || eventData.name || "Untitled event",
+  );
+  const statusLabel = notificationStatusLabel(status);
+  const message = ({
+    cancelled: `“${eventTitle}” has been cancelled by the organizer.`,
+    unpublished: `“${eventTitle}” is no longer published.`,
+    updated: `“${eventTitle}” has been updated. Check the event details for changes.`,
+    deleted: `“${eventTitle}” has been removed.`,
+  })[status];
+  const notificationType = ({
+    cancelled: "event_cancelled",
+    unpublished: "event_unpublished",
+    updated: "event_updated",
+    deleted: "event_deleted",
+  })[status];
+  let createdCount = 0;
+  for (let index = 0; index < recipients.length; index += 400) {
+    const results = await Promise.all(recipients.slice(index, index + 400).map(async (registration) => {
+      const notificationId = `${triggerEventId}_${registration.id}`
+        .replace(/[^a-zA-Z0-9_-]/g, "_")
+        .slice(0, 140);
+      try {
+        await admin.firestore().collection("notifications").doc(notificationId).create({
+          recipientUid: registration.id,
+          eventId: String(eventId),
+          eventTitle,
+          status,
+          statusLabel,
+          title: `${statusLabel}: ${eventTitle}`,
+          message,
+          type: notificationType,
+          read: false,
+          deletedAt: null,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        return true;
+      } catch (error) {
+        if (error.code === 6 || error.code === "already-exists") return false;
+        throw error;
+      }
+    }));
+    createdCount += results.filter(Boolean).length;
+  }
+  console.log("[Notifications] Event status fan-out complete:", {
+    eventId: String(eventId),
+    status,
+    recipientCount: recipients.length,
+    createdCount,
+    triggerEventId,
+  });
+  return { recipientCount: recipients.length, createdCount };
+}
+
+exports.notifyStudentsOfEventStatusChanges = functions.region(REGION)
+  .firestore.document("events/{eventId}")
+  .onWrite(async (change, context) => {
+    const deleted = !change.after.exists;
+    const before = change.before.exists ? change.before.data() || {} : {};
+    const after = change.after.exists ? change.after.data() || {} : {};
+    const status = getEventStatusChange(before, after, deleted);
+    if (!status) return null;
+
+    const eventTimestamp = deleted
+      ? change.before.updateTime
+      : change.after.updateTime;
+    const eventVersion = eventTimestamp
+      ? `${eventTimestamp.seconds}_${eventTimestamp.nanoseconds}`
+      : "initial";
+    const triggerEventId = `${context.params.eventId}_${status}_${eventVersion}`;
+    await notifyRegisteredStudentsOfEventStatus(
+      context.params.eventId,
+      deleted ? before : after,
+      status,
+      triggerEventId,
+    );
+    return null;
+  });
+
+exports.notifyStudentsOfPublishedEvent = functions.region(REGION)
+  .firestore.document("events/{eventId}")
+  .onWrite(async (change, context) => {
+    if (!change.after.exists) return null;
+    const eventData = change.after.data() || {};
+    const status = normalizeApprovalKey(eventData.status || eventData.publicationStatus);
+    const isPublished = ["approved", "published", "rescheduled"].includes(status) ||
+      eventData.published === true ||
+      eventData.isPublished === true;
+    if (!isPublished) return null;
+    if (change.before.exists) {
+      const before = change.before.data() || {};
+      const beforeStatus = normalizeApprovalKey(before.status || before.publicationStatus);
+      if (
+        ["approved", "published", "rescheduled"].includes(beforeStatus) ||
+        before.published === true ||
+        before.isPublished === true
+      ) return null;
+    }
+    await createStudentEventNotifications(context.params.eventId, eventData);
+    return null;
+  });
 
 exports.notifyAdminsOfProposalSubmission = functions.region("asia-southeast1")
   .firestore.document("events/{eventId}")
@@ -2682,6 +3050,22 @@ exports.cancelEvent = functions.region("asia-southeast1").https.onCall(async (da
   updates[`publicEvents/${eventId}`] = null;
 
   await rootRef.update(updates);
+  if (normalizeEventStatus(eventData) !== "cancelled") {
+    try {
+      await notifyRegisteredStudentsOfEventStatus(
+        eventId,
+        eventData,
+        "cancelled",
+        `cancelEvent_${eventId}_cancelled`,
+      );
+    } catch (error) {
+      console.error("[Notifications] Could not notify registered students of cancellation:", {
+        eventId: String(eventId),
+        code: error.code || "",
+        message: error.message || String(error),
+      });
+    }
+  }
 
   const historyRef = admin.database().ref(`approvals/${eventId}/history`).push();
   await historyRef.set({
@@ -3624,6 +4008,12 @@ exports.registerForEvent = functions.region("asia-southeast1").https.onCall(asyn
   const firestoreEventSnapshot = await firestoreEventRef.get();
   if (firestoreEventSnapshot.exists) {
     const registrationRef = firestoreEventRef.collection("registrations").doc(uid);
+    const registrationNotificationId = `registration_${eventId}_${uid}`
+      .replace(/[^a-zA-Z0-9_-]/g, "_")
+      .slice(0, 140);
+    const registrationNotificationRef = admin.firestore()
+      .collection("notifications")
+      .doc(registrationNotificationId);
     const now = Date.now();
     const result = await admin.firestore().runTransaction(async (transaction) => {
       const [eventSnapshot, registrationSnapshot] = await Promise.all([
@@ -3681,6 +4071,21 @@ exports.registerForEvent = functions.region("asia-southeast1").https.onCall(asyn
         status: "registered",
         registeredAt: now,
         at: now,
+      });
+      const eventName = String(
+        eventData.eventName || eventData.title || eventData.name || "the event",
+      );
+      transaction.set(registrationNotificationRef, {
+        recipientUid: uid,
+        eventId: String(eventId),
+        eventName,
+        type: "registration",
+        title: "Registration Confirmed",
+        message: `Your registration for ${eventName} was successful.`,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        read: false,
+        deletedAt: null,
+        deletedExpiresAt: null,
       });
       return {
         alreadyRegistered: false,
@@ -3792,6 +4197,38 @@ exports.registerForEvent = functions.region("asia-southeast1").https.onCall(asyn
     throw new functions.https.HttpsError("internal", "Could not complete registration. Please try again.");
   }
 
+  const registrationNotificationId = `registration_${eventId}_${uid}`
+    .replace(/[^a-zA-Z0-9_-]/g, "_")
+    .slice(0, 140);
+  try {
+    await admin.firestore().collection("notifications").doc(registrationNotificationId).create({
+      recipientUid: uid,
+      eventId: String(eventId),
+      eventName: String(eventData.eventName || eventData.title || eventData.name || "the event"),
+      type: "registration",
+      title: "Registration Confirmed",
+      message: `Your registration for ${eventData.eventName || eventData.title || eventData.name || "the event"} was successful.`,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      read: false,
+      deletedAt: null,
+      deletedExpiresAt: null,
+    });
+  } catch (error) {
+    if (error.code === 6 || error.code === "already-exists") {
+      console.warn("[Notifications] Registration notification already exists:", {
+        eventId,
+        uid,
+      });
+    } else {
+      console.error("[Notifications] Could not create registration notification:", {
+        eventId,
+        uid,
+        code: error.code || "",
+        message: error.message || String(error),
+      });
+    }
+  }
+
   return ({ success: true, registeredCount: newCount });
 });
 
@@ -3814,6 +4251,12 @@ exports.cancelRegistration = functions.region("asia-southeast1").https.onCall(as
   if (firestoreEventSnapshot.exists) {
     const registrationRef = firestoreEventRef.collection("registrations").doc(uid);
     const now = Date.now();
+    const cancellationNotificationId = `cancellation_${eventId}_${uid}_${now}`
+      .replace(/[^a-zA-Z0-9_-]/g, "_")
+      .slice(0, 140);
+    const cancellationNotificationRef = admin.firestore()
+      .collection("notifications")
+      .doc(cancellationNotificationId);
     const result = await admin.firestore().runTransaction(async (transaction) => {
       const [eventSnapshot, registrationSnapshot] = await Promise.all([
         transaction.get(firestoreEventRef),
@@ -3850,6 +4293,21 @@ exports.cancelRegistration = functions.region("asia-southeast1").https.onCall(as
         status: "cancelled",
         cancelledAt: now,
         at: now,
+      });
+      const eventName = String(
+        eventData.eventName || eventData.title || eventData.name || "the event",
+      );
+      transaction.set(cancellationNotificationRef, {
+        recipientUid: uid,
+        eventId: String(eventId),
+        eventName,
+        type: "cancellation",
+        title: "Registration Cancelled",
+        message: `Your registration for ${eventName} was cancelled.`,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        read: false,
+        deletedAt: null,
+        deletedExpiresAt: null,
       });
       return {
         alreadyCancelled: false,
@@ -3943,6 +4401,31 @@ exports.cancelRegistration = functions.region("asia-southeast1").https.onCall(as
     updates[`organizerEvents/${eventData.organizerId}/${eventId}/registeredCount`] = newCount;
   }
   await rootRef.update(updates);
+
+  const cancellationNotificationId = `cancellation_${eventId}_${uid}_${now}`
+    .replace(/[^a-zA-Z0-9_-]/g, "_")
+    .slice(0, 140);
+  try {
+    await admin.firestore().collection("notifications").doc(cancellationNotificationId).create({
+      recipientUid: uid,
+      eventId: String(eventId),
+      eventName: String(eventData.eventName || eventData.title || eventData.name || "the event"),
+      type: "cancellation",
+      title: "Registration Cancelled",
+      message: `Your registration for ${eventData.eventName || eventData.title || eventData.name || "the event"} was cancelled.`,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      read: false,
+      deletedAt: null,
+      deletedExpiresAt: null,
+    });
+  } catch (error) {
+    console.error("[Notifications] Could not create cancellation notification:", {
+      eventId,
+      uid,
+      code: error.code || "",
+      message: error.message || String(error),
+    });
+  }
 
   return ({ success: true, registeredCount: newCount });
 });

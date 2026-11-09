@@ -36,6 +36,20 @@ const DEFAULT_STUDENT = {
   contactNumber: "09123456789",
 };
 
+function uniqueProfileValues(...values) {
+  const seen = new Set();
+  return values
+    .flatMap((value) => Array.isArray(value) ? value : value == null ? [] : [value])
+    .filter((value) => typeof value === "string" || typeof value === "number")
+    .map((value) => String(value).trim())
+    .filter((value) => {
+      const key = value.toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
 function getDepartmentShort(dept) {
   dept = String(dept || "").trim().replace(/[()]+$/g, "");
   if (!dept) return "BSIT";
@@ -86,6 +100,22 @@ function hydrateUserProfile() {
   const local = JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null");
   const user =
     local && Object.keys(local).length > 0 ? { ...DEFAULT_STUDENT, ...local } : DEFAULT_STUDENT;
+  user.StudentOrgs = uniqueProfileValues(
+    user.StudentOrgs,
+    user.studentOrgs,
+    user.organizations,
+    user.organization,
+    user.courseOrganization,
+    user.courseOrg,
+  );
+  user.departments = uniqueProfileValues(
+    user.departments,
+    user.departmentCodes,
+    user.department,
+    user.departmentCode,
+    user.course,
+    user.program,
+  );
   const storedFirstName = String(user.firstName || "").trim();
   const storedMiddleName = String(user.middleName || "").trim();
   const storedLastName = String(user.lastName || "").trim();
@@ -1373,6 +1403,7 @@ function hydrateUserProfile() {
         console.warn("Sign out error", e);
       }
       localStorage.removeItem("recovibeCurrentUser");
+      sessionStorage.removeItem("recovibeCurrentUser");
       window.location.href = "StudentLogin.html";
     });
   }
@@ -2410,6 +2441,25 @@ window.renderMyQr = renderMyQr;
             email: profileData.email || user.email || current.email || "",
             studentNumber: normalizeStudentNumber(profileData.studentNumber || profileData.studentId || current.studentNumber || current.studentId),
             studentId: normalizeStudentNumber(profileData.studentNumber || profileData.studentId || current.studentNumber || current.studentId),
+            StudentOrgs: uniqueProfileValues(
+              profileData.StudentOrgs,
+              profileData.studentOrgs,
+              profileData.organizations,
+              profileData.organization,
+              profileData.courseOrganization,
+              profileData.courseOrg,
+              current.StudentOrgs,
+              current.organization,
+            ),
+            departments: uniqueProfileValues(
+              profileData.departments,
+              profileData.departmentCodes,
+              profileData.department,
+              profileData.departmentCode,
+              profileData.course,
+              profileData.program,
+              current.departments,
+            ),
           };
           const currentUserStorage = localStorage.getItem("recovibeCurrentUser")
             ? localStorage

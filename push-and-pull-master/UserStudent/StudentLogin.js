@@ -7,8 +7,8 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { auth, authReady, db, isFirebaseConfigured } from "./firebaseConfig.js";
+import { clearCachedStudentProfile, loadStudentProfile } from "./studentIdentity.js";
 
-const currentUserStorageKey = "recovibeCurrentUser";
 const emailInput = document.getElementById("student-id");
 const passwordInput = document.getElementById("student-pass");
 const submitButton = document.getElementById("login-submit");
@@ -97,16 +97,10 @@ async function signIn() {
     await setPersistence(auth, rememberMe.checked ? browserLocalPersistence : browserSessionPersistence);
     await authReady;
     const credential = await signInWithEmailAndPassword(auth, email, password);
-    const profileSnapshot = await getDoc(
-      doc(db, "users", credential.user.uid),
-    );
-
-    if (!profileSnapshot.exists()) {
-      await signOut(auth);
-      throw new Error("No student profile is associated with this account.");
-    }
-
-    const profile = profileSnapshot.data();
+    const profile = await loadStudentProfile(credential.user, {
+      storage: rememberMe.checked ? "local" : "session",
+      createIfMissing: true,
+    });
     const profileRole = String(profile.role || "").trim().toLowerCase();
     if (
       String(profile.email || "").trim().toLowerCase() !==
@@ -115,22 +109,24 @@ async function signIn() {
       (profileRole && profileRole !== "student")
     ) {
       await signOut(auth);
+      clearCachedStudentProfile();
       throw Object.assign(new Error("Student profile identity mismatch."), {
         code: "student/profile-mismatch",
       });
     }
-    const currentUser = {
-      ...profile,
-      uid: credential.user.uid,
-      email: profile.email || credential.user.email || email,
-      studentId: profile.studentNumber || profile.studentId || "",
-    };
-    const serializedUser = JSON.stringify(currentUser);
-    localStorage.removeItem(currentUserStorageKey);
-    sessionStorage.removeItem(currentUserStorageKey);
-    (rememberMe.checked ? localStorage : sessionStorage).setItem(currentUserStorageKey, serializedUser);
     window.location.assign("Dashboard.html");
   } catch (error) {
+    if (auth.currentUser?.email?.toLowerCase() === email) {
+      try {
+        await signOut(auth);
+      } catch (signOutError) {
+        console.error("[StudentLogin] Could not clear failed sign-in:", {
+          code: signOutError?.code || "unknown",
+          message: signOutError?.message || String(signOutError),
+        });
+      }
+      clearCachedStudentProfile();
+    }
     console.error("[StudentLogin] Sign-in/profile lookup failed:", {
       code: error?.code || "unknown",
       message: error?.message || String(error),
@@ -141,6 +137,7 @@ async function signIn() {
     ) {
       setInvalid("field-pass", true);
     }
+    if (!auth.currentUser) clearCachedStudentProfile();
     showBanner(loginErrorMessage(error));
   } finally {
     submitButton.disabled = false;

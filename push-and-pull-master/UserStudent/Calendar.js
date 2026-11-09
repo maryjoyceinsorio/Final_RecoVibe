@@ -1,5 +1,26 @@
-import { loadCalendarData } from "../calendarDataService.js";
-import { isEventVisibleToStudent } from "./eventAudience.js";
+import { fetchMonthHolidays } from "../holidayService.js";
+import { auth, db } from "./firebaseConfig.js";
+import {
+  clearCachedStudentProfile,
+  loadStudentProfile,
+  renderStudentSidebar,
+} from "./studentIdentity.js";
+import {
+  isEventVisibleToStudent,
+  isStudentEventStatus,
+  STUDENT_EVENT_STATUSES,
+} from "./eventAudience.js";
+import {
+  clampEventDateRangeToGrid,
+  getEventDateRange,
+} from "./calendarDateRange.mjs";
+import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {
+  collection,
+  onSnapshot,
+  query,
+  where,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 (() => {
   const monthNames = [
@@ -16,32 +37,21 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
     "November",
     "December",
   ];
-  const rawEvents = (
-    Array.isArray(window.RECOVIBE_EVENTS) ? [...window.RECOVIBE_EVENTS] : []
-  ).filter((event) => {
-    const s = String(event.status || "")
-      .trim()
-      .toLowerCase()
-      .replace(/[ _-]+/g, " ");
-    return (
-      ["approved", "published", "rescheduled"].includes(s) ||
-      event.published === true
-    );
-  });
-  const baseEvents = rawEvents.reduce((list, event) => {
-    const uniqueKey = event.id || event.eventId;
-    if (
-      !uniqueKey ||
-      list.some((item) => String(item.id || item.eventId) === String(uniqueKey))
-    )
-      return list;
-    list.push(event);
-    return list;
-  }, []);
-  let events = baseEvents;
-
+  let firestoreEvents = [];
+  let holidayEvents = [];
+  let events = [];
+  let studentProfile = {};
+  let eventsUnsubscribe = null;
+  let authUnsubscribe = null;
+  let currentStudentUid = "";
+  let eventLoadError = "";
+  let profileLoadError = "";
+  let holidayLoadError = "";
+  let eventsLoading = true;
+  let disposed = false;
+  let authRequestSequence = 0;
+  let holidayRequestSequence = 0;
   let activeSources = [];
-  let activeSourceKeys = new Set();
   const state = {
     date: new Date(),
   };
@@ -53,60 +63,109 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
   const upcomingPanel = document.querySelector(".upcoming-panel");
   const todayButton = document.querySelector(".cal-toggle");
   const resetButton = document.querySelector(".filter-reset");
+  const statusElement = document.createElement("div");
+  statusElement.id = "calendarDataStatus";
+  statusElement.setAttribute("role", "status");
+  statusElement.setAttribute("aria-live", "polite");
+  statusElement.hidden = true;
+  calendarDays.parentNode.insertBefore(statusElement, calendarDays);
 
-  const toDate = (value) => {
-    if (!value) return null;
-    if (typeof value === "object" && typeof value.toDate === "function") {
-      return toDate(value.toDate());
-    }
-    if (typeof value === "object" && Number.isFinite(value.seconds)) {
-      return new Date(value.seconds * 1000);
-    }
-    if (value instanceof Date) {
-      return Number.isNaN(value.getTime()) ? null : value;
-    }
-    if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
-      const [year, month, day] = value.split("-").map(Number);
-      const date = new Date(year, month - 1, day);
-      return date.getFullYear() === year &&
-        date.getMonth() === month - 1 &&
-        date.getDate() === day
-        ? date
-        : null;
-    }
-    const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? null : date;
+  const manilaDateKey = (date) => {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "";
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Manila",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(date);
+    const part = (type) => parts.find((item) => item.type === type)?.value;
+    return `${part("year")}-${part("month")}-${part("day")}`;
   };
+  const dateFromISO = (iso) => {
+    if (!iso) return null;
+    const [year, month, day] = iso.split("-").map(Number);
+    return new Date(year, month - 1, day, 12);
+  };
+  state.date = dateFromISO(manilaDateKey(new Date())) || state.date;
+  const todayISO = () => manilaDateKey(new Date());
 
-  const toISODate = (value) => {
-    const date = toDate(value);
-    if (!date) return "";
-    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-  };
+  function normalizeCalendarEvent(id, data) {
+    const raw = data || {};
+    const calendarDateRange = getEventDateRange(raw);
+    let start = calendarDateRange
+      ? manilaDateKey(calendarDateRange.start)
+      : "";
+    let end = calendarDateRange
+      ? manilaDateKey(calendarDateRange.end)
+      : "";
+
+    // --- SAFETY GUARD PARA SA CORRUPTED / OVERFLOW DATES ---
+    if (start && end) {
+      const startMs = new Date(start).getTime();
+      const endMs = new Date(end).getTime();
+      const diffDays = Math.round((endMs - startMs) / (1000 * 60 * 60 * 24));
+      
+      // Kung lumampas ng 14 na araw o inverted ang petsa, piliting maging 1-day event
+      if (diffDays > 14 || diffDays < 0) {
+        end = start;
+      }
+    }
+
+    const normalized = {
+      ...raw,
+      id: String(id || raw.id || raw.eventId || ""),
+      eventId: String(id || raw.eventId || raw.id || ""),
+      title: raw.title || raw.eventName || raw.name || "Untitled event",
+      status: raw.status || raw.publicationStatus || "",
+      category: raw.category || raw.categories || raw.tag || "",
+      targetAudience: raw.targetAudience || raw.target_audience ||
+        raw.audienceType || raw.audience_type || raw.audience || "",
+      dateISO: start,
+      endDateISO: end,
+      calendarDateRange,
+      source: raw.source || raw.eventSource || raw.category || raw.organization ||
+        raw.organizerName || "",
+      time: raw.time ||
+        [raw.timeStart || raw.startTime, raw.timeEnd || raw.endTime]
+          .filter(Boolean)
+          .join(" - ") ||
+        "Time TBA",
+      location: raw.location || raw.venue || raw.venueOther || "",
+    };
+    return normalized;
+  }
 
   function eventDateRange(event) {
-    const start =
-      [
-        event.dateISO,
-        event.eventDate,
-        event.date,
-        event.startDate,
-      ].map(toISODate).find(Boolean) || "";
-    const end =
-      [
-        event.endDateISO,
-        event.eventEndDate,
-        event.endDate,
-        event.dateEnd,
-        event.end,
-        start,
-      ].map(toISODate).find(Boolean) || start;
-    return start ? { start, end: end && end >= start ? end : start } : null;
+    return event.calendarDateRange || getEventDateRange(event);
   }
 
   function eventOccursOn(event, iso) {
     const range = eventDateRange(event);
-    return Boolean(range && range.start <= iso && iso <= range.end);
+    return Boolean(
+      range && manilaDateKey(range.start) <= iso && iso <= manilaDateKey(range.end),
+    );
+  }
+
+  function eventIdentity(event) {
+    const id = String(event.id || event.eventId || "");
+    if (id) return id;
+    const range = eventDateRange(event);
+    return `${event.title || ""}:${manilaDateKey(range?.start)}:${manilaDateKey(range?.end)}`;
+  }
+
+  function updateDataStatus() {
+    const message = eventsLoading
+      ? "Loading calendar events…"
+      : eventLoadError || profileLoadError || holidayLoadError;
+    statusElement.hidden = !message;
+    statusElement.textContent = message;
+    statusElement.className = message
+      ? eventsLoading ? "calendar-data-status is-loading" : "calendar-data-status is-error"
+      : "calendar-data-status";
+    statusElement.setAttribute(
+      "role",
+      eventsLoading ? "status" : message ? "alert" : "status",
+    );
   }
 
   const escape = (value) =>
@@ -150,22 +209,6 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
         accent: "var(--cat-cite, #c79a2b)",
       };
     }
-    if (norm === "pup cite" || norm === "cite" || norm.includes("cite")) {
-      return {
-        key: "PUP CITE",
-        label: "PUP CITE",
-        dotClass: "cite",
-        accent: "var(--cat-cite, #c79a2b)",
-      };
-    }
-    if (norm.includes("pup official") || norm === "official") {
-      return {
-        key: "PUP Official",
-        label: "PUP Official",
-        dotClass: "official",
-        accent: "var(--cat-official, #8f2536)",
-      };
-    }
     if (norm.includes("binan")) {
       return {
         key: "PUP Biñan Campus",
@@ -174,26 +217,25 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
         accent: "var(--cat-binan, #3a76c4)",
       };
     }
-    if (norm.includes("teacher") || norm.includes("faculty")) {
+    if (
+      norm.includes("pup") ||
+      norm.includes("official") ||
+      norm.includes("cite") ||
+      norm.includes("teacher") ||
+      norm.includes("faculty")
+    ) {
       return {
-        key: "Teachers/Faculty",
-        label: "Teachers/Faculty",
-        dotClass: "faculty",
-        accent: "var(--cat-faculty, #1e9a73)",
-      };
-    }
-    if (norm === "ibits") {
-      return {
-        key: "IBITS",
-        label: "IBITS",
-        dotClass: "ibits",
-        accent: "var(--cat-ibits, #7c5cc4)",
+        key: "PUP Official",
+        label: "PUP Official",
+        dotClass: "official",
+        accent: "var(--cat-official, #8f2536)",
       };
     }
     if (
       norm.includes("organizer") ||
       norm.includes("organization") ||
-      norm.includes("organizational")
+      norm.includes("organizational") ||
+      /^(ibits|aces|jpcs|pice|iie|piie|hrss|sms|yes|jma|jphia|pasoa|chrms|cites)\b/i.test(norm)
     ) {
       return {
         key: "Organizational",
@@ -202,17 +244,9 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
         accent: "var(--cat-ibits, #7c5cc4)",
       };
     }
-    if (norm.includes("external") || norm.includes("other")) {
-      return {
-        key: "Others/External",
-        label: "Others/External",
-        dotClass: "external",
-        accent: "var(--cat-external, #64748b)",
-      };
-    }
     return {
-      key: sourceStr,
-      label: sourceStr,
+      key: "Others/External",
+      label: "Others/External",
       dotClass: "external",
       accent: "var(--cat-external, #64748b)",
     };
@@ -221,38 +255,21 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
   function getStudentActiveSources() {
     let rawList = null;
     try {
-      const user =
-        JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null") || {};
-      const preferenceKey = "recovibePreferences";
-      const accountPreferenceKey = `recovibePreferences:${user.uid || user.email || "student"}`;
-
       if (
-        user.preferences &&
-        Array.isArray(user.preferences.sources) &&
-        user.preferences.sources.length
+        studentProfile.preferences &&
+        Array.isArray(studentProfile.preferences.sources) &&
+        studentProfile.preferences.sources.length
       ) {
-        rawList = user.preferences.sources;
+        rawList = studentProfile.preferences.sources;
       } else {
-        const accPref = JSON.parse(
-          localStorage.getItem(accountPreferenceKey) || "null",
-        );
+        const accountPreferenceKey = `recovibePreferences:${studentProfile.uid || "student"}`;
+        const accPref = JSON.parse(localStorage.getItem(accountPreferenceKey) || "null");
         if (
           accPref &&
           Array.isArray(accPref.sources) &&
           accPref.sources.length
         ) {
           rawList = accPref.sources;
-        } else {
-          const genPref = JSON.parse(
-            localStorage.getItem(preferenceKey) || "null",
-          );
-          if (
-            genPref &&
-            Array.isArray(genPref.sources) &&
-            genPref.sources.length
-          ) {
-            rawList = genPref.sources;
-          }
         }
       }
     } catch (e) {
@@ -271,16 +288,22 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
 
     const metas = [];
     const seen = new Set();
+    const allowedKeys = new Set([
+      "PUP Official",
+      "PUP Biñan Campus",
+      "CSC",
+      "Organizational",
+      "Others/External",
+    ]);
     for (const item of rawList) {
       const meta = resolveSourceMeta(item);
-      if (meta.key === "Teachers/Faculty") continue;
+      if (!allowedKeys.has(meta.key)) continue;
       if (!seen.has(meta.key)) {
         seen.add(meta.key);
         metas.push(meta);
       }
     }
 
-    // Always ensure Holiday is present for all students
     if (!seen.has("Holiday")) {
       metas.push(resolveSourceMeta("Holiday"));
       seen.add("Holiday");
@@ -291,7 +314,6 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
 
   function renderFilterAndLegend() {
     activeSources = getStudentActiveSources();
-    activeSourceKeys = new Set(activeSources.map((s) => s.key));
 
     const filterPanel = document.querySelector(".filter-panel");
     if (filterPanel) {
@@ -325,81 +347,58 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
   function eventSource(event) {
     const rawSources = [
       event.category,
+      event.categories,
       event.eventSource,
       event.source,
       event.organization,
       event.organizer,
       event.organizerName,
       event.tag,
-    ];
-
-    for (const s of rawSources) {
-      const norm = String(s || "").trim().toLowerCase();
-      if (norm.includes("holiday")) return "Holiday";
-    }
-
-    for (const s of rawSources) {
-      const norm = String(s || "")
-        .normalize("NFD")
+      event.title,
+      event.eventName,
+      event.name,
+    ].flatMap((value) => Array.isArray(value) ? value : [value])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+    const normalizedSources = rawSources.map((source) =>
+      source.normalize("NFD")
         .replace(/[\u0300-\u036f]/g, "")
         .trim()
-        .toLowerCase()
-        .replace(/[^a-z0-9]/g, "");
-      if (
-        norm === "csc" ||
-        norm.includes("centralstudentcouncil") ||
-        norm === "centralstudentcouncilcsc"
-      ) {
-        return "CSC";
-      }
-    }
+        .toLowerCase(),
+    );
 
-    for (const s of rawSources) {
-      const norm = String(s || "").trim().toLowerCase();
-      if (norm.includes("pup official") || norm === "official") return "PUP Official";
-      if (norm.includes("biñan") || norm.includes("binan")) return "PUP Biñan Campus";
-      if (norm.includes("cite")) return activeSourceKeys.has("PUP CITE") ? "PUP CITE" : "PUP Official";
-      if (norm.includes("teacher") || norm.includes("faculty")) return "Teachers/Faculty";
+    if (normalizedSources.some((source) => source.includes("holiday"))) return "Holiday";
+    if (normalizedSources.some((source) =>
+      /(^|[^a-z])csc([^a-z]|$)/.test(source) ||
+      source.includes("central student council"),
+    )) return "CSC";
+    if (normalizedSources.some((source) => source.includes("binan"))) {
+      return "PUP Biñan Campus";
     }
-
-    for (const s of rawSources) {
-      const norm = String(s || "").trim().toLowerCase();
-      if (norm === "ibits" && activeSourceKeys.has("IBITS")) return "IBITS";
-      if (
-        norm === "organizational" ||
-        norm === "ibits" ||
-        norm === "aces" ||
-        norm === "jpcs" ||
-        norm === "org" ||
-        norm.includes("organization") ||
-        /^(ibits|aces|jpcs|pice|iie|jma|jphia|pasoa|chrms|cites)\b/i.test(norm)
-      ) {
-        return "Organizational";
-      }
-    }
-
+    const hasOrganizationalCategory = normalizedSources.some((source) =>
+      source.includes("organization") ||
+      source.includes("organizational") ||
+      source.includes("event organizer") ||
+      source.includes("orgs & student acts") ||
+      /(^|[^a-z0-9])(ibits|aces|jpcs|pice|iie|piie|hrss|sms|yes|jma|jphia|pasoa|chrms|cites)(?=$|[^a-z0-9])/i.test(source),
+    );
+    if (hasOrganizationalCategory) return "Organizational";
+    if (normalizedSources.some((source) =>
+      source.includes("pup") ||
+      source.includes("official") ||
+      source.includes("cite") ||
+      source.includes("teacher") ||
+      source.includes("faculty"),
+    )) return "PUP Official";
     if (
       event.organizerId ||
       event.organization ||
-      event.source === "Event Organizer"
-    ) {
-      return "Organizational";
-    }
-
-    for (const s of rawSources) {
-      const str = String(s || "").trim();
-      if (str && activeSourceKeys.has(str)) return str;
-    }
-
-    for (const s of rawSources) {
-      const norm = String(s || "").trim().toLowerCase();
-      if (norm.includes("external") || norm.includes("other")) return "Others/External";
-    }
-
+      Array.isArray(event.targetOrgs) && event.targetOrgs.length > 0 ||
+      Array.isArray(event.targetOrganizations) && event.targetOrganizations.length > 0
+    ) return "Organizational";
     return "Others/External";
   }
 
-  
   function isHolidayEvent(event) {
     if (!event) return false;
     const id = String(event.id || event.eventId || "");
@@ -408,7 +407,6 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
     return (
       event.isHoliday === true ||
       id.startsWith("holiday:") ||
-      eventSource(event) === "Philippine Holiday" ||
       eventSource(event) === "Holiday" ||
       src.includes("holiday") ||
       cat.includes("holiday")
@@ -421,16 +419,9 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
       {
         "PUP Official": "official",
         "PUP Biñan Campus": "binan",
-        "PUP Biñan": "binan",
         CSC: "csc",
-        "PUP CITE": "cite",
-        IBITS: "ibits",
         Organizational: "organizational",
-        "Teachers/Faculty": "faculty",
-        "Teacher / Faculty": "faculty",
         "Others/External": "external",
-        "Others / External": "external",
-        "Philippine Holiday": "holiday",
         Holiday: "holiday",
       }[src] || "external"
     );
@@ -443,49 +434,68 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
           .filter((input) => input.checked)
           .map((input) => input.dataset.source)
       : [];
-    let studentProfile = {};
-    try {
-      studentProfile = JSON.parse(
-        localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null",
-      ) || {};
-    } catch (error) {
-      console.warn("Could not read student audience profile:", error);
-    }
-    return events.filter((event) =>
-      (isHolidayEvent(event) || isEventVisibleToStudent(event, studentProfile)) &&
-      checked.includes(eventSource(event)),
-    );
+    return events.filter((event) => {
+      const holiday = isHolidayEvent(event);
+      if (!holiday && !isStudentEventStatus(event.status || event.publicationStatus)) {
+        return false;
+      }
+      if (!holiday && !isEventVisibleToStudent(event, studentProfile)) {
+        return false;
+      }
+      const category = eventSource(event);
+      if (!checked.includes(category)) {
+        return false;
+      }
+      if (!eventDateRange(event)) {
+        return false;
+      }
+      return true;
+    });
   }
 
-  function buildUpcomingList() {
-    if (!upcomingPanel) return;
-
-    const now = new Date();
-    const upcoming = visibleEvents()
+  function getUpcomingEvents(visible = visibleEvents()) {
+    const today = todayISO();
+    const uniqueEvents = new Map();
+    visible.forEach((event) => {
+      const key = eventIdentity(event);
+      if (!uniqueEvents.has(key)) uniqueEvents.set(key, event);
+    });
+    return [...uniqueEvents.values()]
       .filter((event) => {
         const range = eventDateRange(event);
-        return (
-          range &&
-          range.end >=
-            `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`
-        );
+        return range && manilaDateKey(range.end) >= today;
       })
-      .sort((a, b) =>
-        eventDateRange(a).start.localeCompare(eventDateRange(b).start),
-      );
+      .sort((first, second) => {
+        const firstRange = eventDateRange(first);
+        const secondRange = eventDateRange(second);
+        const firstStart = manilaDateKey(firstRange.start);
+        const secondStart = manilaDateKey(secondRange.start);
+        const firstDate = firstStart < today ? today : firstStart;
+        const secondDate = secondStart < today ? today : secondStart;
+        return firstDate.localeCompare(secondDate) ||
+          String(first.title).localeCompare(String(second.title));
+      });
+  }
+
+  function buildUpcomingList(visible) {
+    if (!upcomingPanel) return;
+
+    const upcoming = getUpcomingEvents(visible);
 
     if (!upcoming.length) {
       upcomingPanel.innerHTML =
-        '<h3>Upcoming</h3><div class="upcoming-empty">No upcoming events.</div>';
+        '<h3>Upcoming</h3><div class="upcoming-empty">No upcoming events or holidays.</div>';
       return;
     }
 
-    const shownUpcoming = upcoming.slice(0, 5);
-    const moreCount = upcoming.length - shownUpcoming.length;
     upcomingPanel.innerHTML = [
       "<h3>Upcoming</h3>",
-      `<div class="upcoming-list">${shownUpcoming.map((event) => {
-        const date = toDate(eventDateRange(event)?.start);
+      `<div class="upcoming-list">${upcoming.slice(0, 5).map((event) => {
+        const range = eventDateRange(event);
+        const startDate = manilaDateKey(range.start);
+        const date = dateFromISO(
+          startDate < todayISO() ? todayISO() : startDate,
+        );
         const month = date
           ? date.toLocaleDateString("en-US", { month: "short" }).toUpperCase()
           : "TBA";
@@ -497,7 +507,7 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
             <div class="upcoming-item upcoming-item--holiday" style="cursor: default;" aria-label="${escape(event.title || "Holiday")} (Holiday)">
               <div class="upcoming-date ${categoryClass}"><span>${day}</span><small>${month}</small></div>
               <div class="upcoming-copy">
-                <strong>${escape(event.title || "Holiday")}</strong>
+                <strong title="${escape(event.title || "Holiday")}">${escape(event.title || "Holiday")}</strong>
                 <span>Holiday</span>
               </div>
             </div>
@@ -507,32 +517,20 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
           <div class="upcoming-item" data-event-id="${escape(event.id || event.eventId || "")}" tabindex="0" role="button">
             <div class="upcoming-date ${categoryClass}"><span>${day}</span><small>${month}</small></div>
             <div class="upcoming-copy">
-              <strong>${escape(event.title || "Untitled event")}</strong>
+              <strong title="${escape(event.title || "Untitled event")}">${escape(event.title || "Untitled event")}</strong>
               <span>${escape(sourceLabel)}</span>
             </div>
           </div>
         `;
       }).join("")}</div>`,
-      moreCount
-        ? `<button class="upcoming-more" type="button" data-upcoming-more>+${moreCount} more</button>`
+      upcoming.length > 5
+        ? '<button class="upcoming-more" type="button" data-upcoming-more>See all upcoming</button>'
         : "",
     ].join("");
   }
 
   function openRemainingUpcoming() {
-    const now = new Date();
-    const today =
-      `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-    const remaining = visibleEvents()
-      .filter((item) => {
-        const range = eventDateRange(item);
-        return range && range.end >= today;
-      })
-      .sort((a, b) =>
-        eventDateRange(a).start.localeCompare(eventDateRange(b).start),
-      )
-      .slice(5);
-    openEventList("More upcoming events", remaining);
+    openEventList("More upcoming events", getUpcomingEvents().slice(5));
   }
 
   function openEventList(listTitle, listedEvents, iso) {
@@ -558,12 +556,41 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
     const month = state.date.getMonth();
     const firstDay = new Date(year, month, 1).getDay();
     const totalDays = new Date(year, month + 1, 0).getDate();
+    const calendarCellCount = Math.ceil((firstDay + totalDays) / 7) * 7;
+    const gridStartISO = new Date(Date.UTC(year, month, 1 - firstDay))
+      .toISOString()
+      .slice(0, 10);
+    const gridEndISO = new Date(Date.UTC(year, month, 1 - firstDay + calendarCellCount - 1))
+      .toISOString()
+      .slice(0, 10);
 
     renderYearOptions();
     monthSelect.value = String(month);
     yearSelect.value = String(year);
 
     const visible = visibleEvents();
+    const eventsByDate = new Map();
+    visible.forEach((event) => {
+      const range = eventDateRange(event);
+      if (!range) return;
+      const visibleRange = clampEventDateRangeToGrid(
+        range,
+        gridStartISO,
+        gridEndISO,
+      );
+      if (!visibleRange) return;
+      let cursor = new Date(`${visibleRange.start}T00:00:00Z`);
+      while (cursor.toISOString().slice(0, 10) <= visibleRange.end) {
+        const dateKey = cursor.toISOString().slice(0, 10);
+        const eventsForDate = eventsByDate.get(dateKey) || [];
+        const identity = eventIdentity(event);
+        if (!eventsForDate.some((item) => eventIdentity(item) === identity)) {
+          eventsForDate.push(event);
+          eventsByDate.set(dateKey, eventsForDate);
+        }
+        cursor.setUTCDate(cursor.getUTCDate() + 1);
+      }
+    });
     const cells = [];
 
     for (let index = 0; index < firstDay; index += 1) {
@@ -576,19 +603,17 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
         day,
         iso,
         muted: false,
-        events: visible.filter((event) => eventOccursOn(event, iso)),
+        events: eventsByDate.get(iso) || [],
       });
     }
 
-    while (cells.length % 7 !== 0) {
+    while (cells.length < calendarCellCount) {
       cells.push({ day: "", iso: "", muted: true, events: [] });
     }
 
     calendarDays.innerHTML = cells
       .map((cell) => {
-        const currentDate = new Date();
-        const todayIso = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, "0")}-${String(currentDate.getDate()).padStart(2, "0")}`;
-        const today = cell.iso && cell.iso === todayIso;
+        const today = cell.iso && cell.iso === todayISO();
         const eventCount =
           cell.events && cell.events.length ? cell.events.length : 0;
         const eventDots = cell.events
@@ -622,7 +647,7 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
       .join("");
 
     fitCalendarEventChips();
-    buildUpcomingList();
+    buildUpcomingList(visible);
   }
 
   function fitCalendarEventChips() {
@@ -684,17 +709,13 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
     if (!dayEvents.length) return;
 
     const regularEvents = dayEvents.filter((event) => !isHolidayEvent(event));
-    if (!regularEvents.length) {
-      // Day only has holidays: holiday is shown on calendar cell, not clickable
-      return;
-    }
-
     if (regularEvents.length === 1 && dayEvents.length === 1 && !forceList) {
       openEventModal(regularEvents[0].id || regularEvents[0].eventId);
       return;
     }
+    if (!regularEvents.length && dayEvents.length === 1) return;
 
-    const date = toDate(iso);
+    const date = dateFromISO(iso);
     const title = date
       ? date.toLocaleDateString("en-US", {
           month: "long",
@@ -726,34 +747,176 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
     refreshCalendarData();
   }
 
-  let dataRequestSequence = 0;
-  async function refreshCalendarData() {
-    const sequence = ++dataRequestSequence;
-    const year = state.date.getFullYear();
-    const month = state.date.getMonth();
-    try {
-      const { events: loadedEvents, holidays } = await loadCalendarData(
-        baseEvents,
-        year,
-        month,
-      );
-      if (sequence !== dataRequestSequence) return;
-      const holidayEvents = holidays.map((holiday) => ({
-        id: `holiday:${holiday.date}:${holiday.title}`,
-        eventId: `holiday:${holiday.date}:${holiday.title}`,
-        title: holiday.title,
-        dateISO: holiday.date,
-        source: "Holiday",
-        status: "published",
-        time: "All day",
-        isHoliday: true,
-      }));
-      events = [...loadedEvents, ...holidayEvents];
-      window.RecoVibeCalendarShell?.setHolidays(holidays);
-      renderCalendar();
-    } catch (error) {
-      console.error("Unable to refresh student calendar data:", error);
+  function replaceEventsAndRender() {
+    events = [...firestoreEvents, ...holidayEvents];
+    updateDataStatus();
+    renderCalendar();
+  }
+
+  function normalizeStudentProfile(profile) {
+    const organization =
+      profile.organization ||
+      profile.courseOrganization ||
+      profile.courseOrg ||
+      profile.organizationCode ||
+      profile.organizationName ||
+      "";
+    const department =
+      profile.department || profile.departmentCode || profile.course || "";
+    let derivedOrganization = organization;
+    if (!derivedOrganization && department) {
+      const normalizedDepartment = String(department).toUpperCase();
+      if (normalizedDepartment.includes("IT") || normalizedDepartment.includes("INFORMATION")) {
+        derivedOrganization = "IBITS";
+      } else if (normalizedDepartment.includes("CPE") || normalizedDepartment.includes("COMPUTER")) {
+        derivedOrganization = "ACES";
+      } else if (normalizedDepartment.includes("IE") || normalizedDepartment.includes("INDUSTRIAL")) {
+        derivedOrganization = "PIIE";
+      } else if (normalizedDepartment.includes("HRM") || normalizedDepartment.includes("HRSS")) {
+        derivedOrganization = "HRSS";
+      }
     }
+    return {
+      ...profile,
+      organization: derivedOrganization,
+      courseOrganization: profile.courseOrganization || profile.courseOrg || derivedOrganization,
+      courseOrg: profile.courseOrg || derivedOrganization,
+      department,
+      departmentCode: profile.departmentCode || department,
+      StudentOrgs: profile.StudentOrgs || profile.studentOrgs ||
+        (derivedOrganization ? [derivedOrganization] : []),
+    };
+  }
+
+  function listenForCalendarEvents() {
+    if (!db) {
+      eventsLoading = false;
+      eventLoadError = "Calendar events are unavailable because Firebase is not configured.";
+      replaceEventsAndRender();
+      return;
+    }
+
+    eventsLoading = true;
+    eventLoadError = "";
+    updateDataStatus();
+    try {
+      const eventsQuery = query(
+        collection(db, "events"),
+        where("status", "in", STUDENT_EVENT_STATUSES),
+      );
+      eventsUnsubscribe = onSnapshot(
+        eventsQuery,
+        (snapshot) => {
+          firestoreEvents = snapshot.docs.map((eventDocument) =>
+            normalizeCalendarEvent(eventDocument.id, eventDocument.data()),
+          );
+          eventsLoading = false;
+          eventLoadError = "";
+          replaceEventsAndRender();
+        },
+        (error) => {
+          console.error("Unable to listen for student calendar events:", error);
+          eventsLoading = false;
+          eventLoadError = error?.code === "permission-denied"
+            ? "Your account cannot read calendar events. Check your sign-in and Firestore access."
+            : "Calendar events could not be loaded. Check your connection and try again.";
+          replaceEventsAndRender();
+        },
+      );
+    } catch (error) {
+      console.error("Unable to attach the student calendar event listener:", error);
+      eventsLoading = false;
+      eventLoadError = error?.code === "permission-denied"
+        ? "Your account cannot read calendar events. Check your sign-in and Firestore access."
+        : "Calendar events could not be loaded. Check your connection and try again.";
+      replaceEventsAndRender();
+    }
+  }
+
+  async function loadStudentProfileAndListen(user) {
+    const request = ++authRequestSequence;
+    const nextUid = user?.uid || "";
+    if (currentStudentUid && currentStudentUid !== nextUid) {
+      renderStudentSidebar({});
+    }
+    currentStudentUid = nextUid;
+    eventsUnsubscribe?.();
+    eventsUnsubscribe = null;
+    eventsLoading = true;
+    studentProfile = {};
+    profileLoadError = "";
+    if (!user) {
+      clearCachedStudentProfile();
+      renderStudentSidebar({});
+    }
+    updateDataStatus();
+    if (user && db) {
+      try {
+        const profile = await loadStudentProfile(user);
+        if (disposed || request !== authRequestSequence) return;
+        studentProfile = normalizeStudentProfile(profile);
+        studentProfile.uid = user.uid;
+        renderStudentSidebar(profile);
+      } catch (error) {
+        console.error("Unable to load student profile for calendar audience filtering:", error);
+        if (disposed || request !== authRequestSequence) return;
+        profileLoadError =
+          "Your student profile could not be loaded; audience-specific event visibility may be incomplete.";
+      }
+    }
+    if (disposed || request !== authRequestSequence) return;
+    listenForCalendarEvents();
+  }
+
+  async function refreshCalendarData() {
+    const sequence = ++holidayRequestSequence;
+    const currentMonthIndex =
+      Number(todayISO().slice(0, 4)) * 12 + Number(todayISO().slice(5, 7)) - 1;
+    const displayedMonthIndex = state.date.getFullYear() * 12 + state.date.getMonth();
+    const monthIndexes = new Set([displayedMonthIndex]);
+    for (let offset = 0; offset < 12; offset += 1) {
+      monthIndexes.add(currentMonthIndex + offset);
+    }
+
+    let holidayRequestHadError = false;
+    const holidayResults = await Promise.all(
+      [...monthIndexes].map(async (monthIndex) => {
+        const year = Math.floor(monthIndex / 12);
+        const month = monthIndex % 12;
+        try {
+          return await fetchMonthHolidays(year, month);
+        } catch (error) {
+          console.error(`Unable to load holidays for ${year}-${month + 1}:`, error);
+          holidayRequestHadError = true;
+          return [];
+        }
+      }),
+    );
+    if (disposed || sequence !== holidayRequestSequence) return;
+
+    const uniqueHolidays = new Map();
+    holidayResults.flat().forEach((holiday) => {
+      uniqueHolidays.set(`${holiday.date}:${holiday.title}`, holiday);
+    });
+    const holidays = [...uniqueHolidays.values()];
+    holidayLoadError = holidayRequestHadError
+      ? "Some holiday data could not be loaded."
+      : "";
+    holidayEvents = holidays.map((holiday) =>
+      normalizeCalendarEvent(
+        `holiday:${holiday.date}:${holiday.title}`,
+        {
+          title: holiday.title,
+          dateISO: holiday.date,
+          source: "Holiday",
+          status: "published",
+          time: "All day",
+          isHoliday: true,
+        },
+      ),
+    );
+    window.RecoVibeCalendarShell?.setHolidays(holidays);
+    replaceEventsAndRender();
   }
 
   function bindCalendarInteractions() {
@@ -936,7 +1099,50 @@ import { isEventVisibleToStudent } from "./eventAudience.js";
   if (window.ResizeObserver) {
     new ResizeObserver(fitCalendarEventChips).observe(calendarDays);
   }
+
+  function startCalendarListeners() {
+    disposed = false;
+    if (auth) {
+      authUnsubscribe = onAuthStateChanged(
+        auth,
+        (user) => {
+          console.info("[Student Calendar] auth-wait-success", {
+            authenticated: Boolean(user),
+            uid: user?.uid || "",
+            appName: auth.app.name,
+            projectId: auth.app.options.projectId,
+          });
+          loadStudentProfileAndListen(user);
+        },
+        (error) => {
+          console.error("Unable to observe student authentication state:", error);
+          eventsLoading = false;
+          eventLoadError = "Calendar events could not be loaded for this account.";
+          updateDataStatus();
+        },
+      );
+    } else {
+      loadStudentProfileAndListen(null);
+    }
+    refreshCalendarData();
+  }
+
+  function stopCalendarListeners() {
+    disposed = true;
+    authRequestSequence += 1;
+    holidayRequestSequence += 1;
+    authUnsubscribe?.();
+    authUnsubscribe = null;
+    eventsUnsubscribe?.();
+    eventsUnsubscribe = null;
+  }
+
+  window.addEventListener("pagehide", stopCalendarListeners);
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) startCalendarListeners();
+  });
+
   renderFilterAndLegend();
   renderCalendar();
-  refreshCalendarData();
+  startCalendarListeners();
 })();

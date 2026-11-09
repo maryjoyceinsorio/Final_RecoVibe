@@ -18,6 +18,7 @@ import {
 } from "../UserStudent/firebaseConfig.js";
 import { fetchMonthHolidays } from "../holidayService.js";
 import { isEventVisibleToStudent } from "../UserStudent/eventAudience.js";
+import { getEventDateRange } from "../UserStudent/calendarDateRange.mjs";
 
 (() => {
   const monthNames = [
@@ -271,12 +272,15 @@ import { isEventVisibleToStudent } from "../UserStudent/eventAudience.js";
     ].includes(status);
   }
 
-  function normalizeEvent(id, data, isOwn = false) {
+function normalizeEvent(id, data) {
+    const dateRange = getEventDateRange(data);
     let startMs = 0;
     if (typeof data.startAt === "number") {
       startMs = data.startAt;
     } else if (data.startAt) {
       startMs = new Date(data.startAt).getTime();
+    } else if (dateRange) {
+      startMs = dateRange.start.getTime();
     } else if (data.dateISO || data.date) {
       startMs = new Date(`${data.dateISO || data.date}T08:00:00+08:00`).getTime();
     }
@@ -286,23 +290,30 @@ import { isEventVisibleToStudent } from "../UserStudent/eventAudience.js";
       endMs = data.endAt;
     } else if (data.endAt) {
       endMs = new Date(data.endAt).getTime();
+    } else if (dateRange) {
+      endMs = dateRange.end.getTime();
     } else if (data.endDateISO || data.endDate) {
       endMs = new Date(`${data.endDateISO || data.endDate}T17:00:00+08:00`).getTime();
-    } else if (startMs) {
-      endMs = startMs + 3 * 3600 * 1000;
+    } else {
+      endMs = startMs;
     }
 
-    const startDay = toPhDateStr(startMs || data.startAt || data.dateISO || data.date);
-    const endDay = toPhDateStr(endMs || data.endAt || startMs);
+    let startDay = toPhDateStr(startMs || data.startAt || data.dateISO || data.date);
+    let endDay = toPhDateStr(endMs || data.endAt || startMs);
+
+    // Safety guard laban sa overflow o mahabang araw kung walang explicit end date
+    if (!data.endAt && !data.endDate && !data.endDateISO && (!dateRange || dateRange.start.getTime() === dateRange.end.getTime())) {
+      endDay = startDay;
+    }
 
     const title = data.name || data.eventName || data.title || "Untitled event";
-    const venue = data.venue || data.location || data.venueOther || "—";
+    const venue = data.venue || data.location || data.venueOther || "-";
     const source = data.source || data.eventSource || data.organizerName || "Others / External";
-    const organization =
-      data.organization ||
-      data.department ||
-      data.organizerName ||
-      (data.source ? data.source : "—");
+    const organization = 
+      data.organization || 
+      data.department || 
+      data.organizerName || 
+      (data.source ? data.source : "-");
     const status = data.status || "published";
 
     const categoryKey = getCategoryKey({ ...data, source, title });
@@ -324,7 +335,7 @@ import { isEventVisibleToStudent } from "../UserStudent/eventAudience.js";
       endDay,
       categoryKey,
       isMultiDay: Boolean(startDay && endDay && startDay !== endDay),
-      isOwn: isOwn || isOwnOrganizerEvent(data),
+      isOwn: isOwnOrganizerEvent(data),
       isUnpublished: isUnpublishedEvent({ status }),
       statusLabel: status.charAt(0).toUpperCase() + status.slice(1),
       time:
@@ -333,6 +344,30 @@ import { isEventVisibleToStudent } from "../UserStudent/eventAudience.js";
           ? `${formatPhTime(startMs)} – ${formatPhTime(endMs)}`
           : "Time TBA"),
     };
+  }
+  
+
+  function eventIntersectsDateRange(event, rangeStart, rangeEnd) {
+    const startDay = event.startDay;
+    const endDay = event.endDay || startDay;
+    const isIsoDate = (value) => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value || "")) return false;
+      const date = new Date(`${value}T00:00:00Z`);
+      return !Number.isNaN(date.getTime()) &&
+        date.toISOString().slice(0, 10) === value;
+    };
+
+    return isIsoDate(rangeStart) &&
+      isIsoDate(rangeEnd) &&
+      isIsoDate(startDay) &&
+      isIsoDate(endDay) &&
+      startDay <= endDay &&
+      startDay <= rangeEnd &&
+      endDay >= rangeStart;
+  }
+
+  function eventOccursOnDate(event, iso) {
+    return eventIntersectsDateRange(event, iso, iso);
   }
 
   // --- Visible Events Aggregation ---
@@ -455,14 +490,14 @@ import { isEventVisibleToStudent } from "../UserStudent/eventAudience.js";
     const lastDayNum = totalDaysInMonth;
     const monthStartDay = `${year}-${String(month + 1).padStart(2, "0")}-01`;
     const monthEndDay = `${year}-${String(month + 1).padStart(2, "0")}-${String(lastDayNum).padStart(2, "0")}`;
-    const monthEvents = filtered.filter(
-      (ev) => ev.startDay && ev.endDay && ev.startDay <= monthEndDay && ev.endDay >= monthStartDay,
+    const monthEvents = filtered.filter((ev) =>
+      eventIntersectsDateRange(ev, monthStartDay, monthEndDay),
     );
 
     for (let day = 1; day <= totalDaysInMonth; day += 1) {
       const iso = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
       const dayEvents = filtered
-        .filter((ev) => ev.startDay && ev.endDay && ev.startDay <= iso && ev.endDay >= iso)
+        .filter((ev) => eventOccursOnDate(ev, iso))
         .sort((a, b) => (a.startAt || 0) - (b.startAt || 0));
 
       cells.push({

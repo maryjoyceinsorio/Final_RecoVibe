@@ -2791,16 +2791,33 @@
     <script src="notification-count.js"></script>
     <script src="../EventDetailsModal.js"></script>
     <script type="module">
-      import { auth, rtdb, functions, isFirebaseConfigured, isRtdbConfigured } from "./firebaseConfig.js";
-      import { isEventVisibleToStudent } from "./eventAudience.js";
+      import { auth, db, rtdb, functions, isFirebaseConfigured, isRtdbConfigured } from "./firebaseConfig.js";
+      import {
+        clearCachedStudentProfile,
+        loadStudentProfile,
+        renderStudentSidebar,
+      } from "./studentIdentity.js";
+      import {
+        isEventVisibleToStudent,
+        isStudentEventStatus,
+        STUDENT_EVENT_STATUSES,
+        toCleanList,
+      } from "./eventAudience.js";
       import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
       import {
         ref,
         onValue,
         off,
       } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+      import {
+        collection,
+        doc,
+        onSnapshot,
+        query,
+        where,
+      } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
       import { httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
-      import { loadApprovedFirestoreEvents } from "../calendarDataService.js";
+      import { getEventDateRange } from "./calendarDateRange.mjs";
 
       /* ---------------------------------------------------------
          STATE
@@ -2808,6 +2825,16 @@
       let currentUid = null;
       let serverTimeOffset = 0;
       let permanentQrToken = "";
+      let eventsLoading = true;
+      let eventLoadError = "";
+      let eventLoadTimer = null;
+      let authUnsubscribe = null;
+      let eventsUnsubscribe = null;
+      const registrationUnsubscribes = new Map();
+      let serverTimeUnsubscribe = null;
+      const registrationStates = new Map();
+      let loadRequestSequence = 0;
+      const registrationPendingIds = new Set();
 
       const studentProfile = {
         firstName: "Student",
@@ -2818,6 +2845,8 @@
         organization: "",
         department: "",
         departmentCode: "",
+        StudentOrgs: [],
+        departments: [],
       };
 
       const rawEventsMap = new Map(); // id -> normalized event
@@ -2827,8 +2856,6 @@
       let openQrEventId = null;
       const openDetailsEventIds = new Set();
 
-      let activePublicEventsRef = null;
-      let activePublicEventsListener = null;
       let tickInterval = null;
 
       // Filter State
@@ -2947,60 +2974,86 @@
         );
       }
 
+      function isDevelopment() {
+        const nodeEnvironment = globalThis.process?.env?.NODE_ENV;
+        return nodeEnvironment
+          ? nodeEnvironment !== "production"
+          : import.meta.env?.DEV === true ||
+            ["localhost", "127.0.0.1", "::1"].includes(globalThis.location?.hostname);
+      }
+
+      function logLoadStep(step, details = {}) {
+        if (isDevelopment()) {
+          console.log(`[Student Events] ${step}`, details);
+        }
+      }
+
+      function setEventLoadError(message, error) {
+        if (error) console.error("[Student Events] Event loading failed:", error);
+        eventLoadError = message;
+        eventsLoading = false;
+        window.clearTimeout(eventLoadTimer);
+        renderAll();
+      }
+
+      function startEventLoadTimeout(request) {
+        window.clearTimeout(eventLoadTimer);
+        eventLoadTimer = window.setTimeout(() => {
+          if (request !== loadRequestSequence || !eventsLoading) return;
+          logLoadStep("events-timeout");
+          setEventLoadError("Taking longer than expected. Check your connection and retry.");
+        }, 10000);
+      }
+
+      function getStudentAudienceProfile(data = {}) {
+        const organization = data.organization ||
+          data.courseOrganization ||
+          data.courseOrg ||
+          data.organizationCode ||
+          data.organizationName ||
+          "";
+        const departments = toCleanList([
+          data.departments,
+          data.departmentCodes,
+          data.department,
+          data.departmentCode,
+          data.course,
+          data.program,
+        ]);
+        return {
+          ...data,
+          organization,
+          courseOrganization: data.courseOrganization || data.courseOrg || organization,
+          courseOrg: data.courseOrg || organization,
+          StudentOrgs: toCleanList([
+            data.StudentOrgs,
+            data.studentOrgs,
+            data.organizations,
+            organization,
+          ]),
+          departments,
+          department: data.department || data.departmentCode || "",
+          departmentCode: data.departmentCode || data.department || "",
+        };
+      }
+
+      function isVisibleToStudentSafely(event) {
+        try {
+          return isEventVisibleToStudent(event.raw || event, studentProfile);
+        } catch (error) {
+          logLoadStep("event-audience-filter-error", {
+            id: event.id || event.eventId || "",
+            title: event.name || event.title || "",
+            message: error?.message || String(error),
+          });
+          console.error("[Student Events] Could not evaluate event audience:", error);
+          return false;
+        }
+      }
+
       /* ---------------------------------------------------------
          USER PROFILE & SIDEBAR
       --------------------------------------------------------- */
-      function hydrateUserProfile() {
-        const user =
-            JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null") ||
-          {};
-        const storedFirstName = String(user.firstName || "").trim();
-        const storedFullName = String(user.name || user.fullName || "").trim();
-        const nameFromProfile = [
-          storedFirstName,
-          user.middleName,
-          user.lastName,
-        ]
-          .map((part) => String(part || "").trim())
-          .filter(Boolean)
-          .join(" ");
-        const displayName = storedFullName || nameFromProfile || "Student";
-        const firstName =
-          storedFirstName ||
-          storedFullName.split(/\s+/).filter(Boolean)[0] ||
-          nameFromProfile.split(/\s+/).filter(Boolean)[0] ||
-          "";
-        const avatarLetter =
-          Array.from(firstName || "S")[0]?.toLocaleUpperCase() || "S";
-        const organization = String(user.organization || "").trim();
-        studentProfile.organization = organization || String(user.courseOrganization || "").trim();
-        studentProfile.department = String(user.department || "").trim();
-        studentProfile.departmentCode = String(user.departmentCode || "").trim();
-        const role =
-          organization && organization.toLowerCase() !== "none"
-            ? organization
-            : "Student";
-
-        studentProfile.fullName = displayName;
-        studentProfile.firstName = firstName;
-        if (user.studentNo || user.studentNumber) {
-          studentProfile.studentNo = String(user.studentNo || user.studentNumber).trim();
-        }
-
-        document.querySelectorAll(".user-name").forEach((el) => {
-          el.textContent = displayName;
-        });
-        document.querySelectorAll(".user-role").forEach((el) => {
-          el.textContent = role;
-        });
-        document.querySelectorAll(".avatar").forEach((el) => {
-          el.textContent = avatarLetter;
-        });
-        document.querySelectorAll("#userFirstName").forEach((el) => {
-          el.textContent = firstName;
-        });
-      }
-
       function initSidebarToggle() {
         const sidebar = document.getElementById("sidebar");
         try {
@@ -3083,30 +3136,30 @@
       }
 
       function normalizeEvent(id, data) {
-        let startMs = 0;
-        if (typeof data.startAt === "number") {
-          startMs = data.startAt;
-        } else if (data.startAt) {
-          startMs = new Date(data.startAt).getTime();
-        } else if (data.dateISO || data.date) {
-          const dateStr = String(data.dateISO || data.date).slice(0, 10);
-          const timeStr = String(data.time || "09:00 AM");
-          const parsed = Date.parse(`${dateStr} ${timeStr}`);
-          startMs = isNaN(parsed) ? new Date(dateStr).getTime() : parsed;
-        }
-
-        let endMs = 0;
-        if (typeof data.endAt === "number") {
-          endMs = data.endAt;
-        } else if (data.endAt) {
-          endMs = new Date(data.endAt).getTime();
-        } else if (data.eventEndDate || data.endDate) {
-          const dateStr = String(data.eventEndDate || data.endDate).slice(0, 10);
-          endMs = new Date(dateStr).getTime();
-        }
-        if (!endMs && startMs) {
-          endMs = startMs + 3 * 3600 * 1000;
-        }
+        const eventDateTimes = getEventDateRange(data);
+        const startMs = eventDateTimes?.start.getTime() || 0;
+        const endMs = eventDateTimes?.end.getTime() || 0;
+        const eventTimeParts = String(data.time || "").split(/\s*[-–—]\s*/);
+        const endAtValue = data.endAt ?? data.end_at ?? data.endDateTime ?? data.end_date_time;
+        const hasExplicitEndTime = Boolean(
+          data.endTime ||
+          data.timeEnd ||
+          data.schedule?.endTime ||
+          eventTimeParts[1] ||
+          endAtValue instanceof Date ||
+          typeof endAtValue?.toDate === "function" ||
+          Number.isFinite(endAtValue?.seconds) ||
+          (typeof endAtValue === "number" && Number.isFinite(endAtValue)) ||
+          (typeof endAtValue === "string" &&
+            /^\d{4}-\d{2}-\d{2}[T ]\d{1,2}:\d{2}/.test(endAtValue.trim()))
+        );
+        const name = String(data.name || data.title || "Untitled Event");
+        const venue = String(data.venue || data.location || "PUP Biñan Campus");
+        const categoryValue = data.category || data.categories || "University & Campuses";
+        const category = Array.isArray(categoryValue)
+          ? categoryValue.map((value) => String(value)).join(", ")
+          : String(categoryValue);
+        const organizerName = String(data.organizerName || data.organizer || "Event Organizer");
 
         const capacityVal = data.capacity !== undefined ? data.capacity : (data.maxCapacity || null);
         const capacityNum = (capacityVal !== null && capacityVal !== undefined && !isNaN(Number(capacityVal)) && Number(capacityVal) > 0)
@@ -3118,22 +3171,28 @@
         return {
           id: String(id),
           eventId: String(id),
-          name: data.name || data.title || "Untitled Event",
-          title: data.name || data.title || "Untitled Event",
-          venue: data.venue || data.location || "PUP Biñan Campus",
-          location: data.venue || data.location || "PUP Biñan Campus",
-          category: data.category || "University & Campuses",
+          name,
+          title: name,
+          venue,
+          location: venue,
+          category,
           source: normalizeSource(data.source || data.eventSource),
           startAt: startMs,
           endAt: endMs,
+          hasExplicitEndTime,
           capacity: capacityNum,
           registeredCount: regCount,
+          registrationClosed:
+            data.registrationClosed === true || data.registrationEnabled === false,
           checkedInCount: typeof data.checkedInCount === "number" ? data.checkedInCount : undefined,
-          organizerName: data.organizerName || data.organizer || "Event Organizer",
+          organizerName,
           organizerUid: data.organizerUid || data.organizerId || "",
-          targetAudience: data.targetAudience || "",
-          targetDepartments: data.targetDepartments || data.targetDepartment || [],
-          targetOrganizations: data.targetOrganizations || data.targetOrganization || [],
+          targetAudience: data.targetAudience || data.target_audience ||
+            data.audienceType || data.audience_type || data.audience || "",
+          targetDepartments: data.targetDepartments || data.targetDepartment ||
+            data.target_departments || data.target_department || [],
+          targetOrganizations: data.targetOrganizations || data.targetOrganization ||
+            data.target_organizations || data.target_organization || [],
           organizationCode: data.organizationCode || "",
           organizerOrganization: data.organizerOrganization || "",
           organization: data.organization || "",
@@ -3143,7 +3202,7 @@
           creatorRole: data.creatorRole || data.createdByRole || "",
           eventSource: data.eventSource || "",
           description: data.description || data.eventDescription || "",
-          status: String(data.status || "published").toLowerCase(),
+          status: String(data.status || data.publicationStatus || "").toLowerCase(),
           adminDocuments: data.adminDocuments || "",
           approvalDocuments: Array.isArray(data.approvalDocuments) ? data.approvalDocuments : [],
           participantDocuments: Array.isArray(data.participantDocuments) ? data.participantDocuments : [],
@@ -3162,6 +3221,31 @@
       function hasOpenSlots(ev) {
         if (ev.capacity === null) return true;
         return ev.capacity - (ev.registeredCount || 0) > 0;
+      }
+
+      function getRegistrationState(eventId) {
+        return registrationStates.get(eventId) || "loading";
+      }
+
+      function renderRegistrationButton(ev, openSlots, includeQr = false) {
+        const state = getRegistrationState(ev.id);
+        if (state === "loading") {
+          return '<button type="button" class="btn-live-reg" disabled>Checking registration...</button>';
+        }
+        if (state === "error") {
+          return `<button type="button" class="btn-live-reg" data-action="retry-registration" data-event-id="${ev.id}">Retry status</button>`;
+        }
+        if (state === "registered") {
+          const qrButton = includeQr
+            ? `<button type="button" class="btn-live-qr" data-action="toggle-qr" data-event-id="${ev.id}">${openQrEventId === ev.id ? "Hide QR" : "Show my QR"}</button>`
+            : "";
+          return `${qrButton}<button type="button" class="btn-live-reg" disabled>Registered</button><button type="button" class="btn-live-cancel" data-action="cancel" data-event-id="${ev.id}">Cancel registration</button>`;
+        }
+        return `
+          <button type="button" class="btn-live-reg" data-action="register" data-event-id="${ev.id}" ${!openSlots ? "disabled" : ""}>
+            ${openSlots ? "Register" : "Full"}
+          </button>
+        `;
       }
 
       /* ---------------------------------------------------------
@@ -3970,92 +4054,295 @@
       /* ---------------------------------------------------------
          FIREBASE DATA LOADING
       --------------------------------------------------------- */
-      function loadEvents() {
-        const happeningNowList = document.getElementById("happeningNowList");
-        const upcomingEventsList = document.getElementById("upcomingEventsList");
-
-        if (happeningNowList && rawEventsMap.size === 0) {
-          happeningNowList.innerHTML = '<div style="padding:16px; color:var(--ink-500);">Loading live events...</div>';
-        }
-        if (upcomingEventsList && rawEventsMap.size === 0) {
-          upcomingEventsList.innerHTML = '<div style="padding:16px; color:var(--ink-500);">Loading events...</div>';
-        }
-
-        if (!isRtdbConfigured) {
-          useFallbackEvents();
-          loadApprovedFirestoreEvents().then((firestoreEvents) => {
-            firestoreEvents.forEach((item) => {
-              const ev = normalizeEvent(item.id || item.eventId, item);
-              if ((ev.status === "published" || ev.status === "completed") && isEventVisibleToStudent(ev, studentProfile)) rawEventsMap.set(ev.id, ev);
-            });
-            renderAll();
+      function applyEventSnapshot(snapshot, request) {
+        if (request !== loadRequestSequence) return;
+        rawEventsMap.clear();
+        try {
+          snapshot.docs.forEach((eventDoc) => {
+            try {
+              const data = eventDoc.data();
+              const ev = normalizeEvent(eventDoc.id, data);
+              if (!isStudentEventStatus(ev.status)) {
+                logLoadStep("event-excluded", {
+                  id: ev.id,
+                  title: ev.name,
+                  status: ev.status,
+                  reasonExcluded: "status",
+                });
+                return;
+              }
+              if (!Number.isFinite(ev.startAt) || !Number.isFinite(ev.endAt) ||
+                  ev.startAt <= 0 || ev.endAt <= 0) {
+                const startFields = [
+                  "dateISO", "eventDate", "event_date", "date", "startDate",
+                  "start_date", "dateStart", "startDateTime", "start", "startAt",
+                  "start_at", "schedule.date", "schedule.startDate", "schedule.startAt",
+                ];
+                const endFields = [
+                  "endDateISO", "eventEndDate", "endDate", "end_date", "dateEnd",
+                  "endDateTime", "end_date_time", "end", "endAt", "end_at",
+                  "schedule.endDate",
+                ];
+                const readField = (field) =>
+                  field.split(".").reduce((value, part) => value?.[part], data);
+                const timeFields = [
+                  "time", "startTime", "start_time", "timeStart", "time_start",
+                  "endTime", "end_time", "timeEnd", "time_end",
+                  "schedule.startTime", "schedule.endTime",
+                ];
+                const rawFields = (fields) => Object.fromEntries(
+                  fields.map((field) => [field, readField(field) ?? null]),
+                );
+                const presentStartFields = startFields.filter((field) => {
+                  const value = readField(field);
+                  return value !== null && value !== undefined && value !== "";
+                });
+                const presentEndFields = endFields.filter((field) => {
+                  const value = readField(field);
+                  return value !== null && value !== undefined && value !== "";
+                });
+                const isInvalidStart = !Number.isFinite(ev.startAt) || ev.startAt <= 0;
+                const candidateFields = isInvalidStart ? presentStartFields : presentEndFields;
+                console.warn("[Student Events] event-skipped-invalid-date", {
+                  id: ev.id,
+                  title: ev.name,
+                  reason: isInvalidStart
+                    ? presentStartFields.length
+                      ? "No supported start-date field parsed to a valid date."
+                      : "No supported start-date field was present."
+                    : presentEndFields.length
+                      ? "No supported end-date field parsed to a valid date."
+                      : "No supported end-date field was present.",
+                  candidateFields: candidateFields.length
+                    ? candidateFields
+                    : isInvalidStart ? startFields : endFields,
+                  rawDateFields: {
+                    start: rawFields(startFields),
+                    end: rawFields(endFields),
+                  },
+                  rawTimeFields: rawFields(timeFields),
+                });
+                return;
+              }
+              if (!isVisibleToStudentSafely(ev)) {
+                logLoadStep("event-excluded", {
+                  id: ev.id,
+                  title: ev.name,
+                  status: ev.status,
+                  category: ev.category,
+                  audience: ev.targetAudience,
+                  reasonExcluded: "audience",
+                });
+                return;
+              }
+              rawEventsMap.set(ev.id, ev);
+            } catch (error) {
+              logLoadStep("event-normalization-error", {
+                id: eventDoc.id,
+                message: error?.message || String(error),
+              });
+              console.error("[Student Events] Could not normalize an event:", error);
+            }
           });
+          eventsLoading = false;
+          eventLoadError = "";
+          window.clearTimeout(eventLoadTimer);
+          logLoadStep("events-first-render", { count: rawEventsMap.size });
+          syncAttendanceListeners();
+          startRegistrationListeners();
+          renderAll();
+        } catch (error) {
+          setEventLoadError("Events could not be displayed. Please retry.", error);
+        } finally {
+          if (request === loadRequestSequence && !eventsLoading) {
+            window.clearTimeout(eventLoadTimer);
+          }
+        }
+      }
+
+      async function startEventsLoad(user = auth?.currentUser) {
+        const request = ++loadRequestSequence;
+        eventsUnsubscribe?.();
+        eventsUnsubscribe = null;
+        clearRegistrationListeners();
+        eventsLoading = true;
+        eventLoadError = "";
+        rawEventsMap.clear();
+        renderAll();
+        startEventLoadTimeout(request);
+        logLoadStep("events-load-start", {
+          authenticated: Boolean(user),
+          rtdbConfigured: isRtdbConfigured,
+          databaseURL: rtdb?.app?.options?.databaseURL || "",
+        });
+
+        if (!user || !db) {
+          setEventLoadError(
+            !user ? "Sign in to load events." : "Event services are not configured. Please retry.",
+          );
           return;
         }
 
-        // Clean up previous query listener if any
-        if (activePublicEventsRef && activePublicEventsListener) {
-          off(activePublicEventsRef, "value", activePublicEventsListener);
-        }
-
-        activePublicEventsRef = ref(rtdb, "publicEvents");
-
-        activePublicEventsListener = (snap) => {
-          rawEventsMap.clear();
-          const data = snap.val() || {};
-          Object.entries(data).forEach(([id, evData]) => {
-            const status = String(evData?.status || "").toLowerCase();
-            if (evData && (status === "published" || status === "completed")) {
-              const ev = normalizeEvent(id, evData);
-              if (isEventVisibleToStudent(ev, studentProfile)) {
-                rawEventsMap.set(ev.id, ev);
-              }
+        let profileFetchFailed = false;
+        try {
+          logLoadStep("profile-fetch-start", { uid: user.uid });
+          const profile = await loadStudentProfile(user);
+          if (request !== loadRequestSequence) return;
+          Object.assign(studentProfile, getStudentAudienceProfile(profile));
+          renderStudentSidebar(profile);
+          logLoadStep("profile-fetch-success", { uid: user.uid, found: true });
+        } catch (error) {
+          profileFetchFailed = true;
+          logLoadStep("profile-fetch-failure", {
+            uid: user.uid,
+            code: error?.code || "",
+          });
+          setEventLoadError(
+            "Your student profile could not be loaded. Check your connection and retry.",
+            error,
+          );
+        } finally {
+          if (request === loadRequestSequence && !profileFetchFailed) {
+            try {
+              logLoadStep("events-query-start", {
+                collection: "events",
+                statusFilter: ["approved", "published", "completed", "rescheduled"],
+              });
+              const publicStatuses = STUDENT_EVENT_STATUSES.filter(
+                (status) => !["cancelled", "canceled"].includes(status),
+              );
+              const eventsQuery = query(
+                collection(db, "events"),
+                where("status", "in", publicStatuses),
+              );
+              eventsUnsubscribe = onSnapshot(
+                eventsQuery,
+                (snapshot) => {
+                  logLoadStep("events-query-success", { count: snapshot.size });
+                  applyEventSnapshot(snapshot, request);
+                },
+                (error) => {
+                  logLoadStep("events-query-failure", {
+                    code: error?.code || "",
+                  });
+                  setEventLoadError(
+                    error?.code === "permission-denied"
+                      ? "You do not have permission to read events. Sign in again or contact support."
+                      : "Events could not be loaded. Check your connection and retry.",
+                    error,
+                  );
+                },
+              );
+            } catch (error) {
+              logLoadStep("events-query-failure", {
+                code: error?.code || "",
+              });
+              setEventLoadError(
+                error?.code === "permission-denied"
+                  ? "You do not have permission to read events. Sign in again or contact support."
+                  : "Events could not be loaded. Check your connection and retry.",
+                error,
+              );
+            } finally {
+              logLoadStep("events-query-listener-attached");
             }
-          });
-
-          if (!snap.exists() && Array.isArray(window.RECOVIBE_EVENTS) && window.RECOVIBE_EVENTS.length > 0) {
-            window.RECOVIBE_EVENTS.forEach((item) => {
-              const ev = normalizeEvent(item.id || item.eventId, item);
-              if (
-                (ev.status === "published" || ev.status === "completed") &&
-                isEventVisibleToStudent(ev, studentProfile)
-              ) {
-                rawEventsMap.set(ev.id, ev);
-              }
-            });
           }
-
-          syncAttendanceListeners();
-          renderAll();
-          loadApprovedFirestoreEvents().then((firestoreEvents) => {
-            firestoreEvents.forEach((item) => {
-              const ev = normalizeEvent(item.id || item.eventId, item);
-              if ((ev.status === "published" || ev.status === "completed") && isEventVisibleToStudent(ev, studentProfile)) rawEventsMap.set(ev.id, ev);
-            });
-            renderAll();
-          });
-        };
-
-        onValue(activePublicEventsRef, activePublicEventsListener, (err) => {
-          console.warn("RTDB publicEvents error:", err);
-          useFallbackEvents();
-        });
+        }
       }
 
-      function useFallbackEvents() {
-        rawEventsMap.clear();
-        if (Array.isArray(window.RECOVIBE_EVENTS)) {
-          window.RECOVIBE_EVENTS.forEach((item) => {
-            const ev = normalizeEvent(item.id || item.eventId, item);
-            if (
-              (ev.status === "published" || ev.status === "completed") &&
-              isEventVisibleToStudent(ev, studentProfile)
-            ) {
-              rawEventsMap.set(ev.id, ev);
-            }
-          });
-        }
+      function loadEvents() {
         renderAll();
+      }
+
+      function clearRegistrationListeners() {
+        registrationUnsubscribes.forEach((unsubscribe) => unsubscribe());
+        registrationUnsubscribes.clear();
+        registrationStates.clear();
+        registeredEventIds.clear();
+      }
+
+      function startRegistrationListeners(retryEventId = "") {
+        const eventIds = retryEventId
+          ? [retryEventId]
+          : [...rawEventsMap.keys()];
+        const activeEventIds = new Set(rawEventsMap.keys());
+
+        registrationUnsubscribes.forEach((unsubscribe, eventId) => {
+          if (!activeEventIds.has(eventId)) {
+            unsubscribe();
+            registrationUnsubscribes.delete(eventId);
+            registrationStates.delete(eventId);
+            registeredEventIds.delete(eventId);
+          }
+        });
+
+        eventIds.forEach((eventId) => {
+          if (!currentUid || !db || !rawEventsMap.has(eventId)) {
+            registrationStates.set(eventId, "error");
+            return;
+          }
+          if (registrationUnsubscribes.has(eventId) && retryEventId !== eventId) return;
+          registrationUnsubscribes.get(eventId)?.();
+          registrationStates.set(eventId, "loading");
+          const listenerUid = currentUid;
+          const registrationRef = doc(db, "events", eventId, "registrations", listenerUid);
+          logLoadStep("registration-listener-start", {
+            uid: listenerUid,
+            eventId,
+            path: `events/${eventId}/registrations/${listenerUid}`,
+          });
+          try {
+            const unsubscribe = onSnapshot(
+              registrationRef,
+              (snapshot) => {
+                try {
+                  if (currentUid !== listenerUid || !rawEventsMap.has(eventId)) return;
+                  const registration = snapshot.exists() ? snapshot.data() : null;
+                  const isRegistered = registration?.status === "registered";
+                  registrationStates.set(
+                    eventId,
+                    isRegistered ? "registered" : "not-registered",
+                  );
+                  if (isRegistered) registeredEventIds.add(eventId);
+                  else registeredEventIds.delete(eventId);
+                  logLoadStep("registration-listener-success", {
+                    uid: listenerUid,
+                    eventId,
+                    exists: snapshot.exists(),
+                    status: registration?.status || "",
+                    snapshot: registration,
+                  });
+                  syncAttendanceListeners();
+                  renderAll();
+                } catch (error) {
+                  registrationStates.set(eventId, "error");
+                  console.error("[Student Events] Could not process registration snapshot:", error);
+                  renderAll();
+                } finally {
+                  logLoadStep("registration-listener-settled", { eventId });
+                }
+              },
+              (error) => {
+                if (currentUid !== listenerUid || !rawEventsMap.has(eventId)) return;
+                registrationStates.set(eventId, "error");
+                logLoadStep("registration-listener-failure", {
+                  eventId,
+                  code: error?.code || "",
+                });
+                console.error("[Student Events] Registration status is unavailable:", error);
+                renderAll();
+              },
+            );
+            registrationUnsubscribes.set(eventId, unsubscribe);
+          } catch (error) {
+            registrationStates.set(eventId, "error");
+            logLoadStep("registration-listener-failure", {
+              eventId,
+              code: error?.code || "",
+            });
+            console.error("[Student Events] Could not attach registration listener:", error);
+          }
+        });
       }
 
       /* ---------------------------------------------------------
@@ -4112,6 +4399,20 @@
         const list = document.getElementById("happeningNowList");
         const countBadge = document.getElementById("happeningNowCountBadge");
         if (!panel || !list) return;
+        if (eventsLoading) {
+          list.innerHTML = '<div style="padding:16px; color:var(--ink-500);">Loading live events...</div>';
+          return;
+        }
+        if (eventLoadError) {
+          list.innerHTML = `
+            <div class="empty-state-card" role="alert">
+              <p>${escapeHTML(eventLoadError)}</p>
+              <button type="button" class="empty-state-btn" data-retry-events>Retry</button>
+            </div>
+          `;
+          countBadge.hidden = true;
+          return;
+        }
 
         const now = getNow();
         const liveEvents = [];
@@ -4136,7 +4437,7 @@
 
           list.innerHTML = liveEvents
             .map((ev) => {
-              const isRegistered = registeredEventIds.has(ev.id);
+              const isRegistered = getRegistrationState(ev.id) === "registered";
               const attendance = attendanceMap.get(ev.id);
               const isCheckedIn = Boolean(attendance);
               const openSlots = hasOpenSlots(ev);
@@ -4164,17 +4465,9 @@
                   </span>
                 `;
               } else if (isRegistered) {
-                const qrLabel = openQrEventId === ev.id ? "Hide QR" : "Show my QR";
-                actionsHtml = `
-                  <button type="button" class="btn-live-qr" data-action="toggle-qr" data-event-id="${ev.id}">${qrLabel}</button>
-                  <button type="button" class="btn-live-cancel" data-action="cancel" data-event-id="${ev.id}">Cancel registration</button>
-                `;
+                actionsHtml = renderRegistrationButton(ev, openSlots, true);
               } else {
-                actionsHtml = `
-                  <button type="button" class="btn-live-reg" data-action="register" data-event-id="${ev.id}" ${!openSlots ? "disabled" : ""}>
-                    ${openSlots ? "Register" : "Full"}
-                  </button>
-                `;
+                actionsHtml = renderRegistrationButton(ev, openSlots);
               }
 
               // Details toggle
@@ -4307,6 +4600,23 @@
         const showMoreWrap = document.getElementById("allEventsShowMoreWrap");
         const showMoreBtn = document.getElementById("allEventsShowMoreBtn");
         if (!list || !countEl) return;
+        if (eventsLoading) {
+          list.innerHTML = '<div style="padding:16px; color:var(--ink-500);">Loading events...</div>';
+          countEl.textContent = "";
+          if (showMoreWrap) showMoreWrap.hidden = true;
+          return;
+        }
+        if (eventLoadError) {
+          list.innerHTML = `
+            <div class="empty-state-card" role="alert">
+              <p>${escapeHTML(eventLoadError)}</p>
+              <button type="button" class="empty-state-btn" data-retry-events>Retry</button>
+            </div>
+          `;
+          countEl.textContent = "";
+          if (showMoreWrap) showMoreWrap.hidden = true;
+          return;
+        }
 
         const now = getNow();
         const hasRange = Boolean(filterState.from && filterState.to);
@@ -4345,7 +4655,7 @@
           list.innerHTML = `
             <div class="empty-state-card">
               <p>No events match your filters.</p>
-              <button type="button" class="empty-state-btn" id="emptyClearAllFiltersBtn">Clear all filters</button>
+              <button type="button" class="empty-state-btn" id="emptyClearAllFiltersBtn">Clear filters</button>
             </div>
           `;
           const emptyBtn = document.getElementById("emptyClearAllFiltersBtn");
@@ -4358,7 +4668,8 @@
         list.innerHTML = eventsToDisplay
           .map((ev) => {
             const classification = getEventClassification(ev, now);
-            const isRegistered = registeredEventIds.has(ev.id);
+            const registrationState = getRegistrationState(ev.id);
+            const isRegistered = registrationState === "registered";
             const isEnded = classification === "ended";
             const isLive = classification === "live";
             const openSlots = hasOpenSlots(ev);
@@ -4419,18 +4730,14 @@
               actionBtn = '<span class="badge-cancelled" style="padding:6px 12px; font-size:12px;">Cancelled</span>';
             } else if (isEnded) {
               actionBtn = "";
-            } else if (isRegistered) {
-              actionBtn = `<button type="button" class="btn-live-cancel" data-action="cancel" data-event-id="${ev.id}">Cancel registration</button>`;
             } else {
-              actionBtn = `
-                <button type="button" class="btn-live-reg" data-action="register" data-event-id="${ev.id}" ${!openSlots ? "disabled" : ""}>
-                  ${openSlots ? "Register" : "Full"}
-                </button>
-              `;
+              actionBtn = renderRegistrationButton(ev, openSlots);
             }
 
             const weekday = formatWeekday(ev.startAt);
-            const timeRange = `${formatTime(ev.startAt)} – ${formatTime(ev.endAt)}`;
+            const timeRange = `${formatTime(ev.startAt)} – ${
+              ev.hasExplicitEndTime ? formatTime(ev.endAt) : "TBA"
+            }`;
 
             return `
               <article class="event-card" data-event-id="${ev.id}">
@@ -4489,36 +4796,73 @@
             announce("Event registration is disabled.");
             return;
           }
-        } catch (_) {}
+        } catch (error) {
+          console.warn("[Student Events] Could not read registration settings:", error);
+        }
 
         const ev = rawEventsMap.get(eventId);
         const evName = ev ? ev.name : "event";
 
-        // Optimistic update
+        if (registrationPendingIds.has(eventId)) return false;
+        if (!functions || !isFirebaseConfigured) {
+          showToast("Registration is unavailable. Please try again later.");
+          announce("Registration is unavailable.");
+          return false;
+        }
+
+        registrationPendingIds.add(eventId);
         registeredEventIds.add(eventId);
+        registrationStates.set(eventId, "registered");
         syncAttendanceListeners();
         renderAll();
 
-        announce(`Registered for ${evName}.`);
-        showToast(`Registered for ${evName}`);
-
-        if (functions && isFirebaseConfigured) {
-          try {
-            const callable = httpsCallable(functions, "registerForEvent");
-            await callable({ eventId });
-          } catch (err) {
-            console.warn("registerForEvent notice:", err);
-            // Revert optimistic update
-            registeredEventIds.delete(eventId);
-            syncAttendanceListeners();
-            renderAll();
-            const msg = err.message || "This event is full.";
-            showToast(msg);
-            announce(msg);
-            return false;
+        try {
+          const callable = httpsCallable(functions, "registerForEvent");
+          const result = await callable({ eventId });
+          if (ev && Number.isFinite(Number(result?.data?.registeredCount))) {
+            ev.registeredCount = Number(result.data.registeredCount);
           }
+          registeredEventIds.add(eventId);
+          registrationStates.set(eventId, "registered");
+          const responseMessage = result?.data?.alreadyRegistered
+            ? `You are already registered for ${evName}.`
+            : `Registered for ${evName}.`;
+          announce(responseMessage);
+          showToast(responseMessage);
+          return true;
+        } catch (error) {
+          registeredEventIds.delete(eventId);
+          registrationStates.set(eventId, "not-registered");
+          const code = String(error?.code || "").toLowerCase();
+          const message = String(error?.message || "").toLowerCase();
+          let userMessage = "Could not register for this event. Please try again.";
+          if (code.includes("permission-denied")) {
+            userMessage = "You do not have permission to register for this event.";
+          } else if (
+            code.includes("already-exists") ||
+            message.includes("already registered") ||
+            error?.details?.alreadyRegistered === true
+          ) {
+            registeredEventIds.add(eventId);
+            registrationStates.set(eventId, "registered");
+            userMessage = "You are already registered for this event.";
+          } else if (
+            code.includes("failed-precondition") ||
+            message.includes("event is full") ||
+            message.includes("full")
+          ) {
+            userMessage = "This event is full.";
+            if (ev && ev.capacity !== null) ev.registeredCount = ev.capacity;
+          }
+          console.error("[Student Events] Registration failed:", error);
+          showToast(userMessage);
+          announce(userMessage);
+          return false;
+        } finally {
+          registrationPendingIds.delete(eventId);
+          syncAttendanceListeners();
+          renderAll();
         }
-        return true;
       }
 
       async function handleCancelRegistration(eventId) {
@@ -4527,6 +4871,7 @@
 
         // Optimistic update
         registeredEventIds.delete(eventId);
+        registrationStates.set(eventId, "not-registered");
         if (openQrEventId === eventId) openQrEventId = null;
         syncAttendanceListeners();
         renderAll();
@@ -4537,11 +4882,15 @@
         if (functions && isFirebaseConfigured) {
           try {
             const callable = httpsCallable(functions, "cancelRegistration");
-            await callable({ eventId });
+            const result = await callable({ eventId });
+            if (ev && Number.isFinite(Number(result?.data?.registeredCount))) {
+              ev.registeredCount = Number(result.data.registeredCount);
+            }
           } catch (err) {
             console.warn("cancelRegistration notice:", err);
             // Revert optimistic update
             registeredEventIds.add(eventId);
+            registrationStates.set(eventId, "registered");
             syncAttendanceListeners();
             renderAll();
             const msg = err.message || "Could not cancel registration.";
@@ -4666,6 +5015,28 @@
         document.addEventListener("click", (e) => {
           const target = e.target;
 
+          const retryBtn = target.closest("button[data-retry-events]");
+          if (retryBtn) {
+            e.preventDefault();
+            if (auth?.currentUser) {
+              startEventsLoad(auth.currentUser);
+            } else {
+              setEventLoadError("Sign in to load events.");
+            }
+            return;
+          }
+
+          const retryRegistrationBtn = target.closest("button[data-action='retry-registration']");
+          if (retryRegistrationBtn) {
+            e.preventDefault();
+            const eventId = retryRegistrationBtn.dataset.eventId;
+            if (eventId) {
+              startRegistrationListeners(eventId);
+              renderAll();
+            }
+            return;
+          }
+
           // Register button
           const regBtn = target.closest("button[data-action='register']");
           if (regBtn) {
@@ -4727,9 +5098,12 @@
       --------------------------------------------------------- */
       function cleanup() {
         if (tickInterval) clearInterval(tickInterval);
-        if (activePublicEventsRef && activePublicEventsListener) {
-          off(activePublicEventsRef, "value", activePublicEventsListener);
-        }
+        window.clearTimeout(eventLoadTimer);
+        authUnsubscribe?.();
+        eventsUnsubscribe?.();
+        registrationUnsubscribes.forEach((unsubscribe) => unsubscribe());
+        registrationUnsubscribes.clear();
+        serverTimeUnsubscribe?.();
         for (const unsub of attendanceListeners.values()) {
           unsub();
         }
@@ -4741,7 +5115,6 @@
          INITIALIZATION
       --------------------------------------------------------- */
       (function init() {
-        hydrateUserProfile();
         initSidebarToggle();
         readUrlParams();
         initDateRangePicker();
@@ -4749,49 +5122,102 @@
 
         // Server time offset
         if (isRtdbConfigured) {
-          onValue(ref(rtdb, ".info/serverTimeOffset"), (snap) => {
-            serverTimeOffset = snap.val() || 0;
-            renderAll();
-          });
+          try {
+            serverTimeUnsubscribe = onValue(
+              ref(rtdb, ".info/serverTimeOffset"),
+              (snap) => {
+                try {
+                  serverTimeOffset = Number(snap.val() || 0);
+                  logLoadStep("server-time-offset-success", {
+                    offset: serverTimeOffset,
+                  });
+                  renderAll();
+                } catch (error) {
+                  console.error("[Student Events] Could not process server time offset:", error);
+                }
+              },
+              (error) => {
+                logLoadStep("server-time-offset-failure", {
+                  code: error?.code || "",
+                });
+                console.warn("[Student Events] Using local clock:", error);
+              },
+            );
+          } catch (error) {
+            console.warn("[Student Events] Could not attach server-time listener:", error);
+          }
         }
 
         // Auth state listener
         if (auth) {
-          onAuthStateChanged(auth, (user) => {
-            if (user) {
-              currentUid = user.uid;
-              getStudentQrToken();
-
-              // Listen to userRegistrations
-              if (isRtdbConfigured) {
-                const regRef = ref(rtdb, `userRegistrations/${currentUid}`);
-                onValue(regRef, (snap) => {
-                  registeredEventIds.clear();
-                  const data = snap.val() || {};
-                  Object.entries(data).forEach(([evId, reg]) => {
-                    if (reg && reg.status === "registered") {
-                      registeredEventIds.add(evId);
-                    }
+          const authRequest = ++loadRequestSequence;
+          eventsLoading = true;
+          eventLoadError = "";
+          renderAll();
+          startEventLoadTimeout(authRequest);
+          logLoadStep("auth-wait-start");
+          try {
+            authUnsubscribe = onAuthStateChanged(
+              auth,
+              (user) => {
+                try {
+                  logLoadStep("auth-wait-success", {
+                    authenticated: Boolean(user),
+                    uid: user?.uid || "",
+                    appName: auth.app.name,
+                    projectId: auth.app.options.projectId,
                   });
-                  syncAttendanceListeners();
-                  renderAll();
+                  if (currentUid && currentUid !== (user?.uid || null)) {
+                    clearRegistrationListeners();
+                    Object.keys(studentProfile).forEach((key) => {
+                      delete studentProfile[key];
+                    });
+                    renderStudentSidebar({});
+                  }
+                  currentUid = user?.uid || null;
+                  if (!user) {
+                    clearCachedStudentProfile();
+                    renderStudentSidebar({});
+                    setEventLoadError("Sign in to load events.");
+                    return;
+                  }
+                  getStudentQrToken().catch((error) => {
+                    console.error("[Student Events] QR token lookup failed:", error);
+                  });
+                  startEventsLoad(user);
+                } catch (error) {
+                  setEventLoadError("Could not initialize your events session. Please retry.", error);
+                } finally {
+                  logLoadStep("auth-wait-settled");
+                }
+              },
+              (error) => {
+                logLoadStep("auth-wait-failure", {
+                  code: error?.code || "",
                 });
-              }
-            } else {
-              currentUid = null;
-              registeredEventIds.clear();
-              renderAll();
-            }
-          });
+                setEventLoadError(
+                  error?.code === "auth/network-request-failed"
+                    ? "Could not verify sign-in. Check your connection and retry."
+                    : "Could not verify your sign-in. Please retry.",
+                  error,
+                );
+              },
+            );
+          } catch (error) {
+            setEventLoadError("Could not initialize sign-in. Please retry.", error);
+          }
+        } else {
+          setEventLoadError("Sign in to load events.");
         }
-
-        // Load initial events from RTDB
-        loadEvents();
 
         // 30-second interval automatic state transition
         tickInterval = setInterval(() => {
-          syncAttendanceListeners();
-          renderAll();
+          try {
+            syncAttendanceListeners();
+            renderAll();
+          } catch (error) {
+            console.error("[Student Events] Periodic event update failed:", error);
+          }
         }, 30000);
       })();
     </script>

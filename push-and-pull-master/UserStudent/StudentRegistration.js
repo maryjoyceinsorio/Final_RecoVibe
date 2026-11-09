@@ -2,6 +2,7 @@ import {
   createUserWithEmailAndPassword,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
+  arrayUnion,
   doc,
   getDocs,
   collection,
@@ -599,9 +600,15 @@ form.addEventListener("submit", async (event) => {
     // Row 3
     department,
     departmentCode,
+    departments: arrayUnion(department, departmentCode),
+    departmentCodes: arrayUnion(departmentCode),
     year,
     organization,
     courseOrganization: organization,
+    StudentOrgs: arrayUnion(organization),
+    studentOrgs: arrayUnion(organization),
+    organizations: arrayUnion(organization),
+    courseOrganizations: arrayUnion(organization),
     gender,
     preferences: defaultPreferences,
 

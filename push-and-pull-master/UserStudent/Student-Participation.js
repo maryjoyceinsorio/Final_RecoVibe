@@ -1,8 +1,9 @@
 import { auth, db, rtdb, functions, isFirebaseConfigured, isRtdbConfigured } from "./firebaseConfig.js";
 import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
-  collection,
+  collectionGroup,
   doc,
+  getDoc,
   onSnapshot as onFirestoreSnapshot,
   query as firestoreQuery,
   where,
@@ -13,11 +14,8 @@ import {
   off,
   query,
   orderByChild,
-  startAt,
-  endAt,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 import { httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
-import { isEventVisibleToStudent } from "./eventAudience.js";
 
 /* ---------------------------------------------------------
    COMMON SIDEBAR & USER PROFILE INITIALIZATION
@@ -49,6 +47,19 @@ function initCommon() {
 let currentUid = null;
 let serverTimeOffset = 0;
 let permanentQrToken = "";
+let authResolved = false;
+let profileResolved = false;
+let participationLoading = true;
+let firestoreEventsLoaded = false;
+let publicEventsLoaded = false;
+const pendingInitialRegistrationSnapshots = new Set();
+const registrationLogIds = new Set();
+const loggedUnmatchedRegistrationIds = new Set();
+const isDevelopment = () =>
+  globalThis.process?.env?.NODE_ENV
+    ? globalThis.process.env.NODE_ENV !== "production"
+    : import.meta.env?.DEV === true ||
+      ["localhost", "127.0.0.1", "::1"].includes(globalThis.location?.hostname);
 
 const studentProfile = {
   firstName: "Student",
@@ -63,12 +74,10 @@ const studentProfile = {
 
 const rawEventsMap = new Map(); // id -> normalized event
 const userRegistrationsMap = new Map(); // id -> { status, at }
-const localRegistrationsMap = new Map();
 const rtdbRegistrationsMap = new Map();
 const firestoreRegistrationsMap = new Map();
 const attendanceMap = new Map(); // id -> { scannedAt, scannedBy, walkIn }
 const attendanceListeners = new Map(); // id -> unsub
-const firestoreEventListeners = new Map(); // id -> unsub
 
 const filterState = {
   search: "",
@@ -88,8 +97,13 @@ const datePickerState = {
 let activePublicEventsRef = null;
 let activePublicEventsListener = null;
 let firestoreEventsUnsubscribe = null;
+let firestoreRegistrationGeneration = 0;
 let rtdbRegistrationsUnsubscribe = null;
+let serverTimeOffsetUnsubscribe = null;
+let authUnsubscribe = null;
+let statusRefreshInterval = null;
 let firestoreParticipationError = false;
+let firestoreParticipationErrorMessage = "";
 
 /* ---------------------------------------------------------
    TIME & DATE UTILITIES (Philippine Time Asia/Manila)
@@ -100,17 +114,71 @@ function getNow() {
 
 function toPhDateStr(timestamp) {
   const d = new Date(timestamp);
+  if (!Number.isFinite(d.getTime())) return "";
   return d.toLocaleDateString("en-CA", { timeZone: "Asia/Manila" });
 }
 
-function phDayStart(phDateStr) {
-  const [y, m, d] = phDateStr.split("-").map(Number);
-  return Date.UTC(y, m - 1, d, 0, 0, 0, 0) - 8 * 3600 * 1000;
-}
+function dateValueToMillis(value, timeValue = "", useEndOfDay = false) {
+  if (value == null || value === "") return 0;
+  if (typeof value === "number") return value;
+  if (value instanceof Date) return value.getTime();
+  if (typeof value?.toMillis === "function") return value.toMillis();
+  if (typeof value?.toDate === "function") return value.toDate().getTime();
+  if (Number.isFinite(value?.seconds)) return value.seconds * 1000;
+  if (Number.isFinite(value?._seconds)) return value._seconds * 1000;
 
-function phDayEnd(phDateStr) {
-  const [y, m, d] = phDateStr.split("-").map(Number);
-  return Date.UTC(y, m - 1, d, 23, 59, 59, 999) - 8 * 3600 * 1000;
+  const text = String(value).trim();
+  const dateMatch = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const localDateTimeMatch = text.match(
+    /^(\d{4})-(\d{2})-(\d{2})[T ](\d{1,2}):(\d{2})(?::(\d{2}))?$/,
+  );
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(text);
+  if (localDateTimeMatch) {
+    const [, year, month, day, hour, minute, second = "0"] = localDateTimeMatch;
+    return Date.UTC(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour) - 8,
+      Number(minute),
+      Number(second),
+    );
+  }
+  if (!dateMatch && hasTimezone) {
+    const parsed = Date.parse(text);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  if (!dateMatch) {
+    const parsed = Date.parse(text);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  const [, year, month, day] = dateMatch;
+  let hour = useEndOfDay ? 23 : 0;
+  let minute = useEndOfDay ? 59 : 0;
+  let second = useEndOfDay ? 59 : 0;
+  let millisecond = useEndOfDay ? 999 : 0;
+  const timeMatch = String(timeValue || "").trim().match(
+    /^(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?\s*(AM|PM)?$/i,
+  );
+  if (timeMatch) {
+    hour = Number(timeMatch[1]);
+    minute = Number(timeMatch[2] || 0);
+    second = Number(timeMatch[3] || 0);
+    const meridiem = String(timeMatch[4] || "").toUpperCase();
+    if (meridiem === "PM" && hour < 12) hour += 12;
+    if (meridiem === "AM" && hour === 12) hour = 0;
+    millisecond = 0;
+  }
+  return Date.UTC(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    hour - 8,
+    minute,
+    second,
+    millisecond,
+  );
 }
 
 function formatPhDatePretty(isoStr) {
@@ -122,7 +190,8 @@ function formatPhDatePretty(isoStr) {
 
 function formatTimeShort(ms) {
   if (!ms) return "";
-  const d = new Date(ms);
+  const d = new Date(dateValueToMillis(ms));
+  if (!Number.isFinite(d.getTime())) return "";
   return d.toLocaleTimeString("en-US", {
     timeZone: "Asia/Manila",
     hour: "numeric",
@@ -153,52 +222,77 @@ function announce(msg) {
 /* ---------------------------------------------------------
    USER PROFILE HYDRATION
 --------------------------------------------------------- */
-function hydrateUserProfile() {
-  const user =
-    JSON.parse(localStorage.getItem("recovibeCurrentUser") || "null") || {};
-  const storedFirstName = String(user.firstName || "").trim();
-  const storedFullName = String(user.name || user.fullName || "").trim();
+function readCachedProfile() {
+  try {
+    return JSON.parse(
+      localStorage.getItem("recovibeCurrentUser") ||
+      sessionStorage.getItem("recovibeCurrentUser") ||
+      "null",
+    ) || {};
+  } catch (error) {
+    console.warn("Could not read the cached student profile:", error);
+    return {};
+  }
+}
+
+function applyStudentProfile(profile, authUser = null) {
+  const storedFirstName = String(profile.firstName || "").trim();
+  const storedFullName = String(profile.fullName || profile.name || "").trim();
   const nameFromProfile = [
     storedFirstName,
-    user.middleName,
-    user.lastName,
+    profile.middleName,
+    profile.lastName,
   ]
     .map((part) => String(part || "").trim())
     .filter(Boolean)
     .join(" ");
-  const displayName = storedFullName || nameFromProfile || "Student";
-  const firstName =
-    storedFirstName ||
-    storedFullName.split(/\s+/).filter(Boolean)[0] ||
-    nameFromProfile.split(/\s+/).filter(Boolean)[0] ||
+  const displayName =
+    storedFullName ||
+    nameFromProfile ||
+    String(authUser?.displayName || "").trim() ||
     "Student";
+  const firstName =
+    storedFirstName || displayName.split(/\s+/).filter(Boolean)[0] || "Student";
 
   studentProfile.firstName = firstName;
-  studentProfile.middleName = String(user.middleName || "").trim();
-  studentProfile.lastName = String(user.lastName || "").trim();
+  studentProfile.middleName = String(profile.middleName || "").trim();
+  studentProfile.lastName = String(profile.lastName || "").trim();
   studentProfile.fullName = displayName;
   studentProfile.studentNo = String(
-    user.studentNumber || user.studentId || user.username || "2025-00790-BN-1",
+    profile.studentNumber ||
+    profile.studentId ||
+    profile.username ||
+    "2025-00790-BN-1",
   ).trim();
-  studentProfile.organization = String(user.organization || "").trim();
-  studentProfile.courseOrganization = String(user.courseOrganization || "").trim();
-  studentProfile.department = String(user.department || "").trim();
-  studentProfile.departmentCode = String(user.departmentCode || "").trim();
+  studentProfile.organization = String(
+    profile.organization ||
+    profile.courseOrganization ||
+    profile.courseOrg ||
+    profile.organizationCode ||
+    profile.organizationName ||
+    "",
+  ).trim();
+  studentProfile.courseOrganization = String(
+    profile.courseOrganization || profile.courseOrg || studentProfile.organization,
+  ).trim();
+  studentProfile.courseOrg = String(profile.courseOrg || studentProfile.organization).trim();
+  studentProfile.department = String(profile.department || profile.departmentCode || "").trim();
+  studentProfile.departmentCode = String(profile.departmentCode || profile.department || "").trim();
 
   const avatarFallback = [
-    user.username,
-    user.studentNumber,
-    user.studentId,
-    user.email,
+    profile.username,
+    profile.studentNumber,
+    profile.studentId,
+    profile.email,
+    authUser?.email,
   ]
-    .map((v) => String(v || "").trim())
+    .map((value) => String(value || "").trim())
     .find(Boolean) || "";
   const avatarLetter =
     Array.from(firstName || avatarFallback)[0]?.toLocaleUpperCase() || "S";
-  const organization = String(user.organization || "").trim();
   const role =
-    organization && organization.toLowerCase() !== "none"
-      ? organization
+    studentProfile.organization && studentProfile.organization.toLowerCase() !== "none"
+      ? studentProfile.organization
       : "Student";
 
   document.querySelectorAll(".user-name").forEach((el) => {
@@ -213,6 +307,32 @@ function hydrateUserProfile() {
   document.querySelectorAll("#userFirstName").forEach((el) => {
     el.textContent = firstName;
   });
+}
+
+async function hydrateUserProfile(authUser) {
+  const cachedProfile = readCachedProfile();
+  let profile = cachedProfile;
+  if (db && authUser?.uid) {
+    try {
+      const profileSnapshot = await getDoc(doc(db, "users", authUser.uid));
+      if (profileSnapshot.exists()) {
+        profile = { ...cachedProfile, ...profileSnapshot.data() };
+        try {
+          localStorage.setItem(
+            "recovibeCurrentUser",
+            JSON.stringify({ ...profile, uid: authUser.uid }),
+          );
+        } catch (error) {
+          console.warn("Could not cache the Firestore student profile:", error);
+        }
+      }
+    } catch (error) {
+      console.error("Could not load the Firestore student profile:", error);
+      profile = cachedProfile;
+    }
+  }
+  applyStudentProfile(profile, authUser);
+  profileResolved = true;
 }
 
 /* ---------------------------------------------------------
@@ -257,7 +377,7 @@ function syncUrlParams() {
     url.searchParams.delete("to");
   }
 
-  if (filterState.status && filterState.status !== "participating" && filterState.status !== "all") {
+  if (filterState.status && filterState.status !== "participating") {
     url.searchParams.set("status", filterState.status);
   } else {
     url.searchParams.delete("status");
@@ -270,41 +390,79 @@ function syncUrlParams() {
    DATA NORMALIZATION & STATUS RESOLUTION
 --------------------------------------------------------- */
 function normalizeEventData(id, raw) {
-  const toMillis = (value) => {
-    if (typeof value === "number") return value;
-    if (value?.toMillis) return value.toMillis();
-    if (value?.toDate) return value.toDate().getTime();
-    const parsed = Date.parse(value);
-    return Number.isFinite(parsed) ? parsed : 0;
-  };
   const rawDate =
     raw.eventDate ||
     raw.dateISO ||
+    raw.start_date ||
+    raw.startDate ||
     raw.date ||
     raw.dateStart ||
     raw.schedule?.date ||
     raw.schedule?.startDate ||
     "";
-  const dateISO = rawDate?.toDate
-    ? rawDate.toDate().toISOString().slice(0, 10)
-    : String(rawDate).slice(0, 10);
+  const rawDateText = String(rawDate || "");
+  const rawDateMillis = Date.parse(rawDateText);
+  const rawDateIsTimestamp =
+    rawDate instanceof Date ||
+    typeof rawDate?.toDate === "function" ||
+    typeof rawDate?.toMillis === "function" ||
+    Number.isFinite(rawDate?.seconds) ||
+    Number.isFinite(rawDate?._seconds);
+  const dateISO = rawDateIsTimestamp
+    ? toPhDateStr(dateValueToMillis(rawDate))
+    : /T.*(?:Z|[+-]\d{2}:?\d{2})$/i.test(rawDateText) && Number.isFinite(rawDateMillis)
+      ? toPhDateStr(rawDateMillis)
+      : rawDateText.slice(0, 10);
   const timeStr =
     raw.time ||
     [raw.timeStart || raw.startTime, raw.timeEnd || raw.endTime]
       .filter(Boolean)
       .join(" - ") ||
     "08:00 AM";
-  let startAt = toMillis(raw.startAt);
-  let endAt = toMillis(raw.endAt);
-
-  if (!startAt && dateISO) {
-    const [tPart, meridiem] = timeStr.split(/\s+/);
-    let [hh, mm] = (tPart || "08:00").split(":").map(Number);
-    if (meridiem === "PM" && hh < 12) hh += 12;
-    if (meridiem === "AM" && hh === 12) hh = 0;
-    const [y, m, d] = dateISO.split("-").map(Number);
-    startAt = Date.UTC(y, m - 1, d, hh - 8, mm || 0, 0, 0);
-    endAt = startAt + 2 * 3600 * 1000;
+  const startTime = raw.timeStart || raw.startTime || String(timeStr).split(/\s+-\s+/)[0];
+  const endTime = raw.timeEnd || raw.endTime || String(timeStr).split(/\s+-\s+/)[1] || "";
+  const startValue =
+    raw.startAt ||
+    raw.start_at ||
+    raw.startDateTime ||
+    raw.start_date_time ||
+    raw.schedule?.startAt ||
+    raw.schedule?.startDateTime ||
+    (/T.*(?:Z|[+-]\d{2}:?\d{2})$/i.test(rawDateText) ? rawDateText : dateISO);
+  const startAt = dateValueToMillis(startValue, startTime);
+  const rawEndDate =
+    raw.endDate ||
+    raw.end_date ||
+    raw.dateEnd ||
+    raw.date_end ||
+    raw.schedule?.endDate ||
+    raw.schedule?.end_date;
+  const rawEndDateIsTimestamp =
+    rawEndDate instanceof Date ||
+    typeof rawEndDate?.toDate === "function" ||
+    typeof rawEndDate?.toMillis === "function" ||
+    Number.isFinite(rawEndDate?.seconds) ||
+    Number.isFinite(rawEndDate?._seconds);
+  const endDateValue = rawEndDateIsTimestamp
+    ? toPhDateStr(dateValueToMillis(rawEndDate))
+    : rawEndDate || dateISO;
+  const explicitEndValue =
+    raw.endAt ||
+    raw.end_at ||
+    raw.endDateTime ||
+    raw.end_date_time ||
+    raw.schedule?.endAt ||
+    raw.schedule?.endDateTime;
+  let endAt = explicitEndValue
+    ? dateValueToMillis(explicitEndValue, endTime, !endTime)
+    : endDateValue
+      ? dateValueToMillis(endDateValue, endTime, !endTime)
+      : 0;
+  if (!endAt && startAt) {
+    endAt = endTime
+      ? dateValueToMillis(toPhDateStr(startAt), endTime)
+      : startAt + 2 * 3600 * 1000;
+    if (endAt <= startAt && endTime) endAt += 24 * 3600 * 1000;
   }
 
   const capacity = raw.capacity !== undefined ? raw.capacity : (raw.slotsOpen ?? 100);
@@ -327,50 +485,72 @@ function normalizeEventData(id, raw) {
     status: raw.status || "published",
     description: raw.description || "",
     organizerUid: raw.organizerUid || "",
-    organizerName: raw.organizerName || raw.organizer || "Event Organizer",
+    organizerName: raw.organizerName || raw.orgName || raw.org || raw.organizer || "Event Organizer",
     tag: raw.tag || "",
   };
 }
 
-function computeEventParticipationStatus(event) {
-  const eventId = String(event.id);
-  const userReg = userRegistrationsMap.get(eventId);
-  const att = attendanceMap.get(eventId);
+function getRegistrationStatus(registration = {}) {
+  return String(registration.status || registration.registrationStatus || "registered")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
+}
 
-  // 1. If attendance row exists with scannedAt, user attended / completed
-  if (att && att.scannedAt) {
-    return "completed";
+function isActiveRegistration(registration) {
+  return ["registered", "active", "confirmed"].includes(
+    getRegistrationStatus(registration),
+  );
+}
+
+function getParticipationStatus(registration, event, now) {
+  const eventId = String(event?.id || registration?.eventId || "unknown");
+  const eventStatus = String(event?.status || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
+  const registrationStatus = getRegistrationStatus(registration);
+  const attendance = attendanceMap.get(eventId) || {};
+  const attended =
+    Boolean(
+      attendance.scannedAt ||
+      attendance.checkedInAt ||
+      attendance.checkInAt ||
+      attendance.attended,
+    ) ||
+    Boolean(
+      registration.scannedAt ||
+      registration.checkedInAt ||
+      registration.checkInAt ||
+      registration.attended ||
+      ["attended", "completed", "checkedin"].includes(registrationStatus),
+    );
+  let status;
+  if (
+    ["cancelled", "canceled"].includes(eventStatus) ||
+    ["cancelled", "canceled"].includes(registrationStatus)
+  ) {
+    status = "cancelled";
+  } else if (!event?.endAt || now < event.endAt) {
+    status = "upcoming";
+  } else {
+    status = attended ? "completed" : "absent";
   }
 
-  // 2. If event is cancelled or user cancelled registration
-  const evStatus = String(event.status || "").toLowerCase();
-  const isEvCancelled = evStatus === "cancelled" || evStatus === "canceled";
-  if ((userReg && userReg.status === "cancelled") || isEvCancelled) {
-    return "cancelled";
+  const logKey = `${eventId}:${registration.uid || currentUid || "student"}`;
+  if (isDevelopment() && !registrationLogIds.has(logKey)) {
+    registrationLogIds.add(logKey);
+    console.log({
+      eventId,
+      title: event?.title || registration.title || "Unmatched registration",
+      status,
+    });
   }
-
-  // 3. If event was rescheduled
-  const isRescheduled = evStatus === "rescheduled" || Boolean(event.rescheduledFrom || event.rescheduledDate);
-  if (isRescheduled) {
-    return "rescheduled";
-  }
-
-  // 4. If event has ended and user was not scanned in -> absent
-  const now = getNow();
-  const hasEnded = event.endAt ? event.endAt < now : (event.startAt ? event.startAt + 3 * 3600 * 1000 < now : false);
-  if (hasEnded) {
-    return "absent";
-  }
-
-  // 5. Otherwise, user is actively participating
-  return "participating";
+  return status;
 }
 
 function refreshUserRegistrations() {
   userRegistrationsMap.clear();
-  for (const [eventId, registration] of localRegistrationsMap) {
-    userRegistrationsMap.set(eventId, registration);
-  }
   for (const [eventId, registration] of rtdbRegistrationsMap) {
     userRegistrationsMap.set(eventId, registration);
   }
@@ -378,6 +558,8 @@ function refreshUserRegistrations() {
     userRegistrationsMap.set(eventId, registration);
   }
   syncAttendanceListeners();
+  reportUnmatchedRegistrations();
+  updateParticipationLoadingState();
   render();
 }
 
@@ -386,74 +568,131 @@ function stopFirestoreRegistrationListeners() {
     firestoreEventsUnsubscribe();
     firestoreEventsUnsubscribe = null;
   }
-  firestoreEventListeners.forEach((unsubscribe) => unsubscribe());
-  firestoreEventListeners.clear();
+  firestoreRegistrationGeneration += 1;
   firestoreRegistrationsMap.clear();
+  pendingInitialRegistrationSnapshots.clear();
+  firestoreEventsLoaded = false;
+}
+
+function updateParticipationLoadingState() {
+  participationLoading =
+    !authResolved ||
+    !profileResolved ||
+    (!firestoreEventsLoaded && Boolean(db && isFirebaseConfigured)) ||
+    pendingInitialRegistrationSnapshots.size > 0;
+}
+
+function maybeFinishInitialLoad() {
+  updateParticipationLoadingState();
+  render();
+}
+
+function reportUnmatchedRegistrations() {
+  if (!firestoreEventsLoaded || !publicEventsLoaded || pendingInitialRegistrationSnapshots.size) return;
+  for (const [eventId, registration] of userRegistrationsMap) {
+    if (rawEventsMap.has(eventId) || loggedUnmatchedRegistrationIds.has(eventId)) continue;
+    loggedUnmatchedRegistrationIds.add(eventId);
+    console.warn(
+      `[My Participation] Registration could not be joined to an event document: ${eventId}`,
+      registration,
+    );
+  }
 }
 
 function listenForFirestoreRegistrations(uid) {
   stopFirestoreRegistrationListeners();
-  if (!db || !isFirebaseConfigured || !uid) return;
+  if (!db || !isFirebaseConfigured || !uid) {
+    firestoreEventsLoaded = true;
+    updateParticipationLoadingState();
+    return;
+  }
 
+  const generation = firestoreRegistrationGeneration;
   firestoreEventsUnsubscribe = onFirestoreSnapshot(
     firestoreQuery(
-      collection(db, "events"),
-      where("status", "in", [
-        "approved", "Approved", "APPROVED",
-        "published", "Published", "PUBLISHED",
-        "completed", "Completed", "COMPLETED",
-        "rescheduled", "Rescheduled", "RESCHEDULED",
-      ]),
+      collectionGroup(db, "registrations"),
+      where("uid", "==", uid),
     ),
-    (snapshot) => {
-      const eventIds = new Set();
+    async (snapshot) => {
+      if (generation !== firestoreRegistrationGeneration) return;
       firestoreParticipationError = false;
+      firestoreParticipationErrorMessage = "";
+      firestoreRegistrationsMap.clear();
+      const eventSnapshots = [];
+      pendingInitialRegistrationSnapshots.clear();
       snapshot.forEach((eventSnapshot) => {
-        const eventId = eventSnapshot.id;
-        const eventData = eventSnapshot.data();
-        rawEventsMap.set(eventId, normalizeEventData(eventId, eventData));
-        eventIds.add(eventId);
-
-        if (!firestoreEventListeners.has(eventId)) {
-          const unsubscribe = onFirestoreSnapshot(
-            doc(db, "events", eventId, "registrations", uid),
-            (registrationSnapshot) => {
-              firestoreParticipationError = false;
-              if (!registrationSnapshot.exists()) {
-                firestoreRegistrationsMap.delete(eventId);
-              } else {
-                const registration = registrationSnapshot.data();
-                firestoreRegistrationsMap.set(eventId, {
-                  ...registration,
-                  status: registration.status || "registered",
-                  at: registration.registeredAt || registration.at || 0,
-                });
-              }
-              refreshUserRegistrations();
-            },
-            (error) => {
-              console.error(`Could not load registration for event ${eventId}:`, error);
-              firestoreParticipationError = true;
-              render();
-            },
+        const registration = eventSnapshot.data();
+        const eventRef = eventSnapshot.ref.parent.parent;
+        if (!eventRef) {
+          console.warn(
+            `[My Participation] Could not resolve parent event for registration ${eventSnapshot.ref.path}.`,
           );
-          firestoreEventListeners.set(eventId, unsubscribe);
+          return;
+        }
+        const eventId = eventRef.id;
+        firestoreRegistrationsMap.set(eventId, {
+          ...registration,
+          eventId,
+          uid: registration.uid || uid,
+          status: registration.status || "registered",
+          at: registration.registeredAt || registration.at || 0,
+        });
+        if (!rawEventsMap.has(eventId)) {
+          pendingInitialRegistrationSnapshots.add(eventId);
+          eventSnapshots.push({ eventId, eventRef });
         }
       });
 
-      firestoreEventListeners.forEach((unsubscribe, eventId) => {
-        if (!eventIds.has(eventId)) {
-          unsubscribe();
-          firestoreEventListeners.delete(eventId);
-          firestoreRegistrationsMap.delete(eventId);
-          rawEventsMap.delete(eventId);
+      firestoreEventsLoaded = true;
+      updateParticipationLoadingState();
+      refreshUserRegistrations();
+
+      const eventReadResults = await Promise.allSettled(
+        eventSnapshots.map(async ({ eventId, eventRef }) => {
+          const eventSnapshot = await getDoc(eventRef);
+          if (!eventSnapshot.exists()) {
+            throw new Error(`Event document ${eventId} no longer exists.`);
+          }
+          rawEventsMap.set(
+            eventId,
+            normalizeEventData(eventId, eventSnapshot.data()),
+          );
+          pendingInitialRegistrationSnapshots.delete(eventId);
+        }),
+      );
+      if (generation !== firestoreRegistrationGeneration) return;
+      eventReadResults.forEach((result, index) => {
+        if (result.status === "rejected") {
+          const { eventId } = eventSnapshots[index];
+          pendingInitialRegistrationSnapshots.delete(eventId);
+          if (result.reason?.code === "permission-denied") {
+            console.info(
+              `[My Participation] Skipping event ${eventId}; student event-read rules exclude it.`,
+            );
+          } else {
+            firestoreParticipationError = true;
+            firestoreParticipationErrorMessage =
+              "Could not load one or more events linked to your registrations. Retry the request.";
+            console.error(
+              `Could not load event ${eventId} for the student's registration:`,
+              result.reason,
+            );
+          }
         }
       });
+      updateParticipationLoadingState();
       refreshUserRegistrations();
     },
     (error) => {
-      console.error("Could not load Firestore events for participation:", error);
+      console.error("Could not load the student's Firestore registrations:", error);
       firestoreParticipationError = true;
+      firestoreParticipationErrorMessage =
+        error?.code === "permission-denied"
+          ? "Firestore denied access to your registration records. Ask an administrator to deploy the student registration rules."
+          : "Could not load your registrations. Check your connection and retry.";
+      firestoreEventsLoaded = true;
+      pendingInitialRegistrationSnapshots.clear();
+      updateParticipationLoadingState();
       render();
     },
   );
@@ -494,6 +733,12 @@ function syncAttendanceListeners() {
   });
 }
 
+function stopAttendanceListeners() {
+  attendanceListeners.forEach((unsubscribe) => unsubscribe());
+  attendanceListeners.clear();
+  attendanceMap.clear();
+}
+
 /* ---------------------------------------------------------
    LOAD EVENTS & REGISTRATIONS
 --------------------------------------------------------- */
@@ -519,56 +764,46 @@ function loadParticipationData() {
     });
   }
 
-  // Offline fallback from localStorage
-  try {
-    const saved = JSON.parse(localStorage.getItem("recovibeParticipations") || "[]");
-    if (Array.isArray(saved)) {
-      saved.forEach((id) => {
-        if (!localRegistrationsMap.has(String(id))) {
-          localRegistrationsMap.set(String(id), { status: "registered", at: Date.now() });
-        }
-      });
-    }
-  } catch (err) {
-    console.warn("Local participations read notice:", err);
-  }
   refreshUserRegistrations();
 
   // RTDB Public Events Query
   if (isRtdbConfigured) {
-    if (activePublicEventsRef && activePublicEventsListener) {
-      off(activePublicEventsRef, "value", activePublicEventsListener);
+    if (!activePublicEventsRef || !activePublicEventsListener) {
+      const eventsRoot = ref(rtdb, "publicEvents");
+      const q = query(eventsRoot, orderByChild("startAt"));
+
+      activePublicEventsRef = q;
+      activePublicEventsListener = onValue(
+        q,
+        (snapshot) => {
+          if (snapshot.exists()) {
+            snapshot.forEach((child) => {
+              try {
+                const ev = normalizeEventData(child.key, child.val());
+                rawEventsMap.set(ev.id, ev);
+              } catch (error) {
+                console.warn(`[My Participation] Skipping invalid public event ${child.key}:`, error);
+              }
+            });
+          }
+          firestoreParticipationError = false;
+          firestoreParticipationErrorMessage = "";
+          publicEventsLoaded = true;
+          reportUnmatchedRegistrations();
+          render();
+        },
+        (error) => {
+          console.error("Could not load public events for participation:", error);
+          firestoreParticipationError = true;
+          publicEventsLoaded = true;
+          reportUnmatchedRegistrations();
+          render();
+        },
+      );
     }
-
-    const eventsRoot = ref(rtdb, "publicEvents");
-    let q;
-
-    if (filterState.from && filterState.to) {
-      const startMs = phDayStart(filterState.from);
-      const endMs = phDayEnd(filterState.to);
-      q = query(eventsRoot, orderByChild("startAt"), startAt(startMs), endAt(endMs));
-    } else {
-      q = query(eventsRoot, orderByChild("startAt"));
-    }
-
-    activePublicEventsRef = q;
-    activePublicEventsListener = onValue(
-      q,
-      (snapshot) => {
-        if (snapshot.exists()) {
-          snapshot.forEach((child) => {
-            const ev = normalizeEventData(child.key, child.val());
-            rawEventsMap.set(ev.id, ev);
-          });
-        }
-        render();
-      },
-      (error) => {
-        console.warn("Public events fetch notice:", error);
-        render();
-      },
-    );
   } else {
+    publicEventsLoaded = true;
+    reportUnmatchedRegistrations();
     render();
   }
 }
@@ -577,129 +812,130 @@ function loadParticipationData() {
    SUMMARY METRICS & FILTERED RENDERING
 --------------------------------------------------------- */
 function render() {
-  const allEvents = Array.from(rawEventsMap.values());
-  const registeredIds = new Set(userRegistrationsMap.keys());
+  const listEl = document.getElementById("participationList");
+  const countEl = document.getElementById("participationCount");
+  if (!listEl) return;
 
-  // Find all events associated with this user
-  const userEvents = allEvents.filter((ev) => {
-    if (!registeredIds.has(ev.id)) return false;
-    const registration = userRegistrationsMap.get(ev.id);
-    const registrationStatus = String(registration?.status || "")
-      .trim()
-      .toLowerCase()
-      .replace(/[\s_-]+/g, "");
-    const hasApprovedOrAttendedParticipation =
-      ["approved", "attended", "completed", "checkedin"].includes(registrationStatus) ||
-      Boolean(attendanceMap.get(ev.id)?.scannedAt);
-    return (
-      hasApprovedOrAttendedParticipation ||
-      isEventVisibleToStudent(ev, studentProfile)
-    );
-  });
+  if (participationLoading) {
+    if (countEl) countEl.textContent = "";
+    listEl.innerHTML = `
+      <div class="empty-participation" role="status">
+        <p style="margin:0 0 6px; font-weight:600; color:var(--ink-700);">Loading participation...</p>
+        <span style="font-size:12.5px; color:var(--ink-500);">Checking your account and registrations.</span>
+      </div>`;
+    return;
+  }
 
-  // Range-matching events for summary metrics
-  const rangeMatchedEvents = userEvents.filter((ev) => {
-    if (!filterState.from || !filterState.to) return true;
-    const startDay = toPhDateStr(ev.startAt || getNow());
-    return startDay >= filterState.from && startDay <= filterState.to;
-  });
+  if (!currentUid) {
+    if (countEl) countEl.textContent = "";
+    listEl.innerHTML = `
+      <div class="empty-participation" role="alert">
+        <p style="margin:0 0 6px; font-weight:600; color:var(--ink-700);">Sign in to view your participation.</p>
+        <a href="StudentLogin.html">Go to sign in</a>
+      </div>`;
+    return;
+  }
 
-  // Calculate Metrics
-  let inRangeCount = 0;
-  let attendedCount = 0;
+  const participationRows = [...userRegistrationsMap.entries()]
+    .map(([eventId, registration]) => {
+      const event = rawEventsMap.get(eventId);
+      if (!event) return null;
+      return {
+        event,
+        registration,
+        status: getParticipationStatus(registration, event, getNow()),
+      };
+    })
+    .filter(Boolean);
+
+  let completedCount = 0;
   let absentCount = 0;
   let upcomingCount = 0;
+  for (const row of participationRows) {
+    if (row.status === "completed") completedCount++;
+    else if (row.status === "absent") absentCount++;
+    else if (row.status === "upcoming") upcomingCount++;
+  }
+  const attendanceDenominator = completedCount + absentCount;
+  const attendanceRate = attendanceDenominator
+    ? `${Math.round((completedCount / attendanceDenominator) * 100)}%`
+    : "—";
 
-  rangeMatchedEvents.forEach((ev) => {
-    inRangeCount++;
-    const st = computeEventParticipationStatus(ev);
-    if (st === "attended" || st === "completed") attendedCount++;
-    else if (st === "absent") absentCount++;
-    else if (st === "registered" || st === "participating") upcomingCount++;
-  });
-
-  const totalFinished = attendedCount + absentCount;
-  const attendanceRate = totalFinished > 0
-    ? `${Math.round((attendedCount / totalFinished) * 100)}%`
-    : (attendedCount > 0 ? "100%" : "0%");
-
-  // Update Metrics DOM
-  const attendedEl = document.getElementById("metricAttended") || document.getElementById("metricCompleted");
+  const completedEl =
+    document.getElementById("metricAttended") ||
+    document.getElementById("metricCompleted");
+  if (completedEl) completedEl.textContent = String(completedCount);
   const absentEl = document.getElementById("metricAbsent");
   const upcomingEl = document.getElementById("metricUpcoming");
   const rateEl = document.getElementById("metricRate");
-
-  if (attendedEl) attendedEl.textContent = attendedCount;
-  if (absentEl) absentEl.textContent = absentCount;
-  if (upcomingEl) upcomingEl.textContent = upcomingCount;
+  if (absentEl) absentEl.textContent = String(absentCount);
+  if (upcomingEl) upcomingEl.textContent = String(upcomingCount);
   if (rateEl) rateEl.textContent = attendanceRate;
 
-  // Filter list by Search, Status, and Date Range
   const queryText = filterState.search.trim().toLowerCase();
-
-  const visibleEvents = userEvents.filter((ev) => {
-    // 1. Date Range
+  const visibleRows = participationRows.filter(({ event, status }) => {
     if (filterState.from && filterState.to) {
-      const startDay = toPhDateStr(ev.startAt || getNow());
-      if (startDay < filterState.from || startDay > filterState.to) return false;
+      const startDay = toPhDateStr(event.startAt);
+      if (!startDay || startDay < filterState.from || startDay > filterState.to) return false;
     }
 
-    // 2. Status Filter
-    const st = computeEventParticipationStatus(ev);
     if (filterState.status !== "all") {
-      if (filterState.status === "participating" || filterState.status === "registered") {
-        if (st !== "participating" && st !== "registered") return false;
-      } else if (filterState.status === "completed" || filterState.status === "attended") {
-        if (st !== "completed" && st !== "attended") return false;
-      } else if (st !== filterState.status) {
+      const expectedStatus =
+        filterState.status === "participating" || filterState.status === "registered"
+          ? "upcoming"
+          : filterState.status === "attended"
+            ? "completed"
+            : filterState.status;
+      if (expectedStatus === "rescheduled") {
+        if (!String(event.status || "").toLowerCase().includes("resched")) return false;
+      } else if (status !== expectedStatus) {
         return false;
       }
     }
 
-    // 3. Search query
     if (queryText) {
-      const searchable = `${ev.title} ${ev.location} ${ev.source} ${ev.category} ${ev.room}`.toLowerCase();
+      const searchable = [
+        event.title,
+        event.organizerName,
+        event.location,
+        event.source,
+        event.category,
+        event.room,
+      ]
+        .join(" ")
+        .toLowerCase();
       if (!searchable.includes(queryText)) return false;
     }
-
     return true;
   });
-
-  // Sort newest first
-  visibleEvents.sort((a, b) => (b.startAt || 0) - (a.startAt || 0));
-
-  // Render list
-  const listEl = document.getElementById("participationList");
-  const countEl = document.getElementById("participationCount");
+  visibleRows.sort((a, b) => (b.event.startAt || 0) - (a.event.startAt || 0));
 
   if (countEl) {
-    countEl.textContent = `${visibleEvents.length} event${visibleEvents.length === 1 ? "" : "s"}`;
+    countEl.textContent = `${visibleRows.length} event${visibleRows.length === 1 ? "" : "s"}`;
   }
 
-  if (!listEl) return;
-
-  if (visibleEvents.length === 0) {
+  if (visibleRows.length === 0) {
     if (firestoreParticipationError) {
       listEl.innerHTML = `
-        <div class="empty-participation">
+        <div class="empty-participation" role="alert">
           <p style="margin:0 0 6px; font-weight:600; color:var(--ink-700);">Could not sync participation records.</p>
-          <span style="font-size:12.5px; color:var(--ink-500);">Check your connection and reload this page. If the problem continues, contact support.</span>
+          <span style="font-size:12.5px; color:var(--ink-500);">${escapeHTML(firestoreParticipationErrorMessage || "Check your connection and try again.")}</span>
+          <button type="button" class="btn-view-details" data-action="retry-participation">Retry</button>
         </div>`;
-      renderActiveChips(userEvents.length, visibleEvents.length);
+      renderActiveChips(participationRows.length, visibleRows.length);
       return;
     }
     listEl.innerHTML = `
       <div class="empty-participation">
-        <p style="margin:0 0 6px; font-weight:600; color:var(--ink-700);">No participation records match your filters.</p>
-        <span style="font-size:12.5px; color:var(--ink-500);">Try selecting "All time" or adjusting your search.</span>
+        <p style="margin:0 0 6px; font-weight:600; color:var(--ink-700);">No events match your filters.</p>
+        <button type="button" class="btn-view-details" data-action="clear-participation-filters">Clear filters</button>
       </div>`;
-    renderActiveChips(userEvents.length, visibleEvents.length);
+    renderActiveChips(participationRows.length, visibleRows.length);
     return;
   }
 
-  listEl.innerHTML = visibleEvents
-    .map((event) => {
-      const status = computeEventParticipationStatus(event);
+  listEl.innerHTML = visibleRows
+    .map(({ event, registration, status }) => {
       const att = attendanceMap.get(event.id);
 
       const startDateObj = new Date(event.startAt || getNow());
@@ -712,21 +948,18 @@ function render() {
       const timeDisplay = startTimeStr && endTimeStr ? `${startTimeStr} - ${endTimeStr}` : (startTimeStr || "TBA");
 
       let statusBadgeHtml = "";
-      if (status === "attended" || status === "completed") {
+      if (status === "completed") {
         const timeScanned = att?.scannedAt ? formatTimeShort(att.scannedAt) : "";
         statusBadgeHtml = `
           <span class="attendance-tag is-checked-in">
-            <svg viewBox="0 0 16 16" fill="currentColor" width="12" height="12"><path d="M13.78 4.22a.75.75 0 010 1.06l-7.25 7.25a.75.75 0 01-1.06 0L2.22 9.28a.75.75 0 011.06-1.06L6 10.94l6.72-6.72a.75.75 0 011.06 0z"/></svg>
-            Checked in ${timeScanned}
+            Completed${timeScanned ? ` · checked in ${escapeHTML(timeScanned)}` : ""}
           </span>`;
       } else if (status === "absent") {
         statusBadgeHtml = `<span class="attendance-tag is-absent">Absent</span>`;
-      } else if (status === "rescheduled") {
-        statusBadgeHtml = `<span class="attendance-tag is-rescheduled">Rescheduled</span>`;
       } else if (status === "cancelled") {
         statusBadgeHtml = `<span class="attendance-tag is-cancelled">Cancelled</span>`;
       } else {
-        statusBadgeHtml = `<span class="attendance-tag is-registered">Participating</span>`;
+        statusBadgeHtml = `<span class="attendance-tag is-registered">Upcoming</span>`;
       }
 
       return `
@@ -738,7 +971,7 @@ function render() {
           </div>
           <div class="participation-body">
             <h3 class="participation-title">${escapeHTML(event.title)}</h3>
-            <p class="participation-source">${escapeHTML(event.source)}</p>
+            <p class="participation-source">${escapeHTML(event.organizerName || "Event Organizer")}</p>
             <div class="participation-meta">
               <span>
                 <svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.4"/><path d="M10 6v4l2.5 2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
@@ -753,15 +986,19 @@ function render() {
           </div>
           <div class="participation-action">
             ${statusBadgeHtml}
-            <button type="button" class="btn-show-qr" data-qr-event-title="${escapeHTML(event.title)}">
-              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" width="14" height="14" aria-hidden="true">
-                <rect x="3" y="3" width="5" height="5" rx="1"/>
-                <rect x="12" y="3" width="5" height="5" rx="1"/>
-                <rect x="3" y="12" width="5" height="5" rx="1"/>
-                <path d="M12 12h2v2h-2zM15 15h2v2h-2zM15 12h2v1h-2zM12 15h1v2h-1z"/>
-              </svg>
-              Show QR
-            </button>
+            ${
+              status === "upcoming" && isActiveRegistration(registration)
+                ? `<button type="button" class="btn-show-qr" data-qr-event-title="${escapeHTML(event.title)}">
+                    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" width="14" height="14" aria-hidden="true">
+                      <rect x="3" y="3" width="5" height="5" rx="1"/>
+                      <rect x="12" y="3" width="5" height="5" rx="1"/>
+                      <rect x="3" y="12" width="5" height="5" rx="1"/>
+                      <path d="M12 12h2v2h-2zM15 15h2v2h-2zM15 12h2v1h-2zM12 15h1v2h-1z"/>
+                    </svg>
+                    Show QR
+                  </button>`
+                : ""
+            }
             <button type="button" class="btn-view-details" data-action="details" data-event-id="${escapeHTML(event.id)}">
               View Details
             </button>
@@ -770,7 +1007,7 @@ function render() {
     })
     .join("");
 
-  renderActiveChips(userEvents.length, visibleEvents.length);
+  renderActiveChips(participationRows.length, visibleRows.length);
 }
 
 /* ---------------------------------------------------------
@@ -810,7 +1047,7 @@ function renderActiveChips(totalEvents, visibleCount) {
       key: "status",
       label: `Status: ${statusLabels[filterState.status] || filterState.status}`,
       onRemove: () => {
-        filterState.status = "participating";
+        filterState.status = "all";
         updateStatusButtonLabel();
         syncUrlParams();
         render();
@@ -864,7 +1101,7 @@ function renderActiveChips(totalEvents, visibleCount) {
     if (clearBtn) {
       clearBtn.onclick = () => {
         filterState.search = "";
-        filterState.status = "participating";
+        filterState.status = "all";
         filterState.from = "";
         filterState.to = "";
         filterState.quickPreset = "all";
@@ -889,7 +1126,7 @@ function updateStatusButtonLabel() {
   const btn = document.getElementById("statusFilterBtn");
   if (!btn) return;
   const statusLabels = {
-    all: "Participating",
+    all: "All statuses",
     participating: "Participating",
     registered: "Participating",
     completed: "Completed",
@@ -904,7 +1141,9 @@ function updateStatusButtonLabel() {
   if (menu) {
     menu.querySelectorAll(".filter-option").forEach((opt) => {
       const val = opt.dataset.value;
-      const isActive = val === filterState.status || (val === "participating" && (filterState.status === "all" || filterState.status === "registered"));
+      const isActive =
+        val === filterState.status ||
+        (val === "participating" && filterState.status === "registered");
       opt.classList.toggle("active", isActive);
     });
   }
@@ -1339,6 +1578,16 @@ function onDateInputChanged() {
    FILTER DROPDOWNS & SEARCH BINDING
 --------------------------------------------------------- */
 function bindFilterControls() {
+  const allStatusMenu = document.getElementById("statusFilterMenu");
+  if (allStatusMenu && !allStatusMenu.querySelector("[data-value='all']")) {
+    const allOption = document.createElement("button");
+    allOption.type = "button";
+    allOption.className = "filter-option";
+    allOption.dataset.value = "all";
+    allOption.textContent = "All statuses";
+    allStatusMenu.prepend(allOption);
+  }
+
   // Search input
   const searchInput = document.getElementById("participationSearch");
   if (searchInput) {
@@ -1388,6 +1637,38 @@ function bindFilterControls() {
   const listEl = document.getElementById("participationList");
   if (listEl) {
     listEl.addEventListener("click", (e) => {
+      const retryButton = e.target.closest("[data-action='retry-participation']");
+      if (retryButton) {
+        firestoreParticipationError = false;
+        participationLoading = true;
+        if (activePublicEventsRef && activePublicEventsListener) {
+          off(activePublicEventsRef, "value", activePublicEventsListener);
+          activePublicEventsRef = null;
+          activePublicEventsListener = null;
+        }
+        publicEventsLoaded = !isRtdbConfigured;
+        listenForFirestoreRegistrations(currentUid);
+        loadParticipationData();
+        render();
+        return;
+      }
+
+      const clearButton = e.target.closest("[data-action='clear-participation-filters']");
+      if (clearButton) {
+        filterState.search = "";
+        filterState.status = "all";
+        filterState.from = "";
+        filterState.to = "";
+        filterState.quickPreset = "all";
+        const searchInput = document.getElementById("participationSearch");
+        if (searchInput) searchInput.value = "";
+        updateStatusButtonLabel();
+        updateDateRangeButtonLabel();
+        syncUrlParams();
+        render();
+        return;
+      }
+
       const qrBtn = e.target.closest(".btn-show-qr");
       if (qrBtn) {
         const title = qrBtn.dataset.qrEventTitle || "";
@@ -1856,8 +2137,38 @@ function setupModalEventListeners() {
 /* ---------------------------------------------------------
    INIT
 --------------------------------------------------------- */
+function cleanupParticipationListeners() {
+  if (authUnsubscribe) {
+    authUnsubscribe();
+    authUnsubscribe = null;
+  }
+  if (rtdbRegistrationsUnsubscribe) {
+    rtdbRegistrationsUnsubscribe();
+    rtdbRegistrationsUnsubscribe = null;
+  }
+  if (activePublicEventsRef && activePublicEventsListener) {
+    off(activePublicEventsRef, "value", activePublicEventsListener);
+    activePublicEventsRef = null;
+    activePublicEventsListener = null;
+  }
+  if (serverTimeOffsetUnsubscribe) {
+    off(ref(rtdb, ".info/serverTimeOffset"), "value", serverTimeOffsetUnsubscribe);
+    serverTimeOffsetUnsubscribe = null;
+  }
+  if (firestoreEventsUnsubscribe) {
+    firestoreEventsUnsubscribe();
+    firestoreEventsUnsubscribe = null;
+  }
+  firestoreRegistrationGeneration += 1;
+  stopAttendanceListeners();
+  if (statusRefreshInterval) {
+    clearInterval(statusRefreshInterval);
+    statusRefreshInterval = null;
+  }
+}
+
 (function init() {
-  hydrateUserProfile();
+  applyStudentProfile(readCachedProfile());
   initCommon();
   readUrlParams();
   updateStatusButtonLabel();
@@ -1868,7 +2179,8 @@ function setupModalEventListeners() {
 
   // Server time offset
   if (isRtdbConfigured) {
-    onValue(ref(rtdb, ".info/serverTimeOffset"), (snap) => {
+    const offsetRef = ref(rtdb, ".info/serverTimeOffset");
+    serverTimeOffsetUnsubscribe = onValue(offsetRef, (snap) => {
       serverTimeOffset = snap.val() || 0;
       render();
     });
@@ -1876,19 +2188,33 @@ function setupModalEventListeners() {
 
   // Auth State
   if (auth) {
-    onAuthStateChanged(auth, (user) => {
+    authUnsubscribe = onAuthStateChanged(auth, async (user) => {
+      authResolved = true;
       if (user) {
+        const uidChanged = currentUid !== user.uid;
+        if (uidChanged) {
+          stopFirestoreRegistrationListeners();
+          stopAttendanceListeners();
+          rtdbRegistrationsMap.clear();
+          firestoreRegistrationsMap.clear();
+          userRegistrationsMap.clear();
+          loggedUnmatchedRegistrationIds.clear();
+          firestoreParticipationError = false;
+        }
+        currentUid = user.uid;
+        profileResolved = false;
+        participationLoading = true;
+        render();
+        await hydrateUserProfile(user);
+        profileResolved = true;
+
         if (rtdbRegistrationsUnsubscribe) {
           rtdbRegistrationsUnsubscribe();
           rtdbRegistrationsUnsubscribe = null;
         }
-        stopFirestoreRegistrationListeners();
-        rtdbRegistrationsMap.clear();
-        refreshUserRegistrations();
-        currentUid = user.uid;
         listenForFirestoreRegistrations(currentUid);
 
-        // Listen to userRegistrations
+        // RTDB registration mirror keyed by student UID, then event ID.
         if (isRtdbConfigured) {
           const regRef = ref(rtdb, `userRegistrations/${currentUid}`);
           rtdbRegistrationsUnsubscribe = onValue(regRef, (snap) => {
@@ -1900,27 +2226,55 @@ function setupModalEventListeners() {
               }
             });
             refreshUserRegistrations();
+          }, (error) => {
+            console.error("Could not load RTDB student registrations:", error);
+            firestoreParticipationError = true;
+            render();
           });
         }
+
+        loadParticipationData();
+        maybeFinishInitialLoad();
       } else {
         currentUid = null;
+        profileResolved = true;
         if (rtdbRegistrationsUnsubscribe) {
           rtdbRegistrationsUnsubscribe();
           rtdbRegistrationsUnsubscribe = null;
         }
         stopFirestoreRegistrationListeners();
+        stopAttendanceListeners();
         rtdbRegistrationsMap.clear();
+        firestoreRegistrationsMap.clear();
         userRegistrationsMap.clear();
-        attendanceMap.clear();
+        firestoreEventsLoaded = true;
+        publicEventsLoaded = true;
+        participationLoading = false;
         render();
       }
+    }, (error) => {
+      console.error("Could not resolve student authentication state:", error);
+      authResolved = true;
+      profileResolved = true;
+      firestoreEventsLoaded = true;
+      publicEventsLoaded = true;
+      participationLoading = false;
+      firestoreParticipationError = true;
+      render();
     });
+  } else {
+    authResolved = true;
+    profileResolved = true;
+    firestoreEventsLoaded = true;
+    publicEventsLoaded = true;
+    participationLoading = false;
+    render();
   }
 
-  loadParticipationData();
-
   // 30-second interval automatic status refresh (e.g. event end detection)
-  setInterval(() => {
+  statusRefreshInterval = setInterval(() => {
     render();
   }, 30000);
+
+  window.addEventListener("pagehide", cleanupParticipationListeners, { once: true });
 })();

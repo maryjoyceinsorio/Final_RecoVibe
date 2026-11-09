@@ -8,6 +8,20 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function studentReadableEventStatus(status) {
+      return status in [
+        "published", "completed", "rescheduled", "cancelled", "canceled"
+      ];
+    }
+
+    function isEventCreator(eventData) {
+      return signedIn()
+        && (
+          eventData.get("organizerUid", "") == request.auth.uid
+          || eventData.get("createdBy", "") == request.auth.uid
+        );
+    }
+
     function canManageEvents() {
       return signedIn()
         && exists(/databases/$(database)/documents/users/$(request.auth.uid))
@@ -66,7 +80,11 @@ service cloud.firestore {
     }
 
     match /events/{eventId} {
-      allow read: if signedIn();
+      allow read: if signedIn()
+        && (
+          studentReadableEventStatus(resource.data.get("status", ""))
+          || isEventCreator(resource.data)
+        );
 
       allow create: if canManageEvents()
         && validEventData()
@@ -75,33 +93,104 @@ service cloud.firestore {
         && request.resource.data.createdAt == request.time
         && request.resource.data.updatedAt == request.time;
 
-      allow update: if canManageEvents()
-        && validEventData()
-        && request.resource.data.createdBy == resource.data.createdBy
-        && request.resource.data.organizerUid == resource.data.organizerUid
-        && request.resource.data.createdAt == resource.data.createdAt
-        && request.resource.data.updatedAt == request.time
-        && request.resource.data.status == resource.data.status
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          "title", "eventName", "organizer", "organizerName", "source",
-          "categories", "category", "targetYear", "date", "dateISO",
-          "dateStart", "dateEnd", "endDate", "endDateISO", "dailySchedule",
-          "dailySchedules", "timeStart", "timeEnd", "time", "venue", "location",
-          "customVenueName", "customVenueAddress", "venueName", "venueAddress",
-          "building", "roomNumber", "onlineMeetingLink", "meetingLink",
-          "maxCapacity", "capacity", "openSlots", "slots", "registrationStart",
-          "registrationEnd", "registrationDeadline", "registrationEnabled",
-          "attendanceRequired", "weatherContingency", "venueType", "description",
-          "rationale", "keyDetails", "objectives", "requirements",
-          "participatingFaculty", "contactPerson", "contactName", "contactEmail",
-          "contactPhone", "participantDocuments", "attachments",
-          "approvalDocuments", "adminDocuments", "targetAudience",
-          "isCollaboration", "partnerOrganizations", "collaborationNotes",
-          "externalGuests", "outsideGuests", "approvers", "approvalStages",
-          "updatedAt", "hap1Approved", "hap2Approved", "hap3Approved"
-        ]);
+      allow update: if (
+          canManageEvents()
+          && validEventData()
+          && request.resource.data.createdBy == resource.data.createdBy
+          && request.resource.data.organizerUid == resource.data.organizerUid
+          && request.resource.data.createdAt == resource.data.createdAt
+          && request.resource.data.updatedAt == request.time
+          && request.resource.data.status == resource.data.status
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            "title", "eventName", "organizer", "organizerName", "source",
+            "categories", "category", "targetYear", "date", "dateISO",
+            "dateStart", "dateEnd", "endDate", "endDateISO", "dailySchedule",
+            "dailySchedules", "timeStart", "timeEnd", "time", "venue", "location",
+            "customVenueName", "customVenueAddress", "venueName", "venueAddress",
+            "building", "roomNumber", "onlineMeetingLink", "meetingLink",
+            "maxCapacity", "capacity", "openSlots", "slots", "registrationStart",
+            "registrationEnd", "registrationDeadline", "registrationEnabled",
+            "attendanceRequired", "weatherContingency", "venueType", "description",
+            "rationale", "keyDetails", "objectives", "requirements",
+            "participatingFaculty", "contactPerson", "contactName", "contactEmail",
+            "contactPhone", "participantDocuments", "attachments",
+            "approvalDocuments", "adminDocuments", "targetAudience",
+            "isCollaboration", "partnerOrganizations", "collaborationNotes",
+            "externalGuests", "outsideGuests", "approvers", "approvalStages",
+            "updatedAt", "hap1Approved", "hap2Approved", "hap3Approved"
+          ])
+        )
+        || studentRegistrationCountUpdate(eventId);
 
       allow delete: if false;
+
+      match /registrations/{uid} {
+        allow create: if signedIn()
+          && request.auth.uid == uid
+          && request.resource.data.uid == uid
+          && request.resource.data.status == "registered"
+          && studentCanRegister(eventId);
+
+        allow read: if signedIn()
+          && (
+            request.auth.uid == uid
+            || isEventCreator(get(
+              /databases/$(database)/documents/events/$(eventId)
+            ).data)
+          );
+
+        allow update, delete: if signedIn() && request.auth.uid == uid;
+      }
+    }
+
+    function studentCanRegister(eventId) {
+      let eventPath =
+        /databases/$(database)/documents/events/$(eventId);
+      return signedIn()
+        && get(eventPath).data.get("status", "")
+          in ["published", "rescheduled"];
+    }
+
+    function studentRegistrationCountUpdate(eventId) {
+      let registrationPath =
+        /databases/$(database)/documents/events/$(eventId)/registrations/$(request.auth.uid);
+      let nextRegistration = getAfter(registrationPath).data;
+      let previousRegistrationExists = exists(registrationPath);
+      let previousRegistration = previousRegistrationExists
+        ? get(registrationPath).data
+        : {};
+      let status = nextRegistration.get("status", "");
+      let previousStatus = previousRegistration.get("status", "");
+      let currentCount = resource.data.get("registeredCount", 0);
+      let nextCount = request.resource.data.get("registeredCount", -1);
+      return signedIn()
+        && resource.data.get("status", "") in ["published", "rescheduled"]
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(["registeredCount", "updatedAt"])
+        && request.resource.data.get("updatedAt", null) is number
+        && currentCount is number
+        && nextCount is number
+        && nextRegistration.get("uid", "") == request.auth.uid
+        && (
+          (
+            status == "registered"
+            && resource.data.get("status", "") == "published"
+            && nextCount == currentCount + 1
+            && (!previousRegistrationExists || previousStatus != "registered")
+          )
+          || (
+            status == "cancelled"
+            && previousRegistrationExists
+            && previousStatus == "registered"
+            && nextCount == currentCount - 1
+          )
+        );
+    }
+
+    match /{path=**}/registrations/{uid} {
+      allow read: if signedIn()
+        && request.auth.uid == uid
+        && resource.data.get("uid", "") == uid;
     }
   }
 }

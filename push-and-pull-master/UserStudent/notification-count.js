@@ -159,6 +159,7 @@
         }
 
         localStorage.removeItem("recovibeCurrentUser");
+        sessionStorage.removeItem("recovibeCurrentUser");
         window.location.assign(new URL("StudentLogin.html", window.location.href));
       } catch (error) {
         console.error("Student logout failed:", error);

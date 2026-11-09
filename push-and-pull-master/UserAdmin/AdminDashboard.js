@@ -482,7 +482,7 @@ import { syncApproverOrganization } from "../organizationScope.js";
         eventId: data.eventId || "",
         title: data.title || "Notification",
         message: data.message || "",
-        read: data.isRead === true,
+        read: data.read === true || data.isRead === true,
         createdAt: data.createdAt?.toDate
           ? data.createdAt.toDate().getTime()
           : data.createdAt || 0,
@@ -568,7 +568,7 @@ import { syncApproverOrganization } from "../organizationScope.js";
             });
           } else if (db) {
             await updateDoc(doc(db, "notifications", notifId), {
-              isRead: true,
+              read: true,
             });
           }
         } catch (error) {

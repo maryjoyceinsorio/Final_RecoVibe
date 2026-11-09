@@ -207,9 +207,21 @@
 
 .organizer-table {
   width: 100%;
-  min-width: 1080px;
+  min-width: 1220px;
+  table-layout: fixed;
   border-collapse: collapse;
 }
+
+.organizer-table th:nth-child(1),
+.organizer-table td:nth-child(1) { width: 24%; }
+.organizer-table th:nth-child(2),
+.organizer-table td:nth-child(2) { width: 27%; }
+.organizer-table th:nth-child(3),
+.organizer-table td:nth-child(3) { width: 19%; }
+.organizer-table th:nth-child(4),
+.organizer-table td:nth-child(4) { width: 13%; }
+.organizer-table th:nth-child(5),
+.organizer-table td:nth-child(5) { width: 17%; }
 
 .organizer-table th,
 .organizer-table td {
@@ -290,10 +302,13 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  min-width: 180px;
+  min-width: 0;
 }
 
 .event-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 6px 8px;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -301,6 +316,10 @@
   color: var(--ink);
   font-size: 11px;
   font-weight: 700;
+  line-height: 1.25;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
 }
 
 .event-action:hover:not(:disabled) {
@@ -628,6 +647,7 @@ body.modal-open {
 
   .organizer-table {
     min-width: 0;
+    table-layout: auto;
   }
 
   .organizer-table thead {
@@ -656,10 +676,15 @@ body.modal-open {
   }
 
   .organizer-table td:nth-child(3),
-  .organizer-table td:nth-child(4),
-  .organizer-table td:nth-child(5) {
+  .organizer-table td:nth-child(4) {
     display: block;
     text-align: center;
+  }
+
+  .organizer-table td:nth-child(5) {
+    display: grid;
+    grid-template-columns: 7rem minmax(0, 1fr);
+    text-align: left;
   }
 
   .organizer-table td::before {
@@ -680,6 +705,12 @@ body.modal-open {
 
   .event-actions {
     min-width: 0;
+    gap: 5px;
+  }
+
+  .event-action {
+    padding: 6px 7px;
+    font-size: 10px;
   }
 }
 

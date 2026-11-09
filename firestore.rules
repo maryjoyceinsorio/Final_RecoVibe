@@ -159,14 +159,69 @@ service cloud.firestore {
         ) == "superadmin";
     }
     match /notifications/{notificationId} {
-      allow read: if request.auth != null
-        && isAdminAccount()
-        && resource.data.get("recipientUid", "") == request.auth.uid;
-      allow update: if request.auth != null
-        && isAdminAccount()
-        && resource.data.get("recipientUid", "") == request.auth.uid
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["read"])
-        && request.resource.data.get("read", false) is bool;
+      function matchesStudentRecipient(recipient) {
+        let profilePath = /databases/$(database)/documents/users/$(request.auth.uid);
+        let profile = exists(profilePath) ? get(profilePath).data : {};
+        let studentId = profile.get("studentId", "");
+        let studentNumber = profile.get("studentNumber", "");
+        let studentNo = profile.get("studentNo", "");
+        return recipient is string
+          && recipient != ""
+          && (
+            (studentId != "" && recipient == studentId)
+            || (studentNumber != "" && recipient == studentNumber)
+            || (studentNo != "" && recipient == studentNo)
+          );
+      }
+
+      function isRecipient() {
+        let recipientUid = resource.data.get("recipientUid", "");
+        let recipientUserId = resource.data.get("recipientUserId", "");
+        let recipientId = resource.data.get("recipientId", "");
+        let userId = resource.data.get("userId", "");
+        let organizerUid = resource.data.get("organizerUid", "");
+        let organizerId = resource.data.get("organizerId", "");
+        return request.auth != null && (
+          recipientUid == request.auth.uid
+          || matchesStudentRecipient(recipientUid)
+          || recipientUserId == request.auth.uid
+          || matchesStudentRecipient(recipientUserId)
+          || recipientId == request.auth.uid
+          || matchesStudentRecipient(recipientId)
+          || userId == request.auth.uid
+          || matchesStudentRecipient(userId)
+          || organizerUid == request.auth.uid
+          || matchesStudentRecipient(organizerUid)
+          || organizerId == request.auth.uid
+          || matchesStudentRecipient(organizerId)
+        );
+      }
+
+      function isAdminNotification() {
+        return request.auth != null
+          && isAdminAccount()
+          && resource.data.get("recipientRole", "") == "admin";
+      }
+
+      function canManageNotification() {
+        return isRecipient() || isAdminNotification();
+      }
+
+      allow read: if canManageNotification();
+      allow create: if false;
+      allow update: if canManageNotification()
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(["read", "readAt", "deletedAt"])
+        && request.resource.data.get("read", false) is bool
+        && (
+          request.resource.data.get("readAt", null) == null
+          || request.resource.data.get("readAt", null) is timestamp
+        )
+        && (
+          request.resource.data.get("deletedAt", null) == null
+          || request.resource.data.get("deletedAt", null) is timestamp
+        );
+      allow delete: if canManageNotification();
     }
     match /events/{eventId} {
       allow read: if canReadEvent(resource.data);

@@ -693,6 +693,35 @@ loadCachedOrganizations();
       ...state.partnerOrganizations.map(getPartnerOrganizationDepartment),
     ].filter(Boolean));
   }
+  function getSelectedTargetDepartments() {
+    return [...new Set(
+      [...document.querySelectorAll(".ce-target-department:checked")]
+        .map((input) => String(input.value || "").trim())
+        .filter(Boolean),
+    )];
+  }
+  function getSelectedTargetOrganizations() {
+    const organizations = state.partnerOrganizations.flatMap((organization) =>
+      typeof organization === "string"
+        ? [organization]
+        : [
+            organization?.organizationCode,
+            organization?.orgCode,
+            organization?.code,
+            organization?.organization,
+            organization?.name,
+          ],
+    );
+    const seen = new Set();
+    return organizations
+      .map((organization) => String(organization || "").trim())
+      .filter((organization) => {
+        const key = organization.toLowerCase();
+        if (!key || !getOrganizationDepartment(organization) || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  }
   function syncPartnerTargetDepartments() {
     const associatedDepartments = getAssociatedOrganizationDepartments();
     const partnerDepartments = new Set(
@@ -724,7 +753,7 @@ loadCachedOrganizations();
     const audience = normalizeTargetAudience(document.getElementById("targetAudience")?.value);
     state.targetDepartments = audience === "Open to All"
       ? []
-      : inputs.filter((input) => input.checked).map((input) => input.value);
+      : getSelectedTargetDepartments();
   }
 
   Object.defineProperty(state, "participantFiles", {
@@ -6601,13 +6630,12 @@ loadCachedOrganizations();
     if (!targetAudienceVal) {
       markError("targetAudience", "Please select a target audience.");
     } else if (targetAudienceVal !== "Open to All") {
-      const selectedDepartments = [...document.querySelectorAll(".ce-target-department:checked")];
-      if (selectedDepartments.length === 0) {
+      state.targetDepartments = getSelectedTargetDepartments();
+      const selectedOrganizations = getSelectedTargetOrganizations();
+      if (state.targetDepartments.length === 0 && selectedOrganizations.length === 0) {
         markError(
           "targetDepartments",
-          targetAudienceVal === "Organization Members Only"
-            ? "No department is mapped to this organizing body. Update the organizer profile or choose another target audience."
-            : "Select at least one target department.",
+          "Select at least one target organization or department.",
         );
       }
       const sectionsInput = document.getElementById("targetSections");
@@ -6741,6 +6769,16 @@ loadCachedOrganizations();
       .split("\n")
       .map((s) => s.trim().replace(/^[•\-\*]\s*/, ""))
       .filter(Boolean) || [];
+    const targetAudience = normalizeTargetAudience(
+      form?.targetAudience?.value || state.targetAudience,
+    );
+    const targetDepartments = targetAudience === "Open to All"
+      ? []
+      : getSelectedTargetDepartments();
+    const targetOrganizations = targetAudience === "Open to All"
+      ? []
+      : getSelectedTargetOrganizations();
+    state.targetDepartments = targetDepartments;
 
     return {
       id,
@@ -6756,9 +6794,12 @@ loadCachedOrganizations();
       eventSource: form?.eventSource?.value || defaultEventSource,
       categories: [...state.selectedCategories],
       category: state.selectedCategories.join(", "),
+      targetAudience,
+      targetOrgs: targetOrganizations,
+      targetOrganizations,
       targetYear: form?.targetYear?.value || "All Levels",
       targetYearLevels: [...state.targetYearLevels],
-      targetDepartments: [...state.targetDepartments],
+      targetDepartments,
       targetSections: [...state.targetSections],
       date,
       dateISO: date,
@@ -6810,7 +6851,6 @@ loadCachedOrganizations();
       attachments: [...state.participantDocs],
       approvalDocuments: state.adminDocsLink,
       adminDocuments: state.adminDocsLink,
-      targetAudience: normalizeTargetAudience(form?.targetAudience?.value || state.targetAudience),
       isCollaboration: Boolean(state.isCollaboration),
       partnerOrganizations: [...(state.partnerOrganizations || [])],
       collaborationNotes: form?.collaborationNotes?.value.trim() || state.collaborationNotes || "",

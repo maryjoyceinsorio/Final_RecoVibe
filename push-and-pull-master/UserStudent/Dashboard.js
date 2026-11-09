@@ -58,18 +58,41 @@ const studentProfile = {
   organization: "",
   department: "",
   departmentCode: "",
+  StudentOrgs: [],
+  departments: [],
 };
+
+function uniqueProfileValues(...values) {
+  const seen = new Set();
+  return values
+    .flatMap((value) => Array.isArray(value) ? value : value == null ? [] : [value])
+    .filter((value) => typeof value === "string" || typeof value === "number")
+    .map((value) => String(value).trim())
+    .filter((value) => {
+      const key = value.toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
 
 const studentPreferences = {
   categories: [],
   sources: [],
+  tags: [],
+  organizations: [],
 };
 
 let rawEventsMap = new Map(); // id -> normalized event
 let realtimeEventsMap = new Map();
 let firestoreEventsMap = new Map();
 let unsubscribeFirestoreEvents = null;
+let retryEventFetch = null;
+let eventFetchLoading = true;
+let eventFetchError = null;
 let registeredEventIds = new Set();
+const firestoreRegistrationListeners = new Map();
+let firestoreRegistrationListenerUid = null;
 const attendanceMap = new Map(); // eventId -> { scannedAt, scannedBy, walkIn }
 const attendanceListeners = new Map(); // eventId -> unsub function
 const registrationSyncIds = new Set();
@@ -272,25 +295,129 @@ function eventMetaIconPin() {
 /* ---------------------------------------------------------
    EVENT NORMALIZATION & CLASSIFICATION
 --------------------------------------------------------- */
+function calendarDateToISO(value) {
+  if (!value) return "";
+  if (typeof value === "object" && typeof value.toDate === "function") {
+    return calendarDateToISO(value.toDate());
+  }
+  if (typeof value === "object" && Number.isFinite(value.seconds)) {
+    return calendarDateToISO(new Date(value.seconds * 1000));
+  }
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return "";
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Manila",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(value);
+    const dateParts = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    return `${dateParts.year}-${dateParts.month}-${dateParts.day}`;
+  }
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const [year, month, day] = value.split("-").map(Number);
+    const date = new Date(year, month - 1, day);
+    return date.getFullYear() === year &&
+      date.getMonth() === month - 1 &&
+      date.getDate() === day
+      ? value
+      : "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return calendarDateToISO(date);
+}
+
+function calendarEventDateRange(event) {
+  const start =
+    [
+      event.dateISO,
+      event.eventDate,
+      event.date,
+      event.startDate,
+      event.start_date,
+      event.event_date,
+      event.dateStart,
+      event.schedule?.date,
+      event.schedule?.startDate,
+    ].map(calendarDateToISO).find(Boolean) || "";
+  const end =
+    [
+      event.endDateISO,
+      event.eventEndDate,
+      event.endDate,
+      event.end_date,
+      event.dateEnd,
+      event.end,
+      start,
+    ].map(calendarDateToISO).find(Boolean) || start;
+  return start ? { start, end: end && end >= start ? end : start } : null;
+}
+
+function calendarEventOccursOn(event, isoDate) {
+  const range = calendarEventDateRange(event);
+  return Boolean(range && range.start <= isoDate && isoDate <= range.end);
+}
+
 function normalizeEvent(id, data) {
   const name = data.name || data.title || data.eventName || "Untitled Event";
+  const dateISO = calendarDateToISO(
+    data.dateISO || data.eventDate || data.event_date || data.date ||
+    data.startDate || data.start_date || data.dateStart || data.startDateTime ||
+    data.schedule?.date || data.schedule?.startDate,
+  );
+  const endDateISO = calendarDateToISO(
+    data.endDateISO || data.eventEndDate || data.endDate || data.end_date ||
+    data.dateEnd || data.end || data.schedule?.endDate,
+  );
+  const toMillis = (value) => {
+    if (typeof value === "number") return value;
+    if (value instanceof Date) return value.getTime();
+    if (typeof value?.toMillis === "function") return value.toMillis();
+    if (typeof value?.toDate === "function") return value.toDate().getTime();
+    if (Number.isFinite(value?.seconds)) return value.seconds * 1000;
+    const parsed = new Date(value).getTime();
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+  const timeToManilaMillis = (isoDate, timeValue, useEndOfDay = false) => {
+    if (!isoDate) return 0;
+    const [year, month, day] = isoDate.split("-").map(Number);
+    if (useEndOfDay) {
+      return Date.UTC(year, month - 1, day + 1, -8, 0, 0, -1);
+    }
+    const time = String(timeValue || "").trim();
+    const match = time.match(/(\d{1,2})(?::(\d{2}))?\s*(AM|PM)?/i);
+    if (!match) return Date.UTC(year, month - 1, day, -8, 0);
+    let hours = Number(match[1]);
+    const minutes = Number(match[2] || 0);
+    if (match[3]?.toUpperCase() === "PM" && hours < 12) hours += 12;
+    if (match[3]?.toUpperCase() === "AM" && hours === 12) hours = 0;
+    return Date.UTC(year, month - 1, day, hours - 8, minutes);
+  };
+  const eventTimes = String(data.time || "").split(/\s*[-–—]\s*/);
+  const startTime = eventTimes[0] || data.timeStart || data.startTime;
+  const endTime = eventTimes[1] || data.timeEnd || data.endTime;
   let startMs = 0;
   if (data.startAt) {
-    startMs = typeof data.startAt === "number" ? data.startAt : new Date(data.startAt).getTime();
-  } else if (data.dateISO) {
-    const timeStr = data.time ? data.time.split("-")[0].trim() : "00:00";
-    startMs = new Date(`${data.dateISO} ${timeStr}`).getTime();
-    if (isNaN(startMs)) startMs = new Date(data.dateISO).getTime();
+    startMs = toMillis(data.startAt);
+  }
+  if (!startMs && dateISO) {
+    startMs = timeToManilaMillis(dateISO, startTime);
   }
   if (isNaN(startMs) || startMs === 0) startMs = Date.now();
 
   let endMs = 0;
   if (data.endAt) {
-    endMs = typeof data.endAt === "number" ? data.endAt : new Date(data.endAt).getTime();
+    endMs = toMillis(data.endAt);
+  }
+  if (!endMs && endDateISO) {
+    endMs = timeToManilaMillis(endDateISO, endTime, !endTime);
+  }
+  if (!endMs && dateISO) {
+    endMs = timeToManilaMillis(dateISO, "", true);
   }
   if (isNaN(endMs) || endMs <= 0) {
-    // Treat events with no endAt as live for 3 hours after startAt
-    endMs = startMs + 3 * 60 * 60 * 1000;
+    endMs = startMs;
   }
 
   return {
@@ -300,18 +427,80 @@ function normalizeEvent(id, data) {
     venue: data.venue || data.location || "PUP Biñan Campus",
     location: data.venue || data.location || "PUP Biñan Campus",
     category: data.category || data.categories || data.tag || "Academic & Learning",
+    tags: data.tags || data.eventTags || [],
+    tag: data.tag || "",
     source: data.source || "PUP Official",
     startAt: data.startAt || new Date(startMs).toISOString(),
     endAt: data.endAt || new Date(endMs).toISOString(),
     startMs: startMs,
     endMs: endMs,
-    status: String(data.status || "").trim().toLowerCase(),
+    dateISO,
+    endDateISO,
+    status: String(
+      data.status ||
+      data.publicationStatus ||
+      (data.published === true || data.isPublished === true ? "published" : ""),
+    ).trim().toLowerCase(),
     organizerUid: data.organizerUid || "",
     organizerName: data.organizerName || data.organizer || "Event Organizer",
-    targetAudience: data.targetAudience || "",
-    targetDepartments: data.targetDepartments || data.targetDepartment || data.departments || [],
-    targetDepartmentIds: data.targetDepartmentIds || [],
-    targetOrganizations: data.targetOrganizations || data.targetOrganization || data.audienceOrganizations || [],
+    targetAudience: data.targetAudience || data.target_audience ||
+      data.audienceType || data.audience_type || data.audience || "",
+    targetDepartments: [
+      data.targetDepartments,
+      data.target_departments,
+      data.targetDepartment,
+      data.target_department,
+      data.departments,
+    ].flatMap((departments) =>
+      Array.isArray(departments) ? departments : departments ? [departments] : [],
+    ),
+    targetDepartmentIds: data.targetDepartmentIds || data.target_department_ids || [],
+    targetOrganizations: [
+      data.targetOrganizations,
+      data.target_organizations,
+      data.targetOrg,
+      data.target_org,
+      data.targetOrgCode,
+      data.target_org_code,
+      data.targetOrganization,
+      data.target_organization,
+      data.targetOrganizationCodes,
+      data.target_organization_codes,
+      data.targetOrganizationNames,
+      data.target_organization_names,
+      data.targetOrgs,
+      data.target_orgs,
+      data.TargetOrgs,
+      data.StudentOrgs,
+      data.studentOrgs,
+      data.student_orgs,
+      data.audienceOrganizations,
+      data.audience_organizations,
+    ].flatMap((targets) =>
+      Array.isArray(targets) ? targets : targets ? [targets] : [],
+    ),
+    targetOrgs: [
+      data.targetOrgs,
+      data.target_orgs,
+      data.targetOrganizations,
+      data.target_organizations,
+      data.targetOrg,
+      data.target_org,
+      data.targetOrgCode,
+      data.target_org_code,
+      data.targetOrganization,
+      data.target_organization,
+    ].flatMap((targets) =>
+      Array.isArray(targets) ? targets : targets ? [targets] : [],
+    ),
+    studentOrgs: data.studentOrgs || data.student_orgs || [],
+    TargetOrgs: [
+      data.TargetOrgs,
+      data.targetOrgs,
+      data.target_orgs,
+    ].flatMap((targets) =>
+      Array.isArray(targets) ? targets : targets ? [targets] : [],
+    ),
     audienceOrganizations: data.audienceOrganizations || [],
     coOrganizerOrganizations: data.coOrganizerOrganizations || [],
     coOrganizerOrgIds: data.coOrganizerOrgIds || [],
@@ -368,6 +557,7 @@ function rebuildStudentEvents() {
   );
   const eventsList = Array.from(rawEventsMap.values());
   syncRegistrationsFromRtdb(eventsList);
+  syncRegistrationsFromFirestore(eventsList);
   renderHappeningNow();
   renderUpcoming();
   renderRecommended();
@@ -375,11 +565,20 @@ function rebuildStudentEvents() {
 }
 
 function isFirestorePublishedEvent(data) {
-  const status = String(data.status || data.publicationStatus || "")
+  const status = String(data.status || "")
     .trim()
     .toLowerCase()
     .replace(/[ _-]+/g, " ");
-  return status === "published" || data.isPublished === true || data.published === true;
+  const publicationStatus = String(data.publicationStatus || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[ _-]+/g, " ");
+  return (
+    ["approved", "published", "completed", "rescheduled"].includes(status) ||
+    publicationStatus === "published" ||
+    data.isPublished === true ||
+    data.published === true
+  );
 }
 
 function normalizeFirestoreStudentEvent(documentSnapshot) {
@@ -388,15 +587,16 @@ function normalizeFirestoreStudentEvent(documentSnapshot) {
 
   const rawDate =
     data.eventDate ||
+    data.event_date ||
     data.dateISO ||
     data.date ||
+    data.startDate ||
+    data.start_date ||
     data.dateStart ||
     data.schedule?.date ||
     data.schedule?.startDate ||
     "";
-  const dateISO = rawDate?.toDate
-    ? rawDate.toDate().toISOString().slice(0, 10)
-    : rawDate;
+  const dateISO = calendarDateToISO(rawDate);
   const timestampToIso = (value) =>
     value?.toDate ? value.toDate().toISOString() : value;
   const time =
@@ -414,17 +614,21 @@ function normalizeFirestoreStudentEvent(documentSnapshot) {
     endAt: timestampToIso(data.endAt),
     venue: data.venue || data.location || data.venueOther,
     description: data.eventDescription || data.description || data.desc,
-    status: "published",
+    status: ["approved", "published", "completed", "rescheduled"].includes(
+      String(data.status || "").trim().toLowerCase(),
+    )
+      ? data.status
+      : "published",
     organizerUid: data.organizerUid || data.organizerId || data.createdBy || "",
   });
 }
 
 function getEventClassification(ev, now) {
-  if (ev.status === "completed" || now >= ev.endMs) {
+  if (["completed", "cancelled", "canceled"].includes(ev.status) || now > ev.endMs) {
     return "past";
   }
-  if (ev.status === "published") {
-    if (ev.startMs <= now && now < ev.endMs) {
+  if (["approved", "published", "rescheduled"].includes(ev.status)) {
+    if (ev.startMs <= now && now <= ev.endMs) {
       return "live";
     }
     if (ev.startMs > now) {
@@ -453,10 +657,28 @@ function loadStudentProfileFromStorage() {
           "Student";
         studentProfile.studentNo =
           u.studentNumber || u.studentNo || u.studentId || "2025-00790-BN-1";
-        studentProfile.organization = u.organization || u.courseOrganization || "";
-        studentProfile.courseOrganization = u.courseOrganization || u.organization || "";
+        studentProfile.organization =
+          u.organization || u.courseOrganization || u.courseOrg ||
+          u.organizationCode || u.organizationName || "";
+        studentProfile.courseOrganization =
+          u.courseOrganization || u.courseOrg || studentProfile.organization;
+        studentProfile.courseOrg = u.courseOrg || studentProfile.organization;
+        studentProfile.StudentOrgs = uniqueProfileValues(
+          u.StudentOrgs,
+          u.studentOrgs,
+          u.organizations,
+          studentProfile.organization,
+        );
         studentProfile.department = u.department || u.departmentCode || "";
         studentProfile.departmentCode = u.departmentCode || u.department || "";
+        studentProfile.departments = uniqueProfileValues(
+          u.departments,
+          u.departmentCodes,
+          u.department,
+          u.departmentCode,
+          u.course,
+          u.program,
+        );
 
         // Infer organization from department or course if blank
         if (!studentProfile.organization && studentProfile.department) {
@@ -475,6 +697,9 @@ function loadStudentProfileFromStorage() {
             studentProfile.courseOrganization = "HRSS";
           }
         }
+        if (!studentProfile.StudentOrgs.length && studentProfile.organization) {
+          studentProfile.StudentOrgs = [studentProfile.organization];
+        }
       }
     }
   } catch (e) {
@@ -492,6 +717,8 @@ function loadStudentPreferences() {
       if (Array.isArray(p.categories)) studentPreferences.categories = p.categories;
       else if (Array.isArray(p)) studentPreferences.categories = p;
       if (Array.isArray(p.sources)) studentPreferences.sources = p.sources;
+      if (Array.isArray(p.tags)) studentPreferences.tags = p.tags;
+      if (Array.isArray(p.organizations)) studentPreferences.organizations = p.organizations;
     }
   } catch (e) {
     console.warn("Could not read preferences:", e);
@@ -528,7 +755,7 @@ function loadFallbackEvents() {
       const list = JSON.parse(cached);
       if (Array.isArray(list) && list.length > 0) {
         list.forEach((item) => {
-          if (String(item?.status || "").trim().toLowerCase() !== "published") return;
+          if (!isFirestorePublishedEvent(item)) return;
           const ev = normalizeEvent(item.id || item.eventId, item);
           realtimeEventsMap.set(ev.id, ev);
         });
@@ -540,7 +767,7 @@ function loadFallbackEvents() {
 
   if (Array.isArray(window.RECOVIBE_EVENTS) && window.RECOVIBE_EVENTS.length > 0) {
     window.RECOVIBE_EVENTS.forEach((item) => {
-      if (String(item?.status || "").trim().toLowerCase() !== "published") return;
+      if (!isFirestorePublishedEvent(item)) return;
       const ev = normalizeEvent(item.id || item.eventId, item);
       realtimeEventsMap.set(ev.id, ev);
     });
@@ -717,24 +944,48 @@ function renderRecommended() {
   if (!container) return;
 
   const now = getNow();
-  const allEvents = Array.from(rawEventsMap.values());
-  const userCats = new Set(
-    (studentPreferences.categories || []).map((c) => String(c).toLowerCase().trim())
-  );
-
-  const matched = allEvents
-    .filter((ev) => {
-      if (getEventClassification(ev, now) === "past") return false;
-      const cat = String(ev.category || "").toLowerCase().trim();
-      return userCats.has(cat);
-    })
-    .sort((a, b) => a.startMs - b.startMs)
-    .slice(0, 3);
+  const normalizePreference = (value) => String(value || "").toLowerCase().trim();
+  const userPreferences = new Set([
+    ...(studentPreferences.categories || []),
+    ...(studentPreferences.sources || []),
+    ...(studentPreferences.tags || []),
+    ...(studentPreferences.organizations || []),
+    studentProfile.organization,
+    studentProfile.courseOrganization,
+    studentProfile.courseOrg,
+  ].map(normalizePreference).filter(Boolean));
+  const upcoming = Array.from(rawEventsMap.values())
+    .filter((ev) => getEventClassification(ev, now) === "upcoming")
+    .sort((a, b) => a.startMs - b.startMs);
+  const preferred = upcoming.filter((ev) => {
+    const eventPreferences = [
+      ev.category,
+      ev.organizerName,
+      ev.source,
+      ev.organization,
+      ev.targetOrgs,
+      ev.targetOrganizations,
+      ev.TargetOrgs,
+      ev.studentOrgs,
+      ev.StudentOrgs,
+      ev.tags,
+      ev.tag,
+    ];
+    return eventPreferences.some((value) =>
+      (Array.isArray(value) ? value : [value])
+        .map(normalizePreference)
+        .some((value) => userPreferences.has(value))
+    );
+  });
+  const matched = (preferred.length
+    ? preferred
+    : upcoming.filter((ev) => !registeredEventIds.has(ev.id))
+  ).slice(0, 3);
 
   if (matched.length === 0) {
     container.innerHTML = `
       <div class="empty-state" style="width: 100%;">
-        <div class="empty-state-title">No recommended events at this time.</div>
+        <div class="empty-state-title">No upcoming events at this time.</div>
         <div class="empty-state-sub">Update your <a href="StudentProfile.html#preferencesPanel" style="color: var(--maroon-700); text-decoration: underline;">preferences</a> to get personalized recommendations.</div>
       </div>
     `;
@@ -777,11 +1028,33 @@ function renderRecommended() {
     .join("");
 }
 
+function renderEventFetchState(container) {
+  if (eventFetchError) {
+    container.innerHTML = `
+      <div class="empty-state" role="alert">
+        <div class="empty-state-title">Events could not be loaded.</div>
+        <div class="empty-state-sub">${escapeHtml(eventFetchError)}</div>
+        <button type="button" class="btn-outline btn-retry-event-fetch">Retry</button>
+      </div>
+    `;
+    return true;
+  }
+  if (eventFetchLoading && rawEventsMap.size === 0) {
+    container.textContent = "Loading events...";
+    return true;
+  }
+  return false;
+}
+
 // 3. Happening Now Section
 function renderHappeningNow() {
   const container = document.getElementById("happeningNowList");
   const badge = document.getElementById("happeningLiveBadge");
   if (!container) return;
+  if (renderEventFetchState(container)) {
+    if (badge) badge.hidden = true;
+    return;
+  }
 
   const now = getNow();
   const allEvents = Array.from(rawEventsMap.values());
@@ -959,11 +1232,18 @@ function renderHappeningNow() {
 function renderUpcoming() {
   const container = document.getElementById("upcomingEventsList");
   if (!container) return;
+  if (renderEventFetchState(container)) return;
 
   const now = getNow();
   const allEvents = Array.from(rawEventsMap.values());
   const upcomingEvents = allEvents
-    .filter((ev) => getEventClassification(ev, now) === "upcoming")
+    .filter((ev) =>
+      ["approved", "published", "rescheduled"].includes(
+        String(ev.status || "").toLowerCase(),
+      ) &&
+      Number.isFinite(ev.startMs) &&
+      ev.startMs > now
+    )
     .sort((a, b) => a.startMs - b.startMs);
 
   const q = state.query.toLowerCase();
@@ -997,7 +1277,7 @@ function renderUpcoming() {
   }
 
   container.innerHTML = filtered
-    .slice(0, 4)
+    .slice(0, 10)
     .map((ev) => {
       const isRegistered = registeredEventIds.has(ev.id);
       const isDetailsOpen = openDetailsEventIds.has(ev.id);
@@ -1087,6 +1367,7 @@ function renderCalendar() {
   const calDays = document.getElementById("calDays");
   if (!calDays || !calMonthLabel) return;
 
+  calDays.innerHTML = "";
   syncMonthHolidays();
 
   const now = getNow();
@@ -1108,24 +1389,6 @@ function renderCalendar() {
 
   const allEvents = Array.from(rawEventsMap.values());
 
-  // Map events to day numbers of the current month
-  const dayEventsMap = new Map();
-  allEvents.forEach((ev) => {
-    if (!ev.startMs) return;
-    const dStart = new Date(ev.startMs);
-    const dEnd = new Date(ev.endMs || ev.startMs);
-    const startDay = new Date(dStart.getFullYear(), dStart.getMonth(), dStart.getDate()).getTime();
-    const endDay = new Date(dEnd.getFullYear(), dEnd.getMonth(), dEnd.getDate()).getTime();
-
-    for (let d = 1; d <= lastDate; d++) {
-      const dayTime = new Date(year, month, d).getTime();
-      if (dayTime >= startDay && dayTime <= endDay) {
-        if (!dayEventsMap.has(d)) dayEventsMap.set(d, []);
-        dayEventsMap.get(d).push(ev);
-      }
-    }
-  });
-
   let html = "";
 
   // Trailing days from previous month
@@ -1145,19 +1408,36 @@ function renderCalendar() {
 
     const isoStr = `${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
     const holidaysOnDay = currentMonthHolidays.filter((h) => h.date === isoStr);
-    const eventsOnDay = dayEventsMap.get(d) || [];
+    const eventsOnDay = allEvents.filter(
+      (ev) => calendarEventDateRange(ev)?.start === isoStr,
+    );
     let dotsHtml = "";
     if (eventsOnDay.length > 0 || holidaysOnDay.length > 0) {
-      const hasLive = eventsOnDay.some((ev) => getEventClassification(ev, now) === "live");
-      const hasRegistered = eventsOnDay.some((ev) => registeredEventIds.has(ev.id));
+      const liveEvents = eventsOnDay.filter((ev) => getEventClassification(ev, now) === "live");
+      const registeredEvents = eventsOnDay.filter((ev) => registeredEventIds.has(ev.id));
       const hasHoliday = holidaysOnDay.length > 0 || eventsOnDay.some(isHolidayEvent);
       const hasOther = eventsOnDay.some((ev) => !registeredEventIds.has(ev.id) && !isHolidayEvent(ev));
+      const eventTitles = (events) =>
+        events.map((ev) => ev.name || ev.title || "Untitled event").join(", ");
 
       const indicators = [];
-      if (hasLive) indicators.push('<span class="cal-event-dot dot-live" title="Live event"></span>');
-      if (hasRegistered) indicators.push('<span class="cal-event-dot dot-registered" title="Registered"></span>');
-      if (hasHoliday && indicators.length < 3) indicators.push('<span class="cal-event-dot dot-holiday" title="Holiday"></span>');
-      if (hasOther && indicators.length < 3) indicators.push('<span class="cal-event-dot dot-other" title="Event"></span>');
+      if (liveEvents.length) {
+        indicators.push(`<span class="cal-event-dot dot-live" title="${escapeHtml(`Live: ${eventTitles(liveEvents)}`)}"></span>`);
+      }
+      if (registeredEvents.length) {
+        indicators.push(`<span class="cal-event-dot dot-registered" title="${escapeHtml(`Registered: ${eventTitles(registeredEvents)}`)}"></span>`);
+      }
+      if (hasHoliday && indicators.length < 3) {
+        const holidayTitles = [
+          ...holidaysOnDay.map((holiday) => holiday.title),
+          ...eventsOnDay.filter(isHolidayEvent).map((ev) => ev.name || ev.title || "Holiday"),
+        ];
+        indicators.push(`<span class="cal-event-dot dot-holiday" title="${escapeHtml(`Holiday: ${holidayTitles.join(", ")}`)}"></span>`);
+      }
+      if (hasOther && indicators.length < 3) {
+        const otherEvents = eventsOnDay.filter((ev) => !registeredEventIds.has(ev.id) && !isHolidayEvent(ev));
+        indicators.push(`<span class="cal-event-dot dot-other" title="${escapeHtml(`Event: ${eventTitles(otherEvents)}`)}"></span>`);
+      }
 
       dotsHtml = `<span class="cal-day-indicators">${indicators.slice(0, 3).join("")}</span>`;
     } else {
@@ -1192,6 +1472,7 @@ function renderCalendar() {
 function renderCalendarDayEvents() {
   const container = document.getElementById("calDayEvents");
   if (!container) return;
+  container.innerHTML = "";
 
   const now = getNow();
   const selDate = state.calSelectedDate;
@@ -1208,14 +1489,9 @@ function renderCalendarDayEvents() {
 
   const holidaysOnDay = currentMonthHolidays.filter((h) => h.date === selIso);
   const allEvents = Array.from(rawEventsMap.values());
-  const matching = allEvents.filter((ev) => {
-    if (!ev.startMs) return false;
-    const dStart = new Date(ev.startMs);
-    const dEnd = new Date(ev.endMs || ev.startMs);
-    const startIso = `${dStart.getFullYear()}-${String(dStart.getMonth() + 1).padStart(2, "0")}-${String(dStart.getDate()).padStart(2, "0")}`;
-    const endIso = `${dEnd.getFullYear()}-${String(dEnd.getMonth() + 1).padStart(2, "0")}-${String(dEnd.getDate()).padStart(2, "0")}`;
-    return selIso >= startIso && selIso <= endIso;
-  });
+  const matching = allEvents.filter(
+    (ev) => calendarEventDateRange(ev)?.start === selIso,
+  );
 
   // Render Holidays (No Event Details modal, just the name of the Holiday)
   const holidayRowsHtml = holidaysOnDay
@@ -1369,7 +1645,11 @@ async function handleRegister(eventId) {
           registrationSnapshot.exists() &&
           registrationSnapshot.data().status === "registered"
         ) {
-          return Number(eventData.registeredCount) || 0;
+          const alreadyRegisteredError = new Error(
+            "You are already registered for this event.",
+          );
+          alreadyRegisteredError.code = "already-registered";
+          throw alreadyRegisteredError;
         }
 
         const capacity = Number(eventData.capacity ?? eventData.maxCapacity);
@@ -1414,7 +1694,19 @@ async function handleRegister(eventId) {
     showToast(`Registered for ${ev.name}`);
   } catch (err) {
     console.error("registerForEvent failed:", err);
-    const message = err?.message || "Could not register for this event. Please try again.";
+    const errorCode = String(err?.code || "").toLowerCase();
+    const errorText = String(err?.message || "").toLowerCase();
+    const message =
+      errorCode === "already-registered" ||
+      errorCode.includes("already-exists") ||
+      errorText.includes("already registered")
+        ? "You are already registered for this event."
+        : errorCode.includes("permission-denied")
+          ? "Registration was denied by Firestore security rules. Please contact an administrator."
+          : errorCode.includes("resource-exhausted") ||
+              errorText.includes("full")
+            ? "This event is full."
+            : err?.message || "Could not register for this event. Please try again.";
     showToast(message);
     announce(message);
     return false;
@@ -1554,40 +1846,122 @@ function syncRegistrationsFromRtdb(eventsList) {
   });
 }
 
-function initDataListeners() {
+function syncRegistrationsFromFirestore(eventsList) {
+  if (!currentUid || !db || !isFirebaseConfigured) return;
+  if (firestoreRegistrationListenerUid !== currentUid) {
+    firestoreRegistrationListeners.forEach((unsubscribe) => unsubscribe());
+    firestoreRegistrationListeners.clear();
+    firestoreRegistrationListenerUid = currentUid;
+  }
+
+  eventsList.forEach((ev) => {
+    if (!firestoreEventsMap.has(ev.id)) return;
+    const listenerKey = `${currentUid}:${ev.id}`;
+    if (firestoreRegistrationListeners.has(listenerKey)) return;
+    const registrationRef = doc(db, "events", ev.id, "registrations", currentUid);
+    const unsubscribe = onSnapshot(
+      registrationRef,
+      (snapshot) => {
+        const isRegistered =
+          snapshot.exists() &&
+          String(snapshot.data().status || "").toLowerCase() === "registered";
+        const hadRegistration = registeredEventIds.has(ev.id);
+        if (isRegistered) registeredEventIds.add(ev.id);
+        else registeredEventIds.delete(ev.id);
+        if (hadRegistration !== isRegistered) {
+          saveParticipationsToStorage();
+          renderHappeningNow();
+          renderUpcoming();
+          renderRecommended();
+          renderCalendar();
+        }
+      },
+      (error) => console.error("Registration Lookup Error:", error),
+    );
+    firestoreRegistrationListeners.set(listenerKey, unsubscribe);
+  });
+}
+
+function initDataListeners(authenticatedUser = auth?.currentUser) {
   unsubscribeFirestoreEvents?.();
   unsubscribeFirestoreEvents = null;
-  if (isFirebaseConfigured && db) {
-    unsubscribeFirestoreEvents = onSnapshot(
+  if (!authenticatedUser) {
+    eventFetchLoading = false;
+    eventFetchError = "Sign in to load student events.";
+    renderHappeningNow();
+    renderUpcoming();
+  }
+  if (isFirebaseConfigured && db && authenticatedUser) {
+    eventFetchLoading = true;
+    eventFetchError = null;
+    const handleEventsSnapshot = (snapshot) => {
+      eventFetchLoading = false;
+      eventFetchError = null;
+      const publishedEvents = new Map();
+      snapshot.docs.forEach((eventDocument) => {
+        const event = normalizeFirestoreStudentEvent(eventDocument);
+        if (!event) return;
+        const realtimeEvent = realtimeEventsMap.get(event.id);
+        if (realtimeEvent) {
+          event.registeredCount = realtimeEvent.registeredCount ?? event.registeredCount;
+          event.checkedInCount = realtimeEvent.checkedInCount ?? event.checkedInCount;
+        }
+        publishedEvents.set(event.id, event);
+      });
+      firestoreEventsMap = publishedEvents;
+      rebuildStudentEvents();
+    };
+    const listenForEvents = (eventsQuery) => {
+      try {
+        unsubscribeFirestoreEvents = onSnapshot(
+          eventsQuery,
+          handleEventsSnapshot,
+          (error) => {
+            console.error("Event Fetch Error:", error);
+            eventFetchLoading = false;
+            eventFetchError = error?.code === "permission-denied"
+              ? "Your account cannot read published events. Check your sign-in and Firestore access."
+              : "Check your connection and try again.";
+            renderHappeningNow();
+            renderUpcoming();
+          },
+        );
+      } catch (error) {
+        console.error("Event Fetch Error:", error);
+        eventFetchLoading = false;
+        eventFetchError = error?.code === "permission-denied"
+          ? "Your account cannot read published events. Check your sign-in and Firestore access."
+          : "Check your connection and try again.";
+        renderHappeningNow();
+        renderUpcoming();
+      }
+    };
+    const publishedEventsQuery = () =>
       query(
         collection(db, "events"),
         where("status", "in", [
-          "approved", "Approved", "APPROVED",
-          "published", "Published", "PUBLISHED",
-          "completed", "Completed", "COMPLETED",
-          "rescheduled", "Rescheduled", "RESCHEDULED",
+          "published",
+          "completed",
+          "rescheduled",
+          "cancelled",
+          "canceled",
         ]),
-      ),
-      (snapshot) => {
-        const publishedEvents = new Map();
-        snapshot.docs.forEach((eventDocument) => {
-          const event = normalizeFirestoreStudentEvent(eventDocument);
-          if (!event) return;
-          const realtimeEvent = realtimeEventsMap.get(event.id);
-          if (realtimeEvent) {
-            event.registeredCount = realtimeEvent.registeredCount ?? event.registeredCount;
-            event.checkedInCount = realtimeEvent.checkedInCount ?? event.checkedInCount;
-          }
-          publishedEvents.set(event.id, event);
-        });
-        firestoreEventsMap = publishedEvents;
-        rebuildStudentEvents();
-      },
-      (error) => {
-        console.error("Could not listen to published Firestore events:", error);
-        showToast("Live published events are unavailable right now.");
-      },
-    );
+      );
+    retryEventFetch = () => {
+      unsubscribeFirestoreEvents?.();
+      listenForEvents(publishedEventsQuery());
+    };
+    try {
+      listenForEvents(publishedEventsQuery());
+    } catch (error) {
+      console.error("Event Fetch Error:", error);
+      eventFetchLoading = false;
+      eventFetchError = error?.code === "permission-denied"
+        ? "Your account cannot read published events. Check your sign-in and Firestore access."
+        : "Check your connection and try again.";
+      renderHappeningNow();
+      renderUpcoming();
+    }
     activeCleanups.push(() => unsubscribeFirestoreEvents?.());
   }
 
@@ -1614,8 +1988,7 @@ function initDataListeners() {
       const data = snap.val() || {};
       const newMap = new Map();
       Object.entries(data).forEach(([id, item]) => {
-        const status = String(item?.status || "").trim().toLowerCase();
-        if (item && status === "published") {
+        if (item && isFirestorePublishedEvent(item)) {
           newMap.set(id, normalizeEvent(id, item));
         }
       });
@@ -1691,6 +2064,26 @@ function wireEvents() {
 
   // Event delegation for actions (Register, Cancel, QR toggle, Details toggle)
   document.addEventListener("click", (e) => {
+    const retryBtn = e.target.closest(".btn-retry-event-fetch");
+    if (retryBtn) {
+      e.preventDefault();
+      eventFetchError = null;
+      eventFetchLoading = true;
+      renderHappeningNow();
+      renderUpcoming();
+      if (retryEventFetch && auth?.currentUser) {
+        retryEventFetch();
+      } else {
+        eventFetchLoading = false;
+        eventFetchError = auth?.currentUser
+          ? "Event fetching is not available. Reload the dashboard and try again."
+          : "Sign in to load student events.";
+        renderHappeningNow();
+        renderUpcoming();
+      }
+      return;
+    }
+
     // Register
     const regBtn = e.target.closest(".btn-register");
     if (regBtn) {
@@ -1806,6 +2199,8 @@ function setupCleanup() {
     if (tickInterval) clearInterval(tickInterval);
     attendanceListeners.forEach((unsub) => unsub());
     attendanceListeners.clear();
+    firestoreRegistrationListeners.forEach((unsub) => unsub());
+    firestoreRegistrationListeners.clear();
     activeCleanups.forEach((cleanup) => {
       try {
         cleanup();
@@ -1814,7 +2209,7 @@ function setupCleanup() {
   };
 
   window.addEventListener("beforeunload", cleanupAll);
-  window.addEventListener("unload", cleanupAll);
+  window.addEventListener("pagehide", cleanupAll);
 }
 
 /* ---------------------------------------------------------
@@ -1850,10 +2245,32 @@ function init() {
             const userSnap = await getDoc(doc(db, "users", user.uid));
             if (userSnap.exists()) {
               const u = userSnap.data();
-              if (u.organization || u.courseOrganization) {
-                studentProfile.organization = u.organization || u.courseOrganization || studentProfile.organization;
-                studentProfile.courseOrganization = u.courseOrganization || u.organization || studentProfile.courseOrganization;
+              const organization =
+                u.organization ||
+                u.courseOrganization ||
+                u.courseOrg ||
+                u.organizationCode ||
+                u.organizationName;
+              if (organization) {
+                studentProfile.organization = organization;
+                studentProfile.courseOrganization =
+                  u.courseOrganization || u.courseOrg || organization;
+                studentProfile.courseOrg = u.courseOrg || organization;
               }
+              studentProfile.StudentOrgs = uniqueProfileValues(
+                u.StudentOrgs,
+                u.studentOrgs,
+                u.organizations,
+                organization,
+              );
+              studentProfile.departments = uniqueProfileValues(
+                u.departments,
+                u.departmentCodes,
+                u.department,
+                u.departmentCode,
+                u.course,
+                u.program,
+              );
               if (u.department || u.departmentCode) {
                 studentProfile.department = u.department || u.departmentCode || studentProfile.department;
                 studentProfile.departmentCode = u.departmentCode || u.department || studentProfile.departmentCode;
@@ -1874,6 +2291,9 @@ function init() {
                   studentProfile.organization = "HRSS";
                   studentProfile.courseOrganization = "HRSS";
                 }
+              }
+              if (!studentProfile.StudentOrgs.length && studentProfile.organization) {
+                studentProfile.StudentOrgs = [studentProfile.organization];
               }
               if (u.firstName || u.fullName || u.name) {
                 studentProfile.fullName = u.fullName || u.name || [u.firstName, u.lastName].filter(Boolean).join(" ");
@@ -1897,7 +2317,7 @@ function init() {
           initSidebar();
         }
       }
-      initDataListeners();
+      initDataListeners(user);
     });
   } else {
     initDataListeners();

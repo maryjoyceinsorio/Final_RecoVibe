@@ -182,8 +182,7 @@ function getDayBounds(isoDate) {
 async function fetchCalendarEvents(timeMin, timeMax) {
   const apiKey = getGoogleCalendarApiKey();
   if (!apiKey || apiKey.startsWith("YOUR_")) {
-    holidayLog("Google Calendar API key is not configured.");
-    throw new Error("Google Calendar API key is not configured.");
+    return [];
   }
 
   const params = new URLSearchParams({

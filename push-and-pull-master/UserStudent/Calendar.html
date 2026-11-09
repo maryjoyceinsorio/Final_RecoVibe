@@ -450,44 +450,6 @@
             el.classList.remove("is-collapsed");
           });
         } catch {}
-        let user = {};
-        try {
-        user = JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null") || {};
-        } catch {
-          user = {};
-        }
-        const firstName = String(user.firstName || "").trim();
-        const fullName = String(user.name || user.fullName || "").trim();
-        const nameFromProfile = [firstName, user.middleName, user.lastName]
-          .map((part) => String(part || "").trim())
-          .filter(Boolean)
-          .join(" ");
-        const displayName = fullName || nameFromProfile || "Student";
-        const first = firstName || fullName.split(/\s+/).filter(Boolean)[0] || "";
-        const fallback = [
-          user.username,
-          user.studentNumber,
-          user.studentId,
-          user.email,
-        ]
-          .map((value) => String(value || "").trim())
-          .find(Boolean) || "";
-        const avatar = Array.from(first || fallback)[0]?.toLocaleUpperCase() || "S";
-        const organization = String(user.organization || "").trim();
-        const role =
-          organization && organization.toLowerCase() !== "none"
-            ? organization
-            : "Student";
-        document.querySelectorAll(".user-name").forEach((item) => item.textContent = displayName);
-        document.querySelectorAll(".user-role").forEach((item) => item.textContent = role);
-        document.querySelectorAll(".avatar").forEach((item) => item.textContent = avatar);
-        document.querySelectorAll("#userFirstName").forEach((item) => item.textContent = first);
-        const greeting = document.getElementById("dashboardGreeting");
-        if (greeting) {
-          const hour = new Date().getHours();
-          const salutation = hour < 12 ? "Good Morning" : hour < 18 ? "Good Noon" : "Good Evening";
-          greeting.textContent = `${salutation}, ${displayName}`;
-        }
       })();
     </script>
     <script src="../EventDetailsModal.js"></script>

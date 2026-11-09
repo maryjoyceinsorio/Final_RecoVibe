@@ -2653,6 +2653,34 @@ body {
   overscroll-behavior: contain;
 }
 
+#calendarMain .calendar-data-status {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+#calendarMain .calendar-data-status.is-loading {
+  color: #4a3d38;
+  background: #f4efe4;
+}
+
+#calendarMain .calendar-data-status.is-error {
+  color: #5f2932;
+  background: #f8eeee;
+}
+
+#calendarMain .upcoming-more {
+  margin-top: 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--maroon-700);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 #calendarMain .upcoming-panel .upcoming-item {
   display: flex;
   align-items: flex-start;
@@ -3512,4 +3540,3 @@ body {
   cursor: default !important;
   pointer-events: none !important;
 }
-

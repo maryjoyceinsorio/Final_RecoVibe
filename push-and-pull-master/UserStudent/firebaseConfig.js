@@ -1,4 +1,4 @@
-import { getApp, getApps, initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getApps, initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
   browserLocalPersistence,
   getAuth,
@@ -12,20 +12,23 @@ const firebaseConfig = {
   apiKey: "AIzaSyDKozGFtnSiE6EzmSzpxe8-dZv7aH1HfnE",
   authDomain: "recovibe-v1.firebaseapp.com",
   projectId: "recovibe-v1",
-  databaseURL: "https://recovibe-v1-default-rtdb.firebaseio.com/",
   storageBucket: "recovibe-v1.firebasestorage.app",
   messagingSenderId: "79140044760",
   appId: "1:79140044760:web:8523fc92592e3555fefcad",
+  databaseURL: "https://recovibe-v1-default-rtdb.firebaseio.com/",
 };
 
 export const isFirebaseConfigured = Object.values(firebaseConfig).every(
   (value) => value && !value.startsWith("YOUR_")
 );
 
+const matchingApp = getApps().find(
+  (candidate) =>
+    candidate.name === "[DEFAULT]" &&
+    candidate.options.appId === firebaseConfig.appId,
+);
 export const app = isFirebaseConfigured
-  ? getApps().length
-    ? getApp()
-    : initializeApp(firebaseConfig)
+  ? matchingApp || initializeApp(firebaseConfig)
   : null;
 
 export const auth = app ? getAuth(app) : null;
@@ -43,11 +46,9 @@ export const authReady = auth
 export const db = app ? getFirestore(app) : null;
 
 let rtdbInstance = null;
-if (app) {
+if (app && firebaseConfig.databaseURL) {
   try {
-    rtdbInstance = firebaseConfig.databaseURL
-      ? getDatabase(app, firebaseConfig.databaseURL)
-      : getDatabase(app);
+    rtdbInstance = getDatabase(app, firebaseConfig.databaseURL);
   } catch (error) {
     console.error("[Firebase] Realtime Database initialization failed:", {
       code: error?.code || "unknown",

@@ -630,58 +630,43 @@ import {
       </div>`;
   }
 
-  function getActionMarkup(event) {
-    const eventId = escapeHtml(event.eventId || event.id);
-    const effStatus = normalizeStatus(getEffectiveStatus(event));
-    const isApproved = isFullyApproved(event);
-    const isPublished = effStatus === "published";
-    const isCompleted = effStatus === "completed";
-    const isCancelled = effStatus === "cancelled";
-    const scanParams = new URLSearchParams({
-      eventId: String(event.eventId || event.id),
-      eventName: String(event.title || event.eventName || event.name || "Untitled Event"),
-      eventDate: String(getEventDate(event) || ""),
-      eventTime: String(getScheduleDisplay(event) || ""),
-      eventVenue: String(event.venue || event.location || "Venue TBA"),
-    });
+  function getAvailableActions(event) {
+    const status = normalizeStatus(getEffectiveStatus(event));
+    const actions = [{ type: "view", label: "View tracker" }];
 
-    return `
-      <div class="event-actions">
-        <button type="button" class="event-action" data-action="view" data-event-id="${eventId}">
-          View
-        </button>
-        ${
-          !isPublished && !isCompleted && !isCancelled
-            ? `
-          ${
-            isApproved
-              ? `<button
-            type="button"
-            class="event-action event-action-primary"
-            data-action="publish"
-            data-event-id="${eventId}"
-            title="Publish this event to students"
-          >
-            Publish
-          </button>`
-              : ""
-          }
-          <button type="button" class="event-action event-action-danger" data-action="cancel" data-event-id="${eventId}">
-            Cancel
-          </button>
-        `
-            : ""
-        }
-        ${
-          isPublished || isCompleted
-            ? `
-          <a class="event-action" href="EventOrganizerScanAttendance.html?${scanParams.toString()}">
-            Scan attendance
-          </a>
-        `
-            : ""
-        }
-      </div>`;
+    if (status === "approved" && isFullyApproved(event)) {
+      actions.push({ type: "publish", label: "Publish" });
+    } else if (status === "published" || status === "completed") {
+      const scanParams = new URLSearchParams({
+        eventId: String(event.eventId || event.id),
+        eventName: String(event.title || event.eventName || event.name || "Untitled Event"),
+        eventDate: String(getEventDate(event) || ""),
+        eventTime: String(getScheduleDisplay(event) || ""),
+        eventVenue: String(event.venue || event.location || "Venue TBA"),
+      });
+      actions.push({
+        type: "scan",
+        label: "Scan attendance",
+        href: `EventOrganizerScanAttendance.html?${scanParams.toString()}`,
+      });
+    } else if (status === "rejected") {
+      actions.push({ type: "resubmit", label: "Resubmit" });
+    }
+
+    return actions;
+  }
+
+  function getActionMarkup(event, actions) {
+    const eventId = escapeHtml(event.eventId || event.id);
+    const actionMarkup = actions.map((action) => {
+      if (action.type === "scan") {
+        return `<a class="event-action" href="${escapeHtml(action.href)}">${escapeHtml(action.label)}</a>`;
+      }
+      const buttonClass = action.type === "publish" ? " event-action-primary" : "";
+      return `<button type="button" class="event-action${buttonClass}" data-action="${escapeHtml(action.type)}" data-event-id="${eventId}"${action.type === "publish" ? ' title="Publish this event to students"' : ""}>${escapeHtml(action.label)}</button>`;
+    }).join("");
+
+    return `<div class="event-actions">${actionMarkup}</div>`;
   }
 
   function renderEmptyState() {
@@ -689,7 +674,7 @@ import {
       if (eventTableBody) {
         eventTableBody.innerHTML = `
           <tr>
-            <td colspan="4"><div class="event-table-empty"><span>Checking authentication…</span></div></td>
+            <td colspan="5"><div class="event-table-empty"><span>Checking authentication…</span></div></td>
           </tr>`;
       }
       return;
@@ -699,7 +684,7 @@ import {
       if (eventTableBody) {
         eventTableBody.innerHTML = `
           <tr>
-            <td colspan="4">
+            <td colspan="5">
               <div class="event-table-empty">
                 <strong>Please log in as an Event Organizer.</strong>
                 <span>You need an active organizer session to view your event submissions.</span>
@@ -718,7 +703,7 @@ import {
       if (eventTableBody) {
         eventTableBody.innerHTML = `
           <tr>
-            <td colspan="4"><div class="event-table-empty"><span>Loading your event submissions…</span></div></td>
+            <td colspan="5"><div class="event-table-empty"><span>Loading your event submissions…</span></div></td>
           </tr>`;
       }
       return;
@@ -728,7 +713,7 @@ import {
       if (eventTableBody) {
         eventTableBody.innerHTML = `
           <tr>
-            <td colspan="4">
+            <td colspan="5">
               <div class="event-table-empty">
                 <strong>Couldn't load your events</strong>
                 <span>There was a problem loading your event submissions.</span>
@@ -751,7 +736,7 @@ import {
     if (eventTableBody) {
       eventTableBody.innerHTML = `
         <tr>
-          <td colspan="4">
+          <td colspan="5">
             <div class="event-table-empty">
               <strong>${escapeHtml(heading)}</strong>
               <span>${escapeHtml(message)}</span>
@@ -786,6 +771,8 @@ import {
           const eventDate = getEventDate(event);
           const schedule = getScheduleDisplay(event);
           const category = event.category || "Academic & Learning";
+          const actions = getAvailableActions(event);
+          console.log({ id: eventId, displayStatus: statusDisplay, actions });
 
           const isDraft = normalizeStatus(event.status) === "draft";
           return `
@@ -805,6 +792,7 @@ import {
                   ${escapeHtml(statusDisplay)}
                 </span>
               </td>
+              <td data-label="Actions">${getActionMarkup(event, actions)}</td>
             </tr>`;
         })
         .join("");
@@ -1574,6 +1562,8 @@ import {
         handlePublishEvent(eventId);
       } else if (action === "cancel") {
         handleCancelEvent(eventId);
+      } else if (action === "resubmit") {
+        handleResubmitEvent(eventId);
       }
     });
 
