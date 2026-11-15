@@ -1,6 +1,10 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
     function currentAdminProfile() {
       let profilePath = /databases/$(database)/documents/adminUser/$(request.auth.uid);
       return exists(profilePath) ? get(profilePath).data : {};
@@ -130,7 +134,8 @@ service cloud.firestore {
     }
 
     match /users/{userId} {
-      allow read, write: if request.auth != null;
+      allow read: if true;
+      allow write: if signedIn();
     }
     match /adminUser/{userId} {
       allow read: if request.auth != null;

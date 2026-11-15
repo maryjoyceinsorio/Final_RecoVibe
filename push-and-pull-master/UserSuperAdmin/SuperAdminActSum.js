@@ -86,20 +86,30 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
 
   let allEvents = [];
   let unsubscribeEvents = null;
-  let currentPeriod = "today";
+  let currentPeriod = "all";
   let customStartDate = null;
   let customEndDate = null;
+  let activeDateRangeLabel = "All Dates";
+  let activeDateRangePreset = "all";
   let clockInterval = null;
 
   // DOM Elements
   const scopeNote = document.getElementById("actSumScopeNote");
-  const periodButtons = document.querySelectorAll(".period-pill");
   const customRangeBtn = document.getElementById("customRangeBtn");
   const customPopover = document.getElementById("customRangePopover");
   const customFromInput = document.getElementById("customFromDate");
   const customToInput = document.getElementById("customToDate");
   const customApplyBtn = document.getElementById("customApplyBtn");
   const customError = document.getElementById("customRangeError");
+  const dateRangeTriggerLabel = document.getElementById("dateRangeTriggerLabel");
+  const dateRangeCalendarOne = document.getElementById("dateRangeCalendarOne");
+  const dateRangeCalendarTwo = document.getElementById("dateRangeCalendarTwo");
+  const dateRangeCalendarTitle = document.getElementById("dateRangeCalendarTitle");
+  const dateRangePrevMonth = document.getElementById("dateRangePrevMonth");
+  const dateRangeNextMonth = document.getElementById("dateRangeNextMonth");
+  const dateRangeClear = document.getElementById("dateRangeClear");
+  const dateRangeCancel = document.getElementById("dateRangeCancel");
+  const dateRangeClose = document.getElementById("dateRangeCloseBtn");
 
   const reportPeriodText = document.getElementById("reportPeriodText");
   const reportGeneratedText = document.getElementById("reportGeneratedText");
@@ -206,10 +216,19 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
   }
 
   function getPeriodRange(periodKey) {
-    const manilaToday = getManilaNow();
-    const year = manilaToday.getFullYear();
-    const month = manilaToday.getMonth();
-    const day = manilaToday.getDate();
+    const localToday = new Date();
+    const year = localToday.getFullYear();
+    const month = localToday.getMonth();
+    const day = localToday.getDate();
+
+    if (periodKey === "all") {
+      return {
+        start: null,
+        end: null,
+        label: "All Dates",
+        badge: "All Dates",
+      };
+    }
 
     if (periodKey === "today") {
       const start = new Date(year, month, day, 0, 0, 0, 0);
@@ -221,7 +240,7 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
       const dayOfWeek = manilaToday.getDay(); // 0 is Sunday
       const start = new Date(year, month, day - dayOfWeek, 0, 0, 0, 0);
       const end = new Date(year, month, day + (6 - dayOfWeek), 23, 59, 59, 999);
-      const label = `${formatDisplayDate(start)} – ${formatDisplayDate(end)}`;
+      const label = `${start.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })} – ${end.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}`;
       return { start, end, label, badge: "This Week's Report" };
     }
 
@@ -389,11 +408,6 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
 
   function setPeriod(periodKey) {
     currentPeriod = periodKey;
-    periodButtons.forEach((btn) => {
-      const match = btn.dataset.period === periodKey;
-      btn.classList.toggle("is-active", match);
-      btn.setAttribute("aria-pressed", String(match));
-    });
     updateReportHeaderMeta();
     renderReport();
   }
@@ -405,7 +419,9 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
     const { start: pStart, end: pEnd } = getPeriodRange(currentPeriod);
 
     // Super Admin scope: All campus events
-    const periodEvents = allEvents.filter((ev) => isEventInPeriod(ev, pStart, pEnd));
+    const periodEvents = currentPeriod === "all"
+      ? allEvents
+      : allEvents.filter((ev) => isEventInPeriod(ev, pStart, pEnd));
 
     // 1. EVENT SUMMARY
     let upcoming = 0;
@@ -740,101 +756,449 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
       .replace(/'/g, "&#039;");
   }
 
-  // Popover & UI Event Handlers
-  function toggleCustomPopover(show) {
-    if (!customPopover) return;
-    const isShowing = !customPopover.hidden;
-    const nextState = typeof show === "boolean" ? show : !isShowing;
-    customPopover.hidden = !nextState;
-    if (nextState) {
-      customPopover.removeAttribute("hidden");
-      if (customError) customError.hidden = true;
-    } else {
-      customPopover.setAttribute("hidden", "");
+  function setupPeriodControls() {
+    let pendingStart = null;
+    let pendingEnd = null;
+    let pendingPreset = null;
+    let hoverDate = "";
+    let previousBodyOverflow = null;
+    const today = new Date();
+    let viewYear = today.getFullYear();
+    let viewMonth = today.getMonth();
+    const quickLabels = {
+      today: "Today",
+      tomorrow: "Tomorrow",
+      thisWeek: "This week",
+      thisWeekend: "This weekend",
+      nextWeek: "Next week",
+      thisMonth: "This month",
+      nextMonth: "Next month",
+      all: "All time",
+    };
+    const weekdays = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+
+    function toISO(date) {
+      return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
     }
-  }
 
-  if (customRangeBtn) {
-    customRangeBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      toggleCustomPopover();
-    });
-  }
+    function parseDate(value) {
+      const text = String(value || "").trim();
+      let year;
+      let month;
+      let day;
+      let match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (match) {
+        year = Number(match[1]);
+        month = Number(match[2]);
+        day = Number(match[3]);
+      } else {
+        return null;
+      }
+      const date = new Date(year, month - 1, day);
+      if (year < 1000) return null;
+      if (date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day) return date;
+      return null;
+    }
 
-  document.addEventListener("click", (e) => {
-    if (customPopover && !customPopover.hidden) {
-      if (!customPopover.contains(e.target) && e.target !== customRangeBtn) {
-        toggleCustomPopover(false);
+    function dateValue(value) {
+      if (value instanceof Date) return toISO(value);
+      return String(value || "").slice(0, 10);
+    }
+
+    function currentRange() {
+      if (currentPeriod === "all") return { start: "", end: "" };
+      const range = typeof getSelectedDateRange === "function"
+        ? getSelectedDateRange()
+        : getPeriodRange(currentPeriod);
+      return { start: dateValue(range.start), end: dateValue(range.end) };
+    }
+
+    function presetRange(preset) {
+      const now = new Date();
+      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const end = new Date(start);
+      if (preset === "tomorrow") {
+        start.setDate(start.getDate() + 1);
+        end.setTime(start.getTime());
+      } else if (preset === "thisWeek" || preset === "nextWeek") {
+        start.setDate(start.getDate() - start.getDay() + (preset === "nextWeek" ? 7 : 0));
+        end.setDate(start.getDate() + 6);
+      } else if (preset === "thisWeekend") {
+        if (start.getDay() === 0) {
+          end.setTime(start.getTime());
+        } else {
+          start.setDate(start.getDate() - start.getDay() + 6);
+          end.setDate(start.getDate() + 1);
+        }
+      } else if (preset === "thisMonth") {
+        start.setDate(1);
+        end.setMonth(start.getMonth() + 1, 0);
+      } else if (preset === "nextMonth") {
+        start.setDate(1);
+        start.setMonth(start.getMonth() + 1);
+        end.setTime(start.getTime());
+        end.setMonth(start.getMonth() + 1, 0);
+      } else if (preset === "all") {
+        return { start: "", end: "" };
+      }
+      return { start: toISO(start), end: toISO(end) };
+    }
+
+    function formatLabel(start, end, preset) {
+      if (preset === "all") return "All Dates";
+      if (quickLabels[preset]) return quickLabels[preset];
+      const format = (value) => new Intl.DateTimeFormat("en-US", {
+        month: "short", day: "numeric", year: "numeric",
+      }).format(parseDate(value));
+      return start === end ? format(start) : `${format(start)} – ${format(end)}`;
+    }
+
+    function syncInputs() {
+      customFromInput.value = pendingStart || "";
+      customToInput.value = pendingEnd || "";
+    }
+
+    function renderCalendar(container, year, month) {
+      const firstDay = new Date(year, month, 1).getDay();
+      const daysInMonth = new Date(year, month + 1, 0).getDate();
+      const title = new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric" })
+        .format(new Date(year, month, 1));
+      let html = `<h3 class="date-range-calendar-title">${title}</h3><div class="date-range-weekdays" aria-hidden="true">`;
+      html += weekdays.map((day) => `<span>${day}</span>`).join("");
+      html += `</div><div class="date-range-days" role="grid" aria-label="${title}"></div>`;
+      container.innerHTML = html;
+      const grid = container.querySelector(".date-range-days");
+      for (let blank = 0; blank < firstDay; blank += 1) {
+        grid.insertAdjacentHTML("beforeend", '<span class="date-range-empty" aria-hidden="true"></span>');
+      }
+      for (let day = 1; day <= daysInMonth; day += 1) {
+        const date = new Date(year, month, day);
+        const iso = toISO(date);
+        const isStart = iso === pendingStart;
+        const isEnd = Boolean(pendingEnd) && iso === pendingEnd;
+        const inRange = pendingStart && pendingEnd && iso > pendingStart && iso < pendingEnd;
+        const isToday = iso === toISO(new Date());
+        const classes = ["date-range-day", isStart ? "is-start" : "", isEnd ? "is-end" : "", inRange ? "is-in-range" : "", isToday ? "is-today" : ""].filter(Boolean).join(" ");
+        grid.insertAdjacentHTML("beforeend", `<button type="button" class="${classes}" data-date="${iso}" role="gridcell" aria-pressed="${isStart || isEnd}" aria-label="${new Intl.DateTimeFormat("en-US", { dateStyle: "full" }).format(date)}">${day}</button>`);
       }
     }
-  });
 
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && customPopover && !customPopover.hidden) {
-      toggleCustomPopover(false);
+    function renderCalendars() {
+      renderCalendar(dateRangeCalendarOne, viewYear, viewMonth);
+      renderCalendar(dateRangeCalendarTwo, viewYear + (viewMonth === 11 ? 1 : 0), (viewMonth + 1) % 12);
+      dateRangeCalendarTitle.textContent = new Intl.DateTimeFormat("en-US", {
+        month: "long", year: "numeric",
+      }).format(new Date(viewYear, viewMonth, 1));
     }
-  });
 
-  periodButtons.forEach((btn) => {
-    if (btn.dataset.period === "custom") return;
-    btn.addEventListener("click", () => {
-      toggleCustomPopover(false);
-      setPeriod(btn.dataset.period);
+    function setPendingRange(range, preset) {
+      pendingStart = range.start || null;
+      pendingEnd = range.end || null;
+      pendingPreset = preset || null;
+      const first = parseDate(pendingStart);
+      if (preset === "all") {
+        const now = new Date();
+        viewYear = now.getFullYear();
+        viewMonth = now.getMonth();
+      } else if (first) {
+        viewYear = first.getFullYear();
+        viewMonth = first.getMonth();
+      }
+      syncInputs();
+      customFromInput.removeAttribute("aria-invalid");
+      customToInput.removeAttribute("aria-invalid");
+      customError.textContent = "";
+      customError.hidden = true;
+      renderCalendars();
+      updateApplyButton();
+      document.querySelectorAll(".date-range-quick-btn").forEach((button) => {
+        button.setAttribute("aria-pressed", String(button.dataset.preset === pendingPreset));
+      });
+    }
+
+    const appliedRange = currentRange();
+    function updateApplyButton() {
+      const startText = customFromInput.value.trim();
+      const endText = customToInput.value.trim();
+      const start = parseDate(startText);
+      const end = parseDate(endText);
+      const invalid = (startText && !start) || (endText && !end);
+      const changed = (pendingStart || "") !== appliedRange.start ||
+        (pendingEnd || "") !== appliedRange.end ||
+        pendingPreset !== activeDateRangePreset;
+      customApplyBtn.disabled = Boolean(invalid || (start && end && start > end)) || !changed;
+    }
+
+    function closePicker() {
+      const range = currentRange();
+      setPendingRange(range, activeDateRangePreset);
+      customPopover.hidden = true;
+      customRangeBtn.setAttribute("aria-expanded", "false");
+      if (previousBodyOverflow !== null) {
+        document.body.style.overflow = previousBodyOverflow;
+        previousBodyOverflow = null;
+      }
+      customRangeBtn.focus();
+    }
+
+    function openPicker() {
+      if (!customPopover.hidden) {
+        closePicker();
+        return;
+      }
+      const range = currentRange();
+      setPendingRange(range, activeDateRangePreset);
+      customPopover.hidden = false;
+      customRangeBtn.setAttribute("aria-expanded", "true");
+      previousBodyOverflow = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+      dateRangeClose.focus();
+    }
+
+    customRangeBtn.addEventListener("click", openPicker);
+    dateRangeClose.addEventListener("click", closePicker);
+    dateRangePrevMonth.addEventListener("click", () => {
+      const month = new Date(viewYear, viewMonth - 1, 1);
+      viewYear = month.getFullYear();
+      viewMonth = month.getMonth();
+      renderCalendars();
     });
-  });
-
-  function parseInputMMDDYYYY(val) {
-    if (!val) return null;
-    const parts = val.trim().split(/[\/\-.]/);
-    if (parts.length !== 3) return null;
-    const m = parseInt(parts[0], 10);
-    const d = parseInt(parts[1], 10);
-    const y = parseInt(parts[2], 10);
-    if (!m || !d || !y || m < 1 || m > 12 || d < 1 || d > 31 || y < 2000 || y > 2100) {
-      return null;
-    }
-    const dt = new Date(y, m - 1, d);
-    if (dt.getFullYear() !== y || dt.getMonth() !== m - 1 || dt.getDate() !== d) {
-      return null;
-    }
-    return dt;
-  }
-
-  if (customApplyBtn) {
+    dateRangeNextMonth.addEventListener("click", () => {
+      const month = new Date(viewYear, viewMonth + 1, 1);
+      viewYear = month.getFullYear();
+      viewMonth = month.getMonth();
+      renderCalendars();
+    });
+    document.querySelectorAll(".date-range-quick-btn").forEach((button) => {
+      button.addEventListener("click", () => setPendingRange(presetRange(button.dataset.preset), button.dataset.preset));
+    });
+    [dateRangeCalendarOne, dateRangeCalendarTwo].forEach((calendar) => {
+      calendar.addEventListener("click", (event) => {
+        const button = event.target.closest(".date-range-day");
+        if (!button) return;
+        event.stopPropagation();
+        const value = button.dataset.date;
+        if (!pendingStart || (pendingStart && pendingEnd)) {
+          pendingStart = value;
+          pendingEnd = null;
+        } else if (value < pendingStart) {
+          pendingEnd = pendingStart;
+          pendingStart = value;
+        } else {
+          pendingEnd = value;
+        }
+        hoverDate = "";
+        const effectiveStart = parseDate(pendingStart);
+        const effectiveEnd = parseDate(pendingEnd) || effectiveStart;
+        pendingPreset = effectiveStart && effectiveEnd
+          ? [...customPopover.querySelectorAll(".date-range-quick-btn")].find((quick) => {
+            const range = presetRange(quick.dataset.preset);
+            return range.start === toISO(effectiveStart) && range.end === toISO(effectiveEnd);
+          })?.dataset.preset || null
+          : null;
+        syncInputs();
+        customFromInput.removeAttribute("aria-invalid");
+        customToInput.removeAttribute("aria-invalid");
+        customError.hidden = true;
+        updateApplyButton();
+        renderCalendars();
+        calendar.querySelector(`.date-range-day[data-date="${value}"]`)?.focus();
+        document.querySelectorAll(".date-range-quick-btn").forEach((quick) =>
+          quick.setAttribute("aria-pressed", String(quick.dataset.preset === pendingPreset))
+        );
+      });
+      calendar.addEventListener("pointerover", (event) => {
+        const button = event.target.closest(".date-range-day");
+        if (!button || !pendingStart || pendingEnd) return;
+        hoverDate = button.dataset.date;
+        const lower = hoverDate < pendingStart ? hoverDate : pendingStart;
+        const upper = hoverDate < pendingStart ? pendingStart : hoverDate;
+        [dateRangeCalendarOne, dateRangeCalendarTwo].forEach((visibleCalendar) => {
+          visibleCalendar.querySelectorAll(".date-range-day").forEach((day) => {
+            day.classList.toggle("is-in-range", day.dataset.date > lower && day.dataset.date < upper);
+          });
+        });
+      });
+      calendar.addEventListener("pointerleave", () => {
+        if (!hoverDate) return;
+        hoverDate = "";
+        renderCalendars();
+      });
+    });
+    [customFromInput, customToInput].forEach((input) => {
+      input.addEventListener("input", () => {
+        const start = parseDate(customFromInput.value);
+        const end = parseDate(customToInput.value);
+        pendingStart = start ? toISO(start) : null;
+        pendingEnd = end ? toISO(end) : null;
+        hoverDate = "";
+        const effectiveStart = start || end;
+        const effectiveEnd = end || start;
+        pendingPreset = effectiveStart && effectiveEnd
+          ? [...customPopover.querySelectorAll(".date-range-quick-btn")].find((quick) => {
+            const range = presetRange(quick.dataset.preset);
+            return range.start === toISO(effectiveStart) && range.end === toISO(effectiveEnd);
+          })?.dataset.preset || null
+          : "all";
+        const invalidInput = [customFromInput, customToInput].find((dateInput) =>
+          dateInput.value.trim() && !parseDate(dateInput.value)
+        );
+        if (invalidInput) {
+          invalidInput.setAttribute("aria-invalid", "true");
+          customError.textContent = "Enter a valid date (YYYY-MM-DD).";
+          customError.hidden = false;
+        } else if (start && end && start > end) {
+          customToInput.setAttribute("aria-invalid", "true");
+          customError.textContent = "Start date must be on or before end date.";
+          customError.hidden = false;
+        } else {
+          customFromInput.removeAttribute("aria-invalid");
+          customToInput.removeAttribute("aria-invalid");
+          customError.textContent = "";
+          customError.hidden = true;
+        }
+        const first = parseDate(pendingStart) || parseDate(pendingEnd);
+        if (first) {
+          viewYear = first.getFullYear();
+          viewMonth = first.getMonth();
+        }
+        updateApplyButton();
+        renderCalendars();
+        document.querySelectorAll(".date-range-quick-btn").forEach((quick) =>
+          quick.setAttribute("aria-pressed", String(quick.dataset.preset === pendingPreset))
+        );
+      });
+      input.addEventListener("blur", () => {
+        const start = parseDate(customFromInput.value);
+        const end = parseDate(customToInput.value);
+        if (input.value && !parseDate(input.value)) {
+          input.setAttribute("aria-invalid", "true");
+          customError.textContent = "Enter a valid date (YYYY-MM-DD).";
+          customError.hidden = false;
+        } else if (start && end && start > end) {
+          customToInput.setAttribute("aria-invalid", "true");
+          customError.textContent = "Start date must be on or before end date.";
+          customError.hidden = false;
+        } else {
+          customError.textContent = "";
+          customError.hidden = true;
+        }
+      });
+    });
+    dateRangeClear.addEventListener("click", () => setPendingRange(presetRange("all"), "all"));
+    dateRangeCancel.addEventListener("click", closePicker);
     customApplyBtn.addEventListener("click", () => {
-      const fromDt = parseInputMMDDYYYY(customFromInput?.value);
-      const toDt = parseInputMMDDYYYY(customToInput?.value);
-
-      if (!fromDt || !toDt) {
-        if (customError) {
-          customError.textContent = "Please enter valid dates in MM/DD/YYYY format.";
-          customError.hidden = false;
+      const startText = customFromInput.value.trim();
+      const endText = customToInput.value.trim();
+      const parsedStart = parseDate(startText);
+      const parsedEnd = parseDate(endText);
+      if ((startText && !parsedStart) || (endText && !parsedEnd) ||
+        (parsedStart && parsedEnd && parsedStart > parsedEnd)) {
+        customError.textContent = (startText && !parsedStart) || (endText && !parsedEnd)
+          ? "Enter a valid date (YYYY-MM-DD)."
+          : "Start date must be on or before end date.";
+        customError.hidden = false;
+        if (startText && !parsedStart) {
+          customFromInput.setAttribute("aria-invalid", "true");
+          customFromInput.focus();
+        } else if (endText && !parsedEnd) {
+          customToInput.setAttribute("aria-invalid", "true");
+          customToInput.focus();
+        } else {
+          customToInput.setAttribute("aria-invalid", "true");
+          customToInput.focus();
         }
         return;
       }
-
-      if (fromDt > toDt) {
-        if (customError) {
-          customError.textContent = "'From' date must be earlier than or equal to 'To' date.";
-          customError.hidden = false;
-        }
+      const start = parsedStart || parsedEnd;
+      const end = parsedEnd || parsedStart;
+      if (!start || !end) {
+        currentPeriod = "all";
+        customStartDate = null;
+        customEndDate = null;
+        activeDateRangePreset = "all";
+        activeDateRangeLabel = "All Dates";
+        appliedRange.start = "";
+        appliedRange.end = "";
+        dateRangeTriggerLabel.textContent = activeDateRangeLabel;
+        customRangeBtn.setAttribute("aria-label", `Date range: ${activeDateRangeLabel}`);
+        if (typeof setPeriod === "function") setPeriod(currentPeriod);
+        else renderReport();
+        closePicker();
         return;
       }
-
-      customStartDate = fromDt;
-      customEndDate = toDt;
-      if (customError) customError.hidden = true;
-      toggleCustomPopover(false);
-      setPeriod("custom");
+      const startISO = toISO(start);
+      const endISO = toISO(end);
+      const preset = pendingPreset;
+      customStartDate = start;
+      customEndDate = end;
+      customFromInput.removeAttribute("aria-invalid");
+      customToInput.removeAttribute("aria-invalid");
+      currentPeriod = "custom";
+      activeDateRangePreset = preset;
+      activeDateRangeLabel = formatLabel(startISO, endISO, preset);
+      appliedRange.start = startISO;
+      appliedRange.end = endISO;
+      dateRangeTriggerLabel.textContent = activeDateRangeLabel;
+      customRangeBtn.setAttribute("aria-label", `Date range: ${activeDateRangeLabel}`);
+      if (typeof setPeriod === "function") setPeriod(currentPeriod);
+      else renderReport();
+      closePicker();
     });
+    customPopover.addEventListener("keydown", (event) => {
+      const button = event.target.closest(".date-range-day");
+      if (!button) return;
+      const current = parseDate(button.dataset.date);
+      let target = null;
+      if (event.key === "ArrowLeft") target = new Date(current.getFullYear(), current.getMonth(), current.getDate() - 1);
+      else if (event.key === "ArrowRight") target = new Date(current.getFullYear(), current.getMonth(), current.getDate() + 1);
+      else if (event.key === "ArrowUp") target = new Date(current.getFullYear(), current.getMonth(), current.getDate() - 7);
+      else if (event.key === "ArrowDown") target = new Date(current.getFullYear(), current.getMonth(), current.getDate() + 7);
+      else if (event.key === "Home") target = new Date(current.getFullYear(), current.getMonth(), current.getDate() - current.getDay());
+      else if (event.key === "End") target = new Date(current.getFullYear(), current.getMonth(), current.getDate() + 6 - current.getDay());
+      else if (event.key === "PageUp" || event.key === "PageDown") {
+        const offset = event.key === "PageUp" ? -1 : 1;
+        const month = new Date(current.getFullYear(), current.getMonth() + offset, 1);
+        const lastDay = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
+        target = new Date(month.getFullYear(), month.getMonth(), Math.min(current.getDate(), lastDay));
+      }
+      if (!target) return;
+      event.preventDefault();
+      const firstVisibleMonth = new Date(viewYear, viewMonth, 1);
+      const secondVisibleMonth = new Date(viewYear, viewMonth + 1, 1);
+      const visibleMonths = window.matchMedia("(max-width: 760px)").matches
+        ? [firstVisibleMonth]
+        : [firstVisibleMonth, secondVisibleMonth];
+      const targetIsVisible = visibleMonths.some((month) =>
+        month.getFullYear() === target.getFullYear() && month.getMonth() === target.getMonth()
+      );
+      if (!targetIsVisible) {
+        viewYear = target.getFullYear();
+        viewMonth = target.getMonth();
+        renderCalendars();
+      }
+      customPopover.querySelector(`.date-range-day[data-date="${toISO(target)}"]`)?.focus();
+    });
+    document.addEventListener("click", (event) => {
+      if (!customPopover.hidden && !customPopover.contains(event.target) && !customRangeBtn.contains(event.target)) {
+        closePicker();
+      }
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !customPopover.hidden) closePicker();
+    });
+    renderCalendars();
+    updateApplyButton();
   }
+
+  setupPeriodControls();
 
   // Download PDF functionality
   if (downloadCopyBtn) {
     downloadCopyBtn.addEventListener("click", () => {
       const { start, end } = getPeriodRange(currentPeriod);
-      const sStr = getManilaDateString(start);
-      const eStr = getManilaDateString(end);
+      const sStr = start ? getManilaDateString(start) : "all";
+      const eStr = end ? getManilaDateString(end) : "all";
       const originalTitle = document.title;
       document.title = `RECOVIBE_Activity_Summary_${sStr}_to_${eStr}`;
       window.print();
@@ -914,4 +1278,3 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
 
   init();
 })();
-

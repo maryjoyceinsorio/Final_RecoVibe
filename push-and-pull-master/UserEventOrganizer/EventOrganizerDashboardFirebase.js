@@ -5,7 +5,8 @@ import {
   query,
   where,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
+import { onValue, off, ref } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+import { auth, db, isFirebaseConfigured, rtdb } from "../UserStudent/firebaseConfig.js";
 
 const loginPath = "EventOrganizerLogin.html";
 const actionRows = document.getElementById("organizerActionRows");
@@ -19,6 +20,8 @@ let organizerEvents = [];
 let signingOut = false;
 const eventsById = new Map();
 const eventsBySource = new Map();
+const approvalListeners = new Map();
+const approvalsById = new Map();
 
 const escapeHtml = (value) =>
   String(value ?? "").replace(
@@ -35,17 +38,27 @@ const escapeHtml = (value) =>
 
 function normalizeEvent(documentSnapshot) {
   const data = documentSnapshot.data();
-  const rawCreatedAt = data.createdAt;
-  const createdAt = rawCreatedAt?.toDate
-    ? rawCreatedAt.toDate().toISOString()
-    : rawCreatedAt?.seconds != null
-      ? new Date(Number(rawCreatedAt.seconds) * 1000).toISOString()
-      : typeof rawCreatedAt === "number"
-        ? new Date(rawCreatedAt).toISOString()
-        : rawCreatedAt || "";
-  const dateISO = data.eventDate || data.dateISO || data.date || "";
-  const startTime = data.startTime || "";
-  const endTime = data.endTime || "";
+  const normalizeTimestamp = (value) => {
+    if (!value) return "";
+    const date = value?.toDate
+      ? value.toDate()
+      : value?.seconds != null
+        ? new Date(Number(value.seconds) * 1000)
+        : value?._seconds != null
+          ? new Date(Number(value._seconds) * 1000)
+          : typeof value === "number"
+            ? new Date(value < 100000000000 ? value * 1000 : value)
+            : new Date(String(value));
+    return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+  };
+  const createdAt = [
+    data.approvalSubmittedAt, data.submittedAt, data.submitted_at,
+    data.dateSubmitted, data.date_submitted, data.createdAt, data.created_at,
+  ].map(normalizeTimestamp).find(Boolean) || "";
+  const dateISO = data.eventDate || data.dateISO || data.dateStart || data.date || "";
+  const endDateISO = data.endDateISO || data.dateEnd || data.endDate || dateISO;
+  const startTime = data.timeStart || data.startTime || "";
+  const endTime = data.timeEnd || data.endTime || "";
 
   return {
     ...data,
@@ -53,6 +66,9 @@ function normalizeEvent(documentSnapshot) {
     eventId: documentSnapshot.id,
     title: data.eventName || data.title || "Untitled event",
     dateISO,
+    endDateISO,
+    startTime,
+    endTime,
     time: data.time || [startTime, endTime].filter(Boolean).join(" - "),
     location: data.venue || data.location || "Location TBA",
     venue: data.venue || data.location || "Location TBA",
@@ -64,9 +80,24 @@ function normalizeEvent(documentSnapshot) {
 
 function formatDate(value, options = {}) {
   if (!value) return "Date TBA";
-  const date = new Date(`${String(value).slice(0, 10)}T00:00:00`);
+  const dateText = String(value);
+  const date = new Date(`${dateText.slice(0, 10)}T00:00:00`);
   if (Number.isNaN(date.getTime())) return "Date TBA";
   return date.toLocaleDateString("en-US", options);
+}
+
+function formatCreatedDate(value) {
+  if (!value) return "TBA";
+  const dateText = String(value);
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(dateText)
+    ? new Date(`${dateText}T00:00:00`)
+    : new Date(dateText);
+  if (Number.isNaN(date.getTime())) return "TBA";
+  return date.toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
 }
 
 function statusClass(status) {
@@ -81,15 +112,117 @@ function statusClass(status) {
       .toLowerCase()
       .replace(/[\s_-]+/g, " ");
     if (normalized.includes("reject")) return "Rejected";
+    if (normalized.includes("revision")) return "Needs Revision";
+    if (normalized.includes("cancel")) return "Cancelled";
+    if (normalized.includes("complet")) return "Completed";
     if (normalized.includes("publish")) return "Published";
     if (normalized.includes("pending")) return "Pending";
     if (normalized.includes("approv")) return "Approved";
+    if (normalized === "draft") return "Draft";
+    if (normalized === "unknown") return "Unknown";
     return status || "Pending";
   }
 
 function setCount(id, count) {
   const element = document.getElementById(id);
   if (element) element.textContent = String(count);
+}
+
+function normalizeStatus(status) {
+  const raw = String(status ?? "").trim().toLowerCase().replace(/[\s_-]+/g, " ");
+  if (["pending approval", "under review", "in review", "reviewing", "submitted"].includes(raw)) return "pending";
+  if (["needs revision", "revision requested", "changes requested", "revision", "rev"].includes(raw)) return "revision";
+  if (["rejected", "reject", "rej"].includes(raw)) return "rejected";
+  if (["approve", "fully approved", "ready to publish", "ok"].includes(raw)) return "approved";
+  if (["live", "published live"].includes(raw)) return "published";
+  if (raw === "canceled") return "cancelled";
+  return raw;
+}
+
+function hasTrueFlag(value) {
+  return value === true || value === 1 || ["true", "yes", "1"].includes(String(value ?? "").trim().toLowerCase());
+}
+
+function getEventStatusValues(event) {
+  return [
+    event.status, event.approvalStatus, event.approval_status, event.adminStatus,
+    event.admin_status, event.adminApprovalStatus, event.approvalState,
+    event.approval_state, event.reviewStatus, event.publicationStatus,
+    event.moderationStatus, event.eventStatus, event.isApproved, event.approved,
+    event.published, event.approval?.approvalStatus, event.approval?.status,
+    event.approval?.state, event.admin?.status, event.review?.status,
+    event.moderation?.status, event.approvalData?.status,
+  ].filter((status) => status !== null && status !== undefined && status !== "").map(normalizeStatus);
+}
+
+function getEffectiveStatus(event) {
+  const firestoreStatuses = getEventStatusValues(event);
+  const eventStatus = firestoreStatuses[0] || "";
+  if (eventStatus === "draft") return "draft";
+  const isPublished = ["published", "cancelled"].find((value) => firestoreStatuses.includes(value));
+  if (isPublished) return isPublished;
+  if ([event.published, event.isPublished, event.isLive].some(hasTrueFlag)) return "published";
+  const approval = approvalsById.get(String(event.eventId || event.id)) || event.approval;
+  if (normalizeStatus(approval?.status) === "published") return "published";
+  const stageEntries = Array.isArray(event.approvalStages) ? event.approvalStages : Object.values(event.approvalStages || {});
+  const requiredStageStatuses = stageEntries
+    .filter((stage) => !stage || typeof stage !== "object" || (stage.required !== false && stage.enabled !== false))
+    .map((stage) => normalizeStatus(typeof stage === "string" ? stage : stage?.status || stage?.approvalStatus || stage?.state || stage?.decision));
+  if (firestoreStatuses.includes("rejected")) return "rejected";
+  if (firestoreStatuses.includes("revision")) return "revision";
+  if (firestoreStatuses.includes("approved")) return "approved";
+  if ([event.isApproved, event.approved].some(hasTrueFlag)) return "approved";
+  const members = Object.values(approval?.members || {});
+  const approvalStatus = normalizeStatus(approval?.status);
+  if (approvalStatus === "rejected" || approvalStatus === "revision" || approvalStatus === "approved") return approvalStatus;
+  if (members.length > 0 && members.every((member) => ["approved", "ok"].includes(normalizeStatus(member.status)))) return "approved";
+  if (requiredStageStatuses.includes("rejected")) return "rejected";
+  if (requiredStageStatuses.includes("revision")) return "revision";
+  if (requiredStageStatuses.length > 0 && requiredStageStatuses.every((status) => status === "approved")) return "approved";
+  const fallbackStatus = firestoreStatuses.find((status) => status === "pending") || eventStatus || "pending";
+  return fallbackStatus === "completed" ? "unknown" : fallbackStatus;
+}
+
+function hasEventEnded(event, now = Date.now()) {
+  const endDateValue = event.endDateISO || event.dateEnd || event.endDate || event.dateISO || event.date;
+  if (!endDateValue) return false;
+  const dateText = String(endDateValue).trim().slice(0, 10);
+  const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateText);
+  if (!dateMatch) return false;
+  const endDate = new Date(
+    Number(dateMatch[1]),
+    Number(dateMatch[2]) - 1,
+    Number(dateMatch[3]),
+  );
+  if (Number.isNaN(endDate.getTime())) return false;
+
+  const endTime = String(event.endTime || event.timeEnd || "").trim();
+  if (!endTime) {
+    endDate.setHours(23, 59, 59, 999);
+  } else {
+    const timeMatch = /^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?$/i.exec(endTime);
+    if (!timeMatch) return false;
+    let hours = Number(timeMatch[1]);
+    const minutes = Number(timeMatch[2]);
+    const seconds = Number(timeMatch[3] || 0);
+    const meridiem = String(timeMatch[4] || "").toUpperCase();
+    if (meridiem) {
+      if (hours < 1 || hours > 12) return false;
+      if (hours === 12) hours = 0;
+      if (meridiem === "PM") hours += 12;
+    } else if (hours > 23) {
+      return false;
+    }
+    if (minutes > 59 || seconds > 59) return false;
+    endDate.setHours(hours, minutes, seconds, 0);
+  }
+
+  return endDate.getTime() <= now;
+}
+
+function getDashboardStatus(event) {
+  const status = getEffectiveStatus(event);
+  return status === "published" && hasEventEnded(event) ? "completed" : status;
 }
 
 function renderStatistics() {
@@ -107,57 +240,44 @@ function renderStatistics() {
         "pending approval",
         "approved",
         "draft",
-      ].includes(
-        status(event),
-      ),
+      ].includes(getDashboardStatus(event)),
     ).length,
   );
   setCount(
     "pendingApprovalCount",
     organizerEvents.filter((event) =>
-      ["pending", "pending approval", "needs revision"].includes(
-        status(event),
-      ),
+      ["pending", "pending approval", "needs revision"].includes(status(event)) &&
+      !["approved", "published"].includes(getEffectiveStatus(event)),
     ).length,
   );
-  const fullyApproved = (event) => {
-    const normalizedStatus = status(event);
-    const published = event.published === true || event.isPublished === true ||
-      ["published", "completed"].includes(normalizedStatus);
-    if (published || ["rejected", "pending", "needs revision", "draft"].includes(normalizedStatus)) return false;
-    const approvalGroups = [
-      Array.isArray(event.approvalStages) ? event.approvalStages : Object.values(event.approvalStages || {}),
-      Object.values(event.approval?.members || {}),
-      Object.values(event.approvalData?.members || {}),
-    ];
-    return approvalGroups.some((members) => {
-      const required = members.filter((member) => member && member.required !== false && member.enabled !== false);
-      return required.length === 4 && required.every((member) =>
-        ["approved", "ok"].includes(String(member.status || member.approvalStatus || member.state || member.decision || "").trim().toLowerCase()),
-      );
-    });
-  };
-  setCount("approvedEventsCount", organizerEvents.filter(fullyApproved).length);
+  setCount("approvedEventsCount", organizerEvents.filter((event) => getEffectiveStatus(event) === "approved").length);
   setCount(
     "completedEventsCount",
-    organizerEvents.filter((event) => status(event) === "completed").length,
+    organizerEvents.filter((event) => getDashboardStatus(event) === "completed").length,
   );
 }
 
 function renderActionRows() {
   if (!actionRows) return;
-  if (!organizerEvents.length) {
-    actionRows.innerHTML = `<tr><td colspan="3"><div class="dashboard-empty-state"><strong>No events created yet.</strong><span>Click “Create Event” to start.</span><a class="organizer-button" href="EventOrganizerCreateEvent.html">+ Create Event</a></div></td></tr>`;
+  const actionableStatuses = ["pending", "revision", "rejected", "approved", "draft"];
+  const actionableEvents = organizerEvents.filter((event) =>
+    actionableStatuses.includes(getDashboardStatus(event)),
+  );
+  if (!actionableEvents.length) {
+    actionRows.innerHTML = `<tr><td colspan="3"><div class="dashboard-empty-state"><strong>Nothing needs your action right now.</strong></div></td></tr>`;
     return;
   }
 
-  actionRows.innerHTML = organizerEvents
+  actionRows.innerHTML = actionableEvents
     .map(
-      (event) => `<tr data-firestore-event-id="${escapeHtml(event.eventId)}" style="cursor: pointer;">
+      (event) => {
+        const status = displayStatus(getDashboardStatus(event));
+        return `<tr data-firestore-event-id="${escapeHtml(event.eventId)}" style="cursor: pointer;">
         <td><strong>${escapeHtml(event.title)}</strong><small>${escapeHtml(event.category || event.eventType || "General")}</small></td>
-        <td>${escapeHtml(formatDate(event.createdAt, { year: "numeric", month: "numeric", day: "numeric" }))}</td>
-        <td><span class="organizer-status ${statusClass(event.status)}">${escapeHtml(event.status || "Upcoming")}</span></td>
-      </tr>`,
+        <td>${escapeHtml(formatCreatedDate(event.createdAt))}</td>
+        <td><span class="organizer-status ${statusClass(status)}">${escapeHtml(status)}</span></td>
+      </tr>`;
+      },
     )
     .join("");
 }
@@ -248,6 +368,28 @@ function renderEvents() {
   renderUpcomingEvents();
 }
 
+function syncApprovalListeners() {
+  if (!rtdb) return;
+  const eventIds = new Set(organizerEvents.map((event) => String(event.eventId || event.id)));
+  approvalListeners.forEach((approvalRef, eventId) => {
+    if (eventIds.has(eventId)) return;
+    off(approvalRef);
+    approvalListeners.delete(eventId);
+    approvalsById.delete(eventId);
+  });
+  organizerEvents.forEach((event) => {
+    const eventId = String(event.eventId || event.id);
+    if (!eventId || approvalListeners.has(eventId)) return;
+    const approvalRef = ref(rtdb, `approvals/${eventId}`);
+    onValue(approvalRef, (snapshot) => {
+      if (snapshot.exists()) approvalsById.set(eventId, snapshot.val());
+      else approvalsById.delete(eventId);
+      renderEvents();
+    });
+    approvalListeners.set(eventId, approvalRef);
+  });
+}
+
 function showLoadError(message) {
   if (actionRows) actionRows.innerHTML = `<tr><td colspan="3">${escapeHtml(message)}</td></tr>`;
   if (upcomingEventsList) upcomingEventsList.textContent = message;
@@ -265,6 +407,7 @@ if (actionHead) {
   actionHead.replaceChildren(headerRow);
 }
 renderEvents();
+const dashboardRefreshTimer = window.setInterval(renderEvents, 60000);
 
 actionRows?.addEventListener("click", (event) => {
   const item = event.target.closest("[data-firestore-event-id]");
@@ -305,6 +448,9 @@ if (!isFirebaseConfigured || !auth || !db) {
         (user) => {
           unsubscribeEvents.forEach((unsubscribe) => unsubscribe());
           unsubscribeEvents = [];
+          approvalListeners.forEach((approvalRef) => off(approvalRef));
+          approvalListeners.clear();
+          approvalsById.clear();
           eventsById.clear();
           eventsBySource.clear();
           organizerEvents = [];
@@ -360,6 +506,7 @@ if (!isFirebaseConfigured || !auth || !db) {
                   });
                 });
                 organizerEvents = [...eventsById.values()];
+                syncApprovalListeners();
                 console.log(
                   ">> LOGGED IN AS UID:",
                   user.uid,
@@ -421,6 +568,7 @@ logoutButton?.addEventListener("click", async (event) => {
 });
 
 window.addEventListener("beforeunload", () => {
+  window.clearInterval(dashboardRefreshTimer);
   unsubscribeAuth?.();
   unsubscribeEvents.forEach((unsubscribe) => unsubscribe());
 });

@@ -187,14 +187,15 @@
             <div class="filter-dropdown filter-dropdown--date-range" id="dateRangeDropdown">
               <button
                 type="button"
-                class="filter-button"
+                class="filter-button date-range-trigger"
                 id="dateRangeBtn"
                 data-filter="date-range"
                 aria-expanded="false"
                 aria-controls="dateRangePanel"
                 aria-haspopup="dialog"
+                aria-label="Date filter: All Dates"
               >
-                Date range
+                All Dates
               </button>
               <div
                 class="date-range-panel"
@@ -203,26 +204,30 @@
                 aria-label="Date range selector"
                 hidden
               >
+                <div class="date-range-panel__topbar">
+                  <button type="button" class="date-range-close" id="dateRangeCloseBtn" aria-label="Close date range picker">&times;</button>
+                </div>
                 <div class="date-range-panel__sidebar">
-                  <div class="date-range-presets-title">Quick ranges</div>
+                  <div class="date-range-presets-title">QUICK RANGES</div>
                   <div class="date-range-quick-list">
                     <button type="button" class="date-range-quick-btn" data-preset="today">Today</button>
                     <button type="button" class="date-range-quick-btn" data-preset="tomorrow">Tomorrow</button>
                     <button type="button" class="date-range-quick-btn" data-preset="this_week">This week</button>
                     <button type="button" class="date-range-quick-btn" data-preset="this_weekend">This weekend</button>
                     <button type="button" class="date-range-quick-btn" data-preset="next_week">Next week</button>
-                    <button type="button" class="date-range-quick-btn active" data-preset="this_month">This month</button>
+                    <button type="button" class="date-range-quick-btn" data-preset="this_month">This month</button>
                     <button type="button" class="date-range-quick-btn" data-preset="next_month">Next month</button>
-                    <button type="button" class="date-range-quick-btn" data-preset="all">All time</button>
+                    <button type="button" class="date-range-quick-btn active" data-preset="all">All time</button>
                   </div>
                 </div>
                 <div class="date-range-panel__main">
-                  <div class="date-range-nav-row">
-                    <button type="button" class="date-cal-nav-btn" id="calNavPrev" aria-label="Previous month">&lsaquo;</button>
-                    <div class="date-cal-nav-spacer"></div>
-                    <button type="button" class="date-cal-nav-btn" id="calNavNext" aria-label="Next month">&rsaquo;</button>
-                  </div>
-                  <div class="date-range-calendars">
+                  <div class="date-range-main__content">
+                    <div class="date-range-nav-row">
+                      <button type="button" class="date-cal-nav-btn" id="calNavPrev" aria-label="Previous month">&lsaquo;</button>
+                      <div class="date-cal-nav-spacer"></div>
+                      <button type="button" class="date-cal-nav-btn" id="calNavNext" aria-label="Next month">&rsaquo;</button>
+                    </div>
+                    <div class="date-range-calendars">
                     <div class="date-cal-month" id="calMonth1">
                       <div class="date-cal-month__title" id="calTitle1"></div>
                       <div class="date-cal-day-names">
@@ -237,17 +242,18 @@
                       </div>
                       <div class="date-cal-grid" id="calGrid2"></div>
                     </div>
-                  </div>
-                  <div class="date-range-inputs-row">
-                    <div class="date-range-input-group">
-                      <label for="dateRangeInputStart">From</label>
-                      <input type="text" id="dateRangeInputStart" placeholder="YYYY-MM-DD" autocomplete="off" />
                     </div>
-                    <div class="date-range-input-group">
-                      <label for="dateRangeInputEnd">To</label>
-                      <input type="text" id="dateRangeInputEnd" placeholder="YYYY-MM-DD" autocomplete="off" />
+                    <div class="date-range-inputs-row">
+                      <div class="date-range-input-group">
+                        <label for="dateRangeInputStart">From</label>
+                        <input type="text" id="dateRangeInputStart" placeholder="YYYY-MM-DD" autocomplete="off" />
+                      </div>
+                      <div class="date-range-input-group">
+                        <label for="dateRangeInputEnd">To</label>
+                        <input type="text" id="dateRangeInputEnd" placeholder="YYYY-MM-DD" autocomplete="off" />
+                      </div>
+                      <div class="date-range-val-msg" id="dateRangeValidationMsg" role="alert"></div>
                     </div>
-                    <div class="date-range-val-msg" id="dateRangeValidationMsg" role="alert"></div>
                   </div>
                   <div class="date-range-footer">
                     <button type="button" class="date-range-clear-btn" id="dateRangeClearBtn">Clear</button>

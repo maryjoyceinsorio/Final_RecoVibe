@@ -23,7 +23,7 @@
     name: "Alex Rivera",
     email: "organizer@pup.edu.ph",
     contactNumber: "0912 345 6789",
-    organizerId: "2024-ORG-0051",
+    organizerId: "",
     organization: "IBITS",
     role: "Event Organizer",
     campus: "PUP Biñan Campus",
@@ -79,18 +79,29 @@
 
     const initials = Array.from(firstName || fullName || "E")[0]?.toUpperCase() || "EO";
     const org = profile.organization || "IBITS";
+    const storedOrganizerId = [
+      profile.accountNumber,
+      profile.accountNo,
+      profile.organizerNumber,
+      profile.organizerNo,
+      profile.eoId,
+      profile.organizerId,
+      localStorage.getItem(organizerIdKey),
+    ].map((value) => String(value || "").trim()).find(Boolean) || "";
+    const organizationCode = String(
+      profile.organizationCode || profile.orgCode || profile.organization || profile.organizationName || "",
+    ).trim().replace(/\s+/g, "-").toUpperCase();
+    const organizerId = /^EO-\d{3}-.+/i.test(storedOrganizerId)
+      ? storedOrganizerId.toUpperCase()
+      : /^\d+$/.test(storedOrganizerId) && organizationCode
+        ? `EO-${storedOrganizerId.padStart(3, "0")}-${organizationCode}`
+        : storedOrganizerId;
 
     // Hero Banner
     const heroAvatar = document.getElementById("heroAvatar");
     if (heroAvatar) heroAvatar.textContent = initials;
     const heroUserName = document.getElementById("heroUserName");
     if (heroUserName) heroUserName.textContent = fullName;
-    const heroOrganizerId = document.getElementById("heroOrganizerId");
-    if (heroOrganizerId) heroOrganizerId.textContent = profile.organizerId || profile.organizerNo || "2024-ORG-0051";
-    const heroOrgName = document.getElementById("heroOrgName");
-    if (heroOrgName) heroOrgName.textContent = org;
-    const heroOrgBadge = document.getElementById("heroOrgBadge");
-    if (heroOrgBadge) heroOrgBadge.textContent = org;
     const heroRoleBadge = document.getElementById("heroRoleBadge");
     if (heroRoleBadge) heroRoleBadge.textContent = "Organizer";
 
@@ -130,7 +141,7 @@
 
     // Organizer Details Card View
     const viewOrganizerId = document.getElementById("viewOrganizerId");
-    if (viewOrganizerId) viewOrganizerId.textContent = profile.organizerId || profile.organizerNo || "2024-ORG-0051";
+    if (viewOrganizerId) viewOrganizerId.textContent = organizerId || "Not set";
     const viewOrganization = document.getElementById("viewOrganization");
     if (viewOrganization) viewOrganization.textContent = org;
     const viewRole = document.getElementById("viewRole");

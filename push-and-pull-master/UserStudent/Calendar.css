@@ -2316,7 +2316,11 @@ ul {
   accent-color: var(--maroon-700);
 }
 
-#calendarMain .filter-option input:focus-visible,
+#calendarMain .filter-panel .filter-option input:focus-visible {
+  outline: 3px solid var(--maroon-700);
+  outline-offset: 2px;
+}
+
 #calendarMain .upcoming-item:focus-visible {
   outline: 3px solid #d6ae4a;
   outline-offset: 2px;

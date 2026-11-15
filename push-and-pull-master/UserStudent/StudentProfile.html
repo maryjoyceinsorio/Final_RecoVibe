@@ -125,22 +125,15 @@
       </aside>
 
       <!-- Main Area -->
-      <main class="main-wrapper" id="profileMain">
+      <main class="main-wrapper" id="profileMain" hidden>
         <div class="content-container">
           <!-- 2. Main area, top: Maroon Hero Banner -->
           <!-- 2. Main area, top: Maroon Hero Banner -->
           <header class="hero-banner">
             <div class="hero-left">
-              <div class="hero-avatar" id="heroAvatar" aria-hidden="true">M</div>
+              <div class="hero-avatar" id="heroAvatar" aria-hidden="true"></div>
               <div class="hero-info">
-                <h1 class="hero-name" id="heroUserName">Mc Joben Reyes</h1>
-                <p class="hero-subtitle">
-                  <span id="heroStudentNumber">2025-00790-BN-1</span> - <span id="heroYearSection">1-1</span>
-                </p>
-                <div class="hero-badges">
-                  <span class="hero-badge" id="heroDeptBadge">BSIT</span>
-                  <span class="hero-badge" id="heroOrgBadge">IBITS</span>
-                </div>
+                <h1 class="hero-name" id="heroUserName"></h1>
               </div>
             </div>
             <div class="hero-actions">
@@ -175,7 +168,7 @@
                 <div class="fields-grid cols-3">
                   <div class="field-item">
                     <span class="field-label">First name</span>
-                    <span class="field-value" id="viewFirstName">Mc Joben</span>
+                    <span class="field-value" id="viewFirstName"></span>
                   </div>
                   <div class="field-item">
                     <span class="field-label">Middle name</span>
@@ -183,7 +176,7 @@
                   </div>
                   <div class="field-item">
                     <span class="field-label">Last name</span>
-                    <span class="field-value" id="viewLastName">Reyes</span>
+                    <span class="field-value" id="viewLastName"></span>
                   </div>
                 </div>
               </div>
@@ -300,28 +293,28 @@
                     <svg class="label-lock" viewBox="0 0 20 20" fill="currentColor" width="11" height="11" aria-hidden="true"><path fill-rule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clip-rule="evenodd"/></svg>
                     Student number
                   </span>
-                  <span class="field-value" id="viewStudentNumber">2025-00790-BN-1</span>
+                  <span class="field-value" id="viewStudentNumber"></span>
                 </div>
                 <div class="field-item">
                   <span class="field-label">
                     <svg class="label-lock" viewBox="0 0 20 20" fill="currentColor" width="11" height="11" aria-hidden="true"><path fill-rule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clip-rule="evenodd"/></svg>
                     Year and section
                   </span>
-                  <span class="field-value" id="viewYearSection">1-1</span>
+                  <span class="field-value" id="viewYearSection"></span>
                 </div>
                 <div class="field-item full-row-dept">
                   <span class="field-label">
                     <svg class="label-lock" viewBox="0 0 20 20" fill="currentColor" width="11" height="11" aria-hidden="true"><path fill-rule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clip-rule="evenodd"/></svg>
                     Department
                   </span>
-                  <span class="field-value dept-value-full" id="viewDepartment">Bachelor of Science in Information Technology</span>
+                  <span class="field-value dept-value-full" id="viewDepartment"></span>
                 </div>
                 <div class="field-item">
                   <span class="field-label">
                     <svg class="label-lock" viewBox="0 0 20 20" fill="currentColor" width="11" height="11" aria-hidden="true"><path fill-rule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clip-rule="evenodd"/></svg>
                     Organization
                   </span>
-                  <span class="field-value" id="viewOrganization">IBITS</span>
+                  <span class="field-value" id="viewOrganization"></span>
                 </div>
               </div>
 
@@ -475,11 +468,11 @@
                 </div>
 
                 <div class="qr-canvas-box" id="qrCardCanvasBox">
-                  <canvas id="studentQrCanvas" width="180" height="180" aria-label="Attendance QR code"></canvas>
+                  <canvas id="studentQrCanvas" width="720" height="720" aria-label="Attendance QR code"></canvas>
                 </div>
 
                 <div class="qr-error" id="qrCardError" hidden>
-                  <p class="qr-error-msg">Couldn't load your QR code</p>
+                  <p class="qr-error-msg" id="qrCardErrorMessage">Couldn't load your QR code</p>
                   <button type="button" class="btn-outlined-card" id="qrCardRetryBtn">Try again</button>
                 </div>
               </div>
@@ -488,15 +481,15 @@
               <div class="qr-summary-box">
                 <div class="qr-summary-row">
                   <span class="qr-summary-label">Name</span>
-                  <strong class="qr-summary-value" id="qrCardStudentName">Mc Joben Reyes</strong>
+                  <strong class="qr-summary-value" id="qrCardStudentName"></strong>
                 </div>
                 <div class="qr-summary-row">
                   <span class="qr-summary-label">Student no.</span>
-                  <span class="qr-summary-value" id="qrCardStudentNumber">2025-00790-BN-1</span>
+                  <span class="qr-summary-value" id="qrCardStudentNumber"></span>
                 </div>
                 <div class="qr-summary-row">
                   <span class="qr-summary-label">Organization</span>
-                  <span class="qr-summary-value" id="qrCardStudentOrg">IBITS</span>
+                  <span class="qr-summary-value" id="qrCardStudentOrg"></span>
                 </div>
               </div>
 
@@ -506,7 +499,7 @@
               </p>
 
               <!-- Full-width Maroon Download Button -->
-              <button type="button" class="btn-maroon-full" id="btnDownloadQrCard" title="Download QR as PNG card">
+              <button type="button" class="btn-maroon-full" id="btnDownloadQrCard" title="Download QR as PNG card" disabled>
                 <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" width="16" height="16" aria-hidden="true">
                   <path d="M4 14v2a2 2 0 002 2h8a2 2 0 002-2v-2M7 10l3 3m0 0l3-3m-3 3V3"/>
                 </svg>
@@ -515,7 +508,7 @@
 
               <!-- Side-by-side Outlined Buttons -->
               <div class="qr-btn-group">
-                <button type="button" class="btn-outlined-action" id="btnRefreshQrCode" title="Refresh code">
+                <button type="button" class="btn-outlined-action" id="btnRefreshQrCode" title="Refresh code" disabled>
                   <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" width="14" height="14" aria-hidden="true">
                     <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
                   </svg>
@@ -612,7 +605,7 @@
           <h2 id="qrModalTitle" class="modal-title" style="margin-bottom: 6px;">Attendance QR Code</h2>
           <p class="qr-caption" id="qrModalSubtitle" style="margin-bottom: 4px;">Save this code to your phone and show it at the event.</p>
           <p class="qr-modal-event" id="qrModalEventName" hidden></p>
-          <p class="qr-modal-student" id="qrModalStudentName" style="margin-bottom: 16px; font-weight: 600; color: var(--maroon-primary);">Mc Joben Reyes</p>
+          <p class="qr-modal-student" id="qrModalStudentName" style="margin-bottom: 16px; font-weight: 600; color: var(--maroon-primary);"></p>
         </div>
 
         <div class="qr-modal-body">
@@ -623,23 +616,23 @@
           </div>
 
           <div class="qr-modal-canvas-box" id="qrModalCanvasBox">
-            <canvas id="qrModalCanvas" width="260" height="260" aria-label="Attendance QR code"></canvas>
+            <canvas id="qrModalCanvas" width="720" height="720" aria-label="Attendance QR code"></canvas>
           </div>
 
           <div class="qr-error" id="qrModalError" hidden>
-            <p class="qr-error-msg">Couldn't load your QR code</p>
+            <p class="qr-error-msg" id="qrModalErrorMessage">Couldn't load your QR code</p>
             <button type="button" class="btn-outlined-card" id="qrModalRetryBtn">Try again</button>
           </div>
         </div>
 
         <div class="modal-footer" style="justify-content: center; gap: 10px; margin-top: 20px;">
-          <button type="button" class="btn-outlined-action" id="qrModalRefreshBtn">
+          <button type="button" class="btn-outlined-action" id="qrModalRefreshBtn" disabled>
             <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" width="14" height="14" aria-hidden="true">
               <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
             </svg>
             <span id="qrModalRefreshLabel">Refresh code</span>
           </button>
-          <button type="button" class="btn-primary" id="qrModalDownloadBtn">
+          <button type="button" class="btn-primary" id="qrModalDownloadBtn" disabled>
             Download
           </button>
           <button type="button" class="btn-secondary" id="qrModalCloseActionBtn">
@@ -669,7 +662,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script src="student-sidebar-profile.js"></script>
     <script src="notification-count.js"></script>
     <script type="module" src="StudentProfile.js"></script>
   </body>

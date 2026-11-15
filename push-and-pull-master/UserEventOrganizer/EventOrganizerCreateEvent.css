@@ -1633,6 +1633,48 @@ body.repository-open {
   color: #701219;
 }
 
+#wrap-facultyInCharge {
+  z-index: 1;
+}
+
+#wrap-facultyInCharge:focus-within {
+  z-index: 1001;
+}
+
+.ce-faculty-in-charge-container:focus-within {
+  z-index: 1002;
+  border-color: #701219;
+  box-shadow: 0 0 0 2px rgba(112, 18, 25, 0.12);
+}
+
+.ce-faculty-in-charge-suggestions {
+  z-index: 2000;
+  max-height: 220px;
+}
+
+.ce-faculty-in-charge-suggestions .ce-chip-suggestion-empty {
+  padding: 10px 14px;
+  color: #70696a;
+  font-size: 12px;
+}
+
+.ce-faculty-in-charge-suggestions .ce-chip-suggestion-item strong {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.ce-faculty-in-charge-suggestions .ce-chip-suggestion-item small {
+  display: block;
+  margin-top: 2px;
+  color: #70696a;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+#facultyInChargeChip[hidden] {
+  display: none;
+}
+
 /* Document Dropzones */
 .ce-documents-grid {
   display: grid;
@@ -4904,5 +4946,4 @@ body:has(#createEventRoot) main {
     justify-content: flex-end;
   }
 }
-
 

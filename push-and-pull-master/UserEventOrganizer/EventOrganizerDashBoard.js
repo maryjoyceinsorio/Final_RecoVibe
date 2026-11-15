@@ -1,7 +1,6 @@
 (() => {
   const allEvents = getOrganizerEvents();
   const organizerId = localStorage.getItem("recovibeOrganizerId");
-  const today = new Date();
   const actionRows = document.getElementById("organizerActionRows");
   const upcomingEventsList = document.getElementById("upcomingEventsList");
   const happeningNowList = document.getElementById("happeningNowList");
@@ -51,13 +50,21 @@
 
   function updateOrganizerAccount() {
     const profile = readOrganizerProfile();
-
-    if (!profile) {
-      return;
+    const name = String(profile?.name || "Event Organizer");
+    const firstName = String(profile?.firstName || "").trim() ||
+      String(profile?.fullName || profile?.name || profile?.displayName || "")
+        .trim()
+        .split(/\s+/)[0] || "";
+    const organizerDashboardHeading = document.getElementById(
+      "organizerDashboardHeading",
+    );
+    const greeting = `Good ${getGreeting()}${firstName ? `, ${firstName}!` : "!"}`;
+    if (organizerDashboardHeading && organizerDashboardHeading.textContent.trim() !== greeting) {
+      organizerDashboardHeading.textContent = greeting;
     }
+    if (!profile) return;
 
-    const name = String(profile.name || "Event Organizer");
-    const organization = String(profile.organization || "IBITS");
+    const organization = String(profile?.organization || "IBITS");
     const initials =
       name
         .split(/\s+/)
@@ -69,19 +76,13 @@
     const organizerName = document.getElementById("organizerName");
     const organizerRole = document.getElementById("organizerRole");
     const organizerAvatar = document.getElementById("organizerAvatar");
-    const organizerDashboardHeading = document.getElementById(
-      "organizerDashboardHeading",
-    );
-
     if (organizerName) organizerName.textContent = name;
-    if (organizerRole) organizerRole.textContent = `${organization} account`;
+    if (organizerRole) organizerRole.textContent = profile ? `${organization} account` : "";
     if (organizerAvatar) organizerAvatar.textContent = initials;
-    if (organizerDashboardHeading)
-      organizerDashboardHeading.textContent = `Good ${getGreeting()}, ${name}!`;
   }
 
   function getGreeting() {
-    const hour = today.getHours();
+    const hour = new Date().getHours();
 
     if (hour < 12) {
       return "Morning";
@@ -108,10 +109,37 @@
       return fallback;
     }
 
-    const month = String(date.getMonth() + 1).padStart(2, "0");
-    const day = String(date.getDate()).padStart(2, "0");
-    const year = String(date.getFullYear()).slice(-2);
-    return `${month}/${day}/${year}`;
+    return date.toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+  }
+
+  function getEventCreatedAt(event) {
+    const values = [
+      event.approvalSubmittedAt,
+      event.submittedAt,
+      event.submitted_at,
+      event.dateSubmitted,
+      event.date_submitted,
+      event.createdAt,
+      event.created_at,
+    ];
+    for (const value of values) {
+      if (!value) continue;
+      const date = value?.toDate
+        ? value.toDate()
+        : value?.seconds != null
+          ? new Date(Number(value.seconds) * 1000)
+          : value?._seconds != null
+            ? new Date(Number(value._seconds) * 1000)
+            : typeof value === "number"
+              ? new Date(value < 100000000000 ? value * 1000 : value)
+              : new Date(String(value));
+      if (!Number.isNaN(date.getTime())) return date.toISOString();
+    }
+    return "";
   }
 
   function getDateParts(
@@ -138,15 +166,32 @@
     };
   }
 
-  function getStatus(event) {
+  function getApprovalStatus(event) {
     const raw = String(event.status || "Draft").trim();
     const norm = raw.toLowerCase().replace(/[ _-]+/g, " ");
     if (norm === "cancelled" || norm === "canceled") return "Cancelled";
-    if (norm === "rejected") return "Rejected";
-    if (norm === "needs revision") return "Needs Revision";
+    if (["rejected", "reject"].includes(norm)) return "Rejected";
+    if (["needs revision", "revision requested", "changes requested", "revision", "rev"].includes(norm)) return "Needs Revision";
     if (norm === "draft") return "Draft";
-    if (norm === "published") return "Published";
-    if (norm === "completed") return "Completed";
+    if (["published", "live", "published live"].includes(norm)) return "Published";
+    if (norm === "upcoming") return "Upcoming";
+    if (["pending", "pending approval", "under review", "in review", "reviewing", "submitted"].includes(norm)) return "Pending";
+    if (norm === "completed") return "Unknown";
+    if (["approved", "approve", "fully approved", "ready to publish", "ok"].includes(norm)) return "Approved";
+
+    const approvalGroups = [
+      Array.isArray(event.approvalStages)
+        ? event.approvalStages
+        : Object.values(event.approvalStages || {}),
+      Object.values(event.approval?.members || {}),
+      Object.values(event.approvalData?.members || {}),
+    ];
+    if (approvalGroups.some((members) => {
+      const required = members.filter((member) => member && member.required !== false && member.enabled !== false);
+      return required.length === 4 && required.every((member) =>
+        ["approved", "ok"].includes(String(member.status || member.approvalStatus || member.state || member.decision || "").trim().toLowerCase()),
+      );
+    })) return "Approved";
 
     const hap1 = isOrganizerEventHapApproved(event, 1);
     const hap2 = isOrganizerEventHapApproved(event, 2);
@@ -154,6 +199,48 @@
     const checkCount = (hap1 ? 1 : 0) + (hap2 ? 1 : 0) + (hap3 ? 1 : 0);
 
     return checkCount === 3 ? "Approved" : "Pending";
+  }
+
+  function hasEventEnded(event) {
+    const endDateValue = event.endDateISO || event.dateEnd || event.endDate || event.dateISO || event.date;
+    if (!endDateValue) return false;
+    const dateText = String(endDateValue).trim().slice(0, 10);
+    const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateText);
+    if (!dateMatch) return false;
+    const endDate = new Date(
+      Number(dateMatch[1]),
+      Number(dateMatch[2]) - 1,
+      Number(dateMatch[3]),
+    );
+    if (Number.isNaN(endDate.getTime())) return false;
+
+    const endTime = String(event.endTime || event.timeEnd || "").trim();
+    if (!endTime) {
+      endDate.setHours(23, 59, 59, 999);
+    } else {
+      const timeMatch = /^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?$/i.exec(endTime);
+      if (!timeMatch) return false;
+      let hours = Number(timeMatch[1]);
+      const minutes = Number(timeMatch[2]);
+      const seconds = Number(timeMatch[3] || 0);
+      const meridiem = String(timeMatch[4] || "").toUpperCase();
+      if (meridiem) {
+        if (hours < 1 || hours > 12) return false;
+        if (hours === 12) hours = 0;
+        if (meridiem === "PM") hours += 12;
+      } else if (hours > 23) {
+        return false;
+      }
+      if (minutes > 59 || seconds > 59) return false;
+      endDate.setHours(hours, minutes, seconds, 0);
+    }
+
+    return endDate.getTime() <= Date.now();
+  }
+
+  function getStatus(event) {
+    const status = getApprovalStatus(event);
+    return status === "Published" && hasEventEnded(event) ? "Completed" : status;
   }
 
   function getStatusClass(status) {
@@ -189,10 +276,11 @@
   function getCounts() {
     return {
       active: organizerEvents.filter((event) =>
-        ["Draft", "Pending", "Approved"].includes(getStatus(event)),
+        ["Draft", "Pending", "Approved", "Upcoming"].includes(getStatus(event)),
       ).length,
       pending: organizerEvents.filter((event) =>
-        ["Pending", "Needs Revision"].includes(getStatus(event)),
+        ["Pending", "Needs Revision"].includes(getStatus(event)) &&
+        !["Approved", "Published"].includes(getStatus(event)),
       ).length,
       approved: organizerEvents.filter(
         (event) => getStatus(event) === "Approved",
@@ -216,23 +304,28 @@
   }
 
   function renderActionRequired() {
-    if (!organizerEvents.length) {
+    const actionableEvents = organizerEvents
+      .filter((event) =>
+        ["Draft", "Pending", "Needs Revision", "Rejected", "Approved"].includes(getStatus(event)),
+      )
+      .sort((first, second) =>
+        new Date(getEventCreatedAt(second) || 0).getTime() -
+        new Date(getEventCreatedAt(first) || 0).getTime(),
+      );
+
+    if (!actionableEvents.length) {
       actionRows.innerHTML = `
         <tr>
           <td colspan="3">
             <div class="dashboard-empty-state">
-              <strong>No events created yet</strong>
-              <span>You haven't submitted any events. Create your first event to get started.</span>
-              <a class="organizer-button" href="EventOrganizerCreateEvent.html">
-                + Create an Event
-              </a>
+              <strong>Nothing needs your action right now.</strong>
             </div>
           </td>
         </tr>`;
       return;
     }
 
-    actionRows.innerHTML = organizerEvents
+    actionRows.innerHTML = actionableEvents
       .map((event) => {
         const status = getStatus(event);
         const statusClass = getStatusClass(status);
@@ -243,7 +336,7 @@
             <strong>${escapeHtml(event.title || "Untitled event")}</strong>
             <small>${escapeHtml(event.category || "General")}</small>
           </td>
-          <td>${formatDate(event.createdAt, "Today")}</td>
+          <td>${formatDate(getEventCreatedAt(event), "TBA")}</td>
           <td>
             <span class="organizer-status ${statusClass}">
               ${escapeHtml(status)}
@@ -353,19 +446,37 @@
   }
 
   const organizerToday = document.getElementById("organizerToday");
+  function updateTodayDate() {
+    const currentDate = new Date();
+    if (organizerToday) {
+      organizerToday.textContent = currentDate.toLocaleDateString("en-US", {
+        month: "long",
+        day: "numeric",
+        year: "numeric",
+      });
+    }
+    updateOrganizerAccount();
+  }
   if (organizerToday) {
-    organizerToday.textContent = today.toLocaleDateString("en-US", {
-      month: "long",
-      day: "numeric",
-      year: "numeric",
-    });
+    updateTodayDate();
   }
 
-  updateOrganizerAccount();
   renderStatistics();
   renderActionRequired();
   renderHappeningNow();
   renderUpcomingEvents();
+  setInterval(updateTodayDate, 60000);
+
+  const organizerDashboardHeading = document.getElementById("organizerDashboardHeading");
+  if (organizerDashboardHeading) {
+    new MutationObserver(() => {
+      updateOrganizerAccount();
+    }).observe(organizerDashboardHeading, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+  }
 
   window.addEventListener("storage", (event) => {
     if (event.key === "recovibeOrganizerEvents") window.location.reload();

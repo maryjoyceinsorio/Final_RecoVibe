@@ -1,8 +1,10 @@
 const notificationStorageKey = "recovibeOrganizerNotifications";
 const deletedNotificationStorageKey = "recovibeOrganizerDeletedNotifications";
-const deletedNotificationLifetime = 7 * 24 * 60 * 60 * 1000;
+const deletedNotificationLifetime = 30 * 24 * 60 * 60 * 1000;
 const organizerId = localStorage.getItem("recovibeOrganizerId");
-const organizerIdentifiers = new Set([organizerId].filter(Boolean));
+const organizerIdentifiers = new Set(
+  [organizerId].filter(Boolean).map((value) => String(value).trim().toLowerCase()),
+);
 let organizerProfile = {};
 try {
   organizerProfile = JSON.parse(localStorage.getItem("recovibeOrganizerProfile") || "{}");
@@ -11,15 +13,18 @@ try {
 }
 const firestoreNotifications = new Map();
 let firestoreNotificationUnsubscribers = [];
+let authStateUnsubscribe = null;
+let firestoreNotificationError = "";
 const savedNotifications = JSON.parse(
   localStorage.getItem(notificationStorageKey) || "[]",
 );
 let deletedNotifications = JSON.parse(
   localStorage.getItem(deletedNotificationStorageKey) || "[]",
-).map((item) => ({
-  ...item,
-  expiresAt: item.expiresAt || Date.now() + deletedNotificationLifetime,
-}));
+).map((item) => {
+  const deletedAt = Number(item.deletedAt) ||
+    (item.expiresAt ? Number(item.expiresAt) - 7 * 86400000 : Date.now());
+  return { ...item, deletedAt, expiresAt: deletedAt + deletedNotificationLifetime };
+}).filter((item) => Date.now() - item.deletedAt <= deletedNotificationLifetime);
 const normalizedNotificationStatus = (item) => {
   const statuses = [item.eventStatus, item.status, item.type, item.title, item.message]
     .filter(Boolean)
@@ -40,14 +45,12 @@ const belongsToCurrentOrganizer = (item) => {
     item.recipientUid,
     item.recipientId,
     item.recipientUserId,
+    item.recipientUserId,
     item.userId,
-    item.organizationCode,
-    item.organizerCode,
-    item.recipientOrganizationCode,
     item.recipientEmail,
-  ].filter(Boolean).map(String);
-  return !recipients.length ||
-    recipients.some((identifier) => organizerIdentifiers.has(identifier));
+    item.email,
+  ].filter(Boolean).map((value) => String(value).trim().toLowerCase());
+  return recipients.some((identifier) => organizerIdentifiers.has(identifier));
 };
 const notificationValues = (value) => {
   const values = Array.isArray(value) ? value : [value];
@@ -71,6 +74,17 @@ const notificationValues = (value) => {
       ].filter(Boolean).map(String);
     }
     return [];
+  });
+
+  document.getElementById("notificationMain").addEventListener("click", (event) => {
+  if (!event.target.closest("[data-undo-delete]") || !undoDeletedItem) return;
+  const { deletedAt, expiresAt, ...restoredItem } = undoDeletedItem;
+  deletedNotifications = deletedNotifications.filter((item) => item.id !== undoDeletedItem.id);
+  notifications.unshift(restoredItem);
+  undoDeletedItem = null;
+  clearTimeout(undoTimer);
+  saveNotifications();
+  renderNotifications();
   });
 };
 const findNotificationEvent = (eventId) => {
@@ -230,6 +244,10 @@ deletedNotifications = deletedNotifications.map((item) => normalizeNotification(
 
 let activeFilter = "all";
 let pendingDeleteId = null;
+let undoDeletedItem = null;
+let undoTimer = null;
+let showingTrashView = false;
+const pendingNotificationActions = new Set();
 
 function escapeHtml(value) {
   return String(value ?? "").replace(
@@ -245,13 +263,139 @@ function escapeHtml(value) {
   );
 }
 
+function notificationDate(value) {
+  if (value && typeof value.toDate === "function") return value.toDate();
+  if (value && typeof value.toMillis === "function") return new Date(value.toMillis());
+  if (value && typeof value.seconds === "number") return new Date(value.seconds * 1000);
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value : null;
+  if (typeof value === "number" && Number.isFinite(value)) return new Date(value);
+  if (typeof value === "string" && value.trim()) {
+    const dateOnly = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (dateOnly) return new Date(+dateOnly[1], +dateOnly[2] - 1, +dateOnly[3]);
+    const date = new Date(value);
+    return Number.isFinite(date.getTime()) ? date : null;
+  }
+  return null;
+}
+
+function notificationGroup(item) {
+  const date = notificationDate(item.createdAt);
+  if (!date) return "Earlier";
+  const today = new Date();
+  if (date.toDateString() === today.toDateString()) return "Today";
+  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  start.setDate(start.getDate() - start.getDay());
+  return date >= start ? "This week" : "Earlier";
+}
+
+function notificationTimeLabels(item) {
+  const date = notificationDate(item.createdAt);
+  if (!date) return { date: "", relative: "" };
+  const now = new Date();
+  const diff = Math.max(0, now.getTime() - date.getTime());
+  let relative = "Just now";
+  if (date.toDateString() !== now.toDateString()) {
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    if (date.toDateString() === yesterday.toDateString()) relative = "Yesterday";
+    else {
+      const days = Math.floor(diff / 86400000);
+      relative = days < 7 ? `${days} days ago` : `${Math.floor(days / 7)} weeks ago`;
+    }
+  } else if (diff >= 60000) {
+    const minutes = Math.floor(diff / 60000);
+    relative = minutes < 60 ? `${minutes} minute${minutes === 1 ? "" : "s"} ago` : `${Math.floor(minutes / 60)} hours ago`;
+  }
+  return {
+    date: new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(date),
+    relative,
+  };
+}
+
+function notificationIcon(item) {
+  const type = String(item.type || "").toLowerCase();
+  if (type.includes("register") || type.includes("confirm")) {
+    return '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 4 4 8-8"/></svg>';
+  }
+  if (type.includes("event") || item.eventStatus) {
+    return '<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="13" rx="1.5"/><path d="M3 8h14M7 2.5v3M13 2.5v3"/></svg>';
+  }
+  return '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M8 20a2 2 0 0 0 4 0"/></svg>';
+}
+
+function renderNotificationCard(item, inTrash = false) {
+  const { date, relative } = notificationTimeLabels(item);
+  const tag = item.tag || item.eventStatus || "";
+  const id = escapeHtml(item.id);
+  const controls = inTrash
+    ? `<button type="button" data-deleted-action="restore" ${pendingNotificationActions.has(item.id) ? "disabled" : ""}>Restore</button><button type="button" data-deleted-action="delete-permanently" ${pendingNotificationActions.has(item.id) ? "disabled" : ""}>Delete forever</button><small>Removed in ${Math.max(0, Math.ceil((item.expiresAt - Date.now()) / 86400000))} days</small>`
+    : `<button class="notification-read-toggle" type="button" data-notification-action="${item.read ? "unread" : "read"}" aria-label="Mark as ${item.read ? "unread" : "read"}" title="Mark as ${item.read ? "unread" : "read"}" ${pendingNotificationActions.has(item.id) ? "disabled" : ""}><span aria-hidden="true"></span></button><button class="notification-trash-toggle" type="button" data-notification-action="delete" aria-label="Move to Recently Deleted" title="Move to Recently Deleted" ${pendingNotificationActions.has(item.id) ? "disabled" : ""}><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h12M8 6V4.5h4V6m-6.5 0 .7 10h7.6l.7-10M8.5 9v4m3-4v4"/></svg></button>`;
+  return `<li><article class="notification-card ${item.read ? "is-read" : "is-unread"}" ${inTrash ? `data-deleted-notification-id="${id}"` : `data-notification-id="${id}"`} tabindex="0" aria-label="${escapeHtml(item.title)}, ${item.read ? "read" : "unread"}">
+    <span class="notification-icon" aria-hidden="true">${notificationIcon(item)}</span>
+    <span class="notification-copy"><strong class="notification-title">${escapeHtml(item.title)}</strong><span class="notification-message">${escapeHtml(item.message)}</span><span class="notification-meta">${tag ? `<span class="notification-tag">${escapeHtml(tag)}</span>` : ""}${date ? `<time>${escapeHtml(date)}</time>` : ""}${relative ? `<span>${escapeHtml(relative)}</span>` : ""}</span>${inTrash ? `<span class="notification-trash-actions">${controls}</span>` : ""}</span>
+    ${inTrash ? "" : `<span class="notification-card-actions">${controls}</span>`}
+  </article></li>`;
+}
+
+async function updateOrganizerFirestoreRead(item, read) {
+  if (item.source !== "firestore") return;
+  const [config, firestoreModule] = await Promise.all([
+    import("../UserStudent/firebaseConfig.js"),
+    import("https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js"),
+  ]);
+  const user = config.auth?.currentUser;
+  if (!user || !organizerIdentifiers.has(String(user.uid))) {
+    throw new Error("The signed-in organizer could not be verified.");
+  }
+  await firestoreModule.updateDoc(
+    firestoreModule.doc(config.db, "notifications", item.id),
+    { read: Boolean(read) },
+  );
+}
+
+async function permanentlyDeleteOrganizerNotification(item) {
+  if (item.source !== "firestore") return;
+  const [config, firestoreModule] = await Promise.all([
+    import("../UserStudent/firebaseConfig.js"),
+    import("https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js"),
+  ]);
+  const user = config.auth?.currentUser;
+  if (!user || !organizerIdentifiers.has(String(user.uid))) {
+    throw new Error("The signed-in organizer could not be verified.");
+  }
+  await firestoreModule.deleteDoc(
+    firestoreModule.doc(config.db, "notifications", item.id),
+  );
+}
+
+async function setOrganizerNotificationRead(item, read) {
+  if (!item || pendingNotificationActions.has(item.id)) return false;
+  pendingNotificationActions.add(item.id);
+  renderNotifications();
+  try {
+    await updateOrganizerFirestoreRead(item, read);
+    item.read = Boolean(read);
+    saveNotifications();
+    return true;
+  } catch (error) {
+    console.error("[OrganizerNotifications] Could not update notification read state:", error);
+    window.alert("This notification could not be updated. Please try again.");
+    return false;
+  } finally {
+    pendingNotificationActions.delete(item.id);
+    renderNotifications();
+  }
+}
+
 function refreshNotificationsFromStorage() {
   const stored = JSON.parse(
     localStorage.getItem(notificationStorageKey) || "[]",
   );
   notifications = Array.isArray(stored)
     ? stored.filter(
-        (item) => isEventStatusNotification(item) && belongsToVisibleOrganizer(item),
+        (item) => isEventStatusNotification(item) &&
+          belongsToVisibleOrganizer(item) &&
+          !deletedNotifications.some((deletedItem) => deletedItem.id === item.id),
       )
     : [];
   notifications = notifications.map((item) => normalizeNotification(item));
@@ -303,7 +447,9 @@ function addOrganizerIdentifiers(user, profile = {}) {
     profile.accountNo,
   ]
     .filter(Boolean)
-    .forEach((identifier) => organizerIdentifiers.add(String(identifier)));
+    .forEach((identifier) =>
+      organizerIdentifiers.add(String(identifier).trim().toLowerCase()),
+    );
 }
 
 function persistFirestoreNotifications() {
@@ -328,15 +474,22 @@ async function listenForFirestoreNotifications() {
       import("https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js"),
       import("https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js"),
     ]);
-    if (!config.auth || !config.db) return;
+    if (!config.auth || !config.db) {
+      firestoreNotificationError = "Organizer notifications are unavailable because Firebase is not configured.";
+      renderNotifications();
+      return;
+    }
     await config.authReady;
 
-    authModule.onAuthStateChanged(config.auth, (user) => {
+    authStateUnsubscribe?.();
+    authStateUnsubscribe = authModule.onAuthStateChanged(config.auth, (user) => {
       firestoreNotificationUnsubscribers.forEach((unsubscribe) => unsubscribe());
       firestoreNotificationUnsubscribers = [];
       firestoreNotifications.clear();
       if (!user) {
+        firestoreNotificationError = "Sign in to load organizer notifications.";
         persistFirestoreNotifications();
+        renderNotifications();
         return;
       }
 
@@ -390,6 +543,7 @@ async function listenForFirestoreNotifications() {
               }
             });
             querySnapshots.set(queryIndex, queryResults);
+            firestoreNotificationError = "";
             firestoreNotifications.clear();
             querySnapshots.forEach((results) => {
               results.forEach((notification, id) => firestoreNotifications.set(id, notification));
@@ -397,28 +551,32 @@ async function listenForFirestoreNotifications() {
             persistFirestoreNotifications();
           },
           (error) => {
+            firestoreNotificationError = "Some notifications could not be loaded. Check your connection and try again.";
             console.error("[OrganizerNotifications] Firestore notification listener failed:", {
               queryIndex,
               code: error?.code || "unknown",
               message: error?.message || String(error),
             });
+            renderNotifications();
           },
         );
         firestoreNotificationUnsubscribers.push(unsubscribe);
       });
     });
   } catch (error) {
+    firestoreNotificationError = "Notifications could not be initialized. Check your connection and try again.";
     console.error("[OrganizerNotifications] Could not initialize Firestore notifications:", {
       code: error?.code || "unknown",
       message: error?.message || String(error),
     });
+    renderNotifications();
   }
 }
 
 function renderDeletedNotifications() {
   const now = Date.now();
   const activeDeleted = deletedNotifications.filter(
-    (item) => !item.expiresAt || item.expiresAt > now,
+    (item) => item.expiresAt > now && belongsToVisibleOrganizer(item),
   );
   if (activeDeleted.length !== deletedNotifications.length) {
     deletedNotifications = activeDeleted;
@@ -427,22 +585,8 @@ function renderDeletedNotifications() {
 
   const list = document.getElementById("deletedNotificationList");
   list.innerHTML = deletedNotifications.length
-    ? deletedNotifications
-        .map(
-          (item) => `
-    <article class="notification-card deleted-notification-card type-${item.type}" data-deleted-notification-id="${item.id}">
-      <h3 class="notification-title">${item.title}</h3>
-      <p class="notification-message">${item.message}</p>
-      <div class="notification-meta">${item.expiresAt ? `${Math.max(1, Math.ceil((item.expiresAt - now) / 86400000))} day(s) left in trash` : "Deleted recently"}</div>
-      <div class="deleted-notification-actions">
-        <button type="button" data-deleted-action="restore">Restore</button>
-        <button type="button" data-deleted-action="delete-permanently">Delete Permanently</button>
-      </div>
-    </article>
-  `,
-        )
-        .join("")
-    : '<div class="empty-notifications">Trash bin is empty.</div>';
+    ? `<ul class="notification-list">${deletedNotifications.map((item) => renderNotificationCard(item, true)).join("")}</ul>`
+    : '<div class="notification-state"><span class="notification-state-icon" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M16 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M8 20a2 2 0 0 0 4 0"/></svg></span><strong>Recently Deleted is empty</strong><p>Notifications you delete will wait here for 30 days before they are removed.</p></div>';
 }
 
 function renderNotifications() {
@@ -456,57 +600,108 @@ function renderNotifications() {
       (activeFilter === "read" ? item.read : !item.read);
     const textMatch =
       !query || `${item.title} ${item.message}`.toLowerCase().includes(query);
-    return filterMatch && textMatch;
+    return belongsToVisibleOrganizer(item) && filterMatch && textMatch;
   });
 
   const list = document.getElementById("notificationList");
-  list.innerHTML = visible.length
-    ? visible
-        .map(
-          (item) => `
-    <article class="notification-card type-${item.type} ${item.read ? "is-read" : ""}" id="notification-card-${item.id}" data-notification-id="${item.id}" tabindex="0" aria-label="${item.title}, ${item.read ? "read" : "unread"}">
-      <div class="notification-actions">
-        <button class="notification-menu-toggle" type="button" aria-label="More actions for ${item.title}" aria-expanded="false">
-          <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><circle cx="4" cy="10" r="1.5"/><circle cx="10" cy="10" r="1.5"/><circle cx="16" cy="10" r="1.5"/></svg>
-        </button>
-        <div class="notification-menu" hidden>
-          <button type="button" data-notification-action="read">Read</button>
-          <button type="button" data-notification-action="unread">Unread</button>
-          <button type="button" data-notification-action="delete">Delete</button>
-        </div>
-      </div>
-      <h3 class="notification-title">${escapeHtml(item.title)}</h3>
-      <p class="notification-message">${escapeHtml(item.message)}</p>
-      <div class="notification-meta"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 3.5a4.5 4.5 0 0 0-4.5 4.5v2.4c0 .5-.2 1-.5 1.4L4 13h12l-1-1.2c-.3-.4-.5-.9-.5-1.4V8A4.5 4.5 0 0 0 10 3.5Z" stroke="currentColor" stroke-width="1.3"/><path d="M8.3 16a1.7 1.7 0 0 0 3.4 0" stroke="currentColor" stroke-width="1.3"/></svg>${escapeHtml(item.time)}</div>
-    </article>
-  `,
-        )
-        .join("")
-    : '<div class="empty-notifications">No notifications match your filters.</div>';
+  const errorMarkup = firestoreNotificationError
+    ? `<div class="notification-source-warning" role="alert">${escapeHtml(firestoreNotificationError)} <button type="button" data-retry-notifications>Try again</button></div>`
+    : "";
+  list.innerHTML = errorMarkup + (visible.length
+    ? ["Today", "This week", "Earlier"].map((group) => {
+        const items = visible.filter((item) => notificationGroup(item) === group);
+        return items.length
+          ? `<section class="notification-group"><h2>${group.toUpperCase()}</h2><ul class="notification-list">${items.map((item) => renderNotificationCard(item)).join("")}</ul></section>`
+          : "";
+      }).join("")
+    : `<div class="notification-state"><span class="notification-state-icon" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M16 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M8 20a2 2 0 0 0 4 0"/></svg></span><strong>${activeFilter === "unread" ? "No unread notifications" : "You have no notifications"}</strong><p>${activeFilter === "unread" ? "Everything has been read. Nice work." : "New notifications will show up here."}</p></div>`);
 
-  const unread = notifications.filter((item) => !item.read).length;
+  const unread = notifications.filter(
+    (item) => !item.read && belongsToVisibleOrganizer(item),
+  ).length;
   const badge = document.getElementById("navNotifBadge");
   if (badge) {
-    badge.textContent = unread;
+    badge.textContent = unread > 99 ? "99+" : String(unread);
     badge.hidden = unread === 0;
   }
 
+  const unreadCount = notifications.filter((item) => !item.read && belongsToVisibleOrganizer(item)).length;
+  const unreadLabel = document.getElementById("notificationUnreadCount");
+  if (unreadLabel) unreadLabel.textContent = String(unreadCount);
+  document.querySelectorAll("[data-notification-filter]").forEach((button) => {
+    const selected = button.dataset.notificationFilter === activeFilter ||
+      (button.dataset.notificationFilter === "all" && activeFilter === "read");
+    button.classList.toggle("is-active", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
+  const firstPanel = document.getElementById("notificationPanels")?.querySelector(":scope > .notifications-panel");
+  showingTrashView = firstPanel?.id === "deletedNotificationsPanel";
+  document.getElementById("recentDeletedInfo").hidden = !showingTrashView;
+  const action = document.getElementById("markAllRead");
+  action.textContent = showingTrashView ? "Empty trash" : "Mark all as read";
+  action.disabled = pendingNotificationActions.size > 0 ||
+    (showingTrashView ? deletedNotifications.length === 0 : unreadCount === 0);
+  document.getElementById("showDeletedNotifications").setAttribute(
+    "aria-label",
+    showingTrashView ? "Return to notifications" : "Open Recently Deleted",
+  );
   renderDeletedNotifications();
 }
 
-function markAllRead() {
-  notifications = notifications.map((item) => ({ ...item, read: true }));
+async function markAllRead() {
+  const unread = notifications.filter((item) => !item.read && belongsToVisibleOrganizer(item));
+  const action = document.getElementById("markAllRead");
+  if (action) action.disabled = true;
+  const results = await Promise.all(unread.map(async (item) => {
+    pendingNotificationActions.add(item.id);
+    try {
+      await updateOrganizerFirestoreRead(item, true);
+      item.read = true;
+      return true;
+    } catch (error) {
+      console.error("[OrganizerNotifications] Could not mark notification as read:", error);
+      return false;
+    } finally {
+      pendingNotificationActions.delete(item.id);
+    }
+  }));
   saveNotifications();
   renderNotifications();
+  const toast = document.getElementById("organizerNotificationToast");
+  if (toast) {
+    toast.textContent = results.every(Boolean)
+      ? "All notifications marked as read."
+      : "Some notifications could not be updated. Please try again.";
+    toast.hidden = false;
+    clearTimeout(undoTimer);
+    undoTimer = setTimeout(() => { toast.hidden = true; }, 3000);
+  }
 }
 
-function deleteAllNotifications() {
+async function deleteAllNotifications() {
   if (!deletedNotifications.length) return;
-  if (!window.confirm("Permanently delete all recently deleted notifications?"))
-    return;
-  deletedNotifications = [];
+  const count = deletedNotifications.length;
+  if (!window.confirm(`Permanently delete all ${count} notifications? This cannot be undone.`)) return;
+  const action = document.getElementById("markAllRead");
+  if (action) action.disabled = true;
+  const items = [...deletedNotifications];
+  items.forEach((item) => pendingNotificationActions.add(item.id));
+  renderNotifications();
+  const failed = [];
+  for (const item of items) {
+    try {
+      await permanentlyDeleteOrganizerNotification(item);
+      deletedNotifications = deletedNotifications.filter((entry) => entry.id !== item.id);
+    } catch (error) {
+      console.error("[OrganizerNotifications] Could not permanently delete notification:", error);
+      failed.push(item);
+    } finally {
+      pendingNotificationActions.delete(item.id);
+    }
+  }
   saveDeletedNotifications();
-  renderDeletedNotifications();
+  renderNotifications();
+  if (failed.length) window.alert(`${failed.length} notifications could not be permanently deleted. Please try again.`);
 }
 
 function updateNotificationPanelControls(showingDeletedNotifications) {
@@ -518,12 +713,11 @@ function updateNotificationPanelControls(showingDeletedNotifications) {
   if (!toggle || !label || !icon || !action) return;
 
   toggle.setAttribute("aria-pressed", String(showingDeletedNotifications));
+  toggle.setAttribute("aria-label", showingDeletedNotifications ? "Return to notifications" : "Open Recently Deleted");
   label.textContent = showingDeletedNotifications
     ? "All Notifications"
     : "Recently Deleted";
-  action.textContent = showingDeletedNotifications
-    ? "Delete All"
-    : "Mark All As Read";
+  action.textContent = showingDeletedNotifications ? "Empty trash" : "Mark all as read";
   icon.innerHTML = showingDeletedNotifications
     ? '<path d="M3.5 5.5h13M5 5.5v10h10v-10M7.5 3.5h5l1 2h-7l1-2M8 8v5m4-5v5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>'
     : '<path d="M4 6h12M8 6V4.5h4V6m-6.5 0 .7 10h7.6l.7-10M8.5 9v4m3-4v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>';
@@ -567,9 +761,20 @@ function deletePendingNotification() {
   };
   notifications = notifications.filter((item) => item.id !== pendingDeleteId);
   deletedNotifications.unshift(moved);
+  undoDeletedItem = moved;
   saveNotifications();
   closeDeleteConfirmation();
   renderNotifications();
+  const toast = document.getElementById("organizerNotificationToast");
+  if (toast) {
+    toast.innerHTML = 'Moved to Recently Deleted <button type="button" data-undo-delete>Undo</button>';
+    toast.hidden = false;
+    clearTimeout(undoTimer);
+    undoTimer = setTimeout(() => {
+      undoDeletedItem = null;
+      toast.hidden = true;
+    }, 6000);
+  }
 }
 
 function openNotificationDetails(item) {
@@ -665,10 +870,17 @@ document.addEventListener("DOMContentLoaded", () => {
       activeFilter = event.target.value;
       renderNotifications();
     });
+  document.querySelectorAll("[data-notification-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      filterSelect.value = button.dataset.notificationFilter;
+      filterSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  });
 
   if (toggle)
     toggle.addEventListener("click", () => {
       swapNotificationPanels();
+      renderNotifications();
     });
 
   if (markReadButton)
@@ -678,12 +890,18 @@ document.addEventListener("DOMContentLoaded", () => {
         ?.querySelector(":scope > .notifications-panel");
       const showingDeletedNotifications =
         firstPanel?.id === "deletedNotificationsPanel";
-      if (showingDeletedNotifications) deleteAllNotifications();
-      else markAllRead();
+      if (showingDeletedNotifications) void deleteAllNotifications();
+      else void markAllRead();
     });
 
   if (list)
     list.addEventListener("click", (event) => {
+      if (event.target.closest("[data-retry-notifications]")) {
+        firestoreNotificationError = "";
+        renderNotifications();
+        void listenForFirestoreNotifications();
+        return;
+      }
       const card = event.target.closest("[data-notification-id]");
       if (!card) return;
 
@@ -720,22 +938,31 @@ document.addEventListener("DOMContentLoaded", () => {
           openDeleteConfirmation(item.id);
           return;
         }
-        item.read = menuAction.dataset.notificationAction === "read";
-        saveNotifications();
-        renderNotifications();
+        void setOrganizerNotificationRead(item, menuAction.dataset.notificationAction === "read");
         return;
       }
 
       if (item) {
-        item.read = true;
-        saveNotifications();
-        renderNotifications();
-        if (item.eventId) {
-          window.location.href = `EventOrganizerMyEvents.html?event=${encodeURIComponent(item.eventId)}`;
-          return;
-        }
-        openNotificationDetails(item);
+        void setOrganizerNotificationRead(item, true).then((success) => {
+          if (success && item.eventId) {
+            window.location.href = `EventOrganizerMyEvents.html?event=${encodeURIComponent(item.eventId)}`;
+          }
+        });
       }
+    });
+  if (list)
+    list.addEventListener("keydown", (event) => {
+      if (!["Enter", " "].includes(event.key) || event.target.closest("button, a, input, select")) return;
+      const card = event.target.closest("[data-notification-id]");
+      if (!card) return;
+      const item = notifications.find((notification) => notification.id === card.dataset.notificationId);
+      if (!item) return;
+      event.preventDefault();
+      void setOrganizerNotificationRead(item, true).then((success) => {
+        if (success && item.eventId) {
+          window.location.href = `EventOrganizerMyEvents.html?event=${encodeURIComponent(item.eventId)}`;
+        }
+      });
     });
 
   if (deletedList)
@@ -758,9 +985,26 @@ document.addEventListener("DOMContentLoaded", () => {
         );
         saveNotifications();
       } else {
-        deletedNotifications = deletedNotifications.filter(
-          (notification) => notification.id !== item.id,
-        );
+        if (!window.confirm("Permanently delete this notification? This cannot be undone.")) return;
+        if (pendingNotificationActions.has(item.id)) return;
+        pendingNotificationActions.add(item.id);
+        renderNotifications();
+        void permanentlyDeleteOrganizerNotification(item)
+          .then(() => {
+            deletedNotifications = deletedNotifications.filter(
+              (notification) => notification.id !== item.id,
+            );
+            saveDeletedNotifications();
+          })
+          .catch((error) => {
+            console.error("[OrganizerNotifications] Could not permanently delete notification:", error);
+            window.alert("This notification could not be permanently deleted. Please try again.");
+          })
+          .finally(() => {
+            pendingNotificationActions.delete(item.id);
+            renderNotifications();
+          });
+        return;
       }
 
       saveDeletedNotifications();
@@ -800,6 +1044,8 @@ document.addEventListener("DOMContentLoaded", () => {
   window.addEventListener("beforeunload", () => {
     firestoreNotificationUnsubscribers.forEach((unsubscribe) => unsubscribe());
     firestoreNotificationUnsubscribers = [];
+    authStateUnsubscribe?.();
+    authStateUnsubscribe = null;
   });
 
   const viewEventButton = document.getElementById("notificationViewEvent");

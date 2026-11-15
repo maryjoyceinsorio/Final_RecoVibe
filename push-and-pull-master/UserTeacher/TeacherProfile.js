@@ -16,27 +16,6 @@
     return `${clean.slice(0, 4)} ${clean.slice(4, 7)} ${clean.slice(7, 11)}`;
   }
 
-  function getDepartmentShort(dept) {
-    if (!dept) return "CCIS";
-    const map = {
-      "Department of Computer Studies": "CCIS",
-      "College of Computer and Information Sciences": "CCIS",
-      "Department of Engineering": "COE",
-      "College of Engineering": "COE",
-      "Department of Business Administration": "CBA",
-      "College of Business Administration": "CBA",
-      "Department of Education": "COED",
-      "College of Education": "COED",
-    };
-    if (map[dept]) return map[dept];
-    if (dept.length <= 6) return dept;
-    const words = dept.split(/\s+/).filter((w) => !["of", "in", "and", "the", "for"].includes(w.toLowerCase()));
-    if (words.length > 1) {
-      return words.map((w) => w[0].toUpperCase()).join("");
-    }
-    return dept.slice(0, 4).toUpperCase();
-  }
-
   const DEFAULT_TEACHER = {
     firstName: "Maria",
     middleName: "",
@@ -96,19 +75,12 @@
     profile.name = fullName;
 
     const initials = Array.from(firstName || fullName || "T")[0]?.toUpperCase() || "T";
-    const deptShort = getDepartmentShort(profile.department);
 
     // Hero Banner
     const heroAvatar = document.getElementById("heroAvatar");
     if (heroAvatar) heroAvatar.textContent = initials;
     const heroUserName = document.getElementById("heroUserName");
     if (heroUserName) heroUserName.textContent = fullName;
-    const heroTeacherId = document.getElementById("heroTeacherId");
-    if (heroTeacherId) heroTeacherId.textContent = profile.teacherId || profile.employeeId || "2024-FAC-0102";
-    const heroDeptName = document.getElementById("heroDeptName");
-    if (heroDeptName) heroDeptName.textContent = profile.department || "Department of Computer Studies";
-    const heroDeptBadge = document.getElementById("heroDeptBadge");
-    if (heroDeptBadge) heroDeptBadge.textContent = deptShort;
     const heroRoleBadge = document.getElementById("heroRoleBadge");
     if (heroRoleBadge) heroRoleBadge.textContent = profile.role ? (profile.role.includes("Faculty") ? "Faculty" : profile.role) : "Faculty";
 

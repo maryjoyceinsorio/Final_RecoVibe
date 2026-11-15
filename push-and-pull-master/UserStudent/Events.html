@@ -1297,6 +1297,27 @@
         opacity: 1;
         transform: translateX(-50%) translateY(0);
       }
+      .toast.has-action {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        pointer-events: auto;
+      }
+      .toast-retry {
+        min-height: 36px;
+        padding: 4px 12px;
+        border: 1px solid rgba(255, 255, 255, 0.65);
+        border-radius: 999px;
+        background: transparent;
+        color: #fff;
+        font: inherit;
+        font-weight: 700;
+      }
+      .toast-retry:hover,
+      .toast-retry:focus-visible {
+        background: rgba(255, 255, 255, 0.14);
+        outline: none;
+      }
 
       @media (max-width: 860px) {
         .app {
@@ -1428,6 +1449,31 @@
         position: relative;
         z-index: 1020;
       }
+      .date-range-trigger {
+        min-height: 40px;
+        max-width: 100%;
+        border: 1px solid rgba(122, 31, 46, 0.24);
+        background: #fbf9f5;
+        color: #332628;
+        white-space: nowrap;
+      }
+      .date-range-trigger:hover {
+        background: #f4efe4;
+      }
+      .date-range-trigger:focus-visible {
+        outline: 3px solid rgba(122, 31, 46, 0.28);
+        outline-offset: 2px;
+      }
+      .date-range-trigger.is-open {
+        border-color: #7a1f2e;
+      }
+      .date-range-trigger.is-open::after {
+        transform: rotate(225deg) translateY(-2px);
+      }
+      .date-range-trigger.is-applied {
+        border-color: rgba(122, 31, 46, 0.55);
+        color: #7a1f2e;
+      }
       .date-range-panel {
         position: absolute;
         top: calc(100% + 8px);
@@ -1439,11 +1485,13 @@
         box-shadow: 0 16px 40px rgba(36, 26, 23, 0.14);
         z-index: 1050;
         padding: 0;
-        width: 710px;
+        width: 660px;
         max-width: calc(100vw - 32px);
+        max-height: calc(100vh - 32px);
         box-sizing: border-box;
         display: flex;
-        overflow: hidden;
+        overflow-x: hidden;
+        overflow-y: auto;
         text-align: left;
       }
       .date-range-panel[hidden] {
@@ -1525,8 +1573,8 @@
       }
       .date-cal-nav-btn {
         pointer-events: auto;
-        width: 32px;
-        height: 32px;
+        width: 38px;
+        height: 38px;
         border-radius: 50%;
         border: 1px solid #e2ddd5;
         background: #ffffff;
@@ -1594,8 +1642,8 @@
       }
       .date-cal-day {
         position: relative;
-        width: 34px;
-        height: 34px;
+        width: 38px;
+        height: 38px;
         margin: 0 auto;
         border: none;
         border-radius: 6px;
@@ -1637,9 +1685,14 @@
       }
       /* Range between (soft peach/cream fill, dark text) */
       .date-cal-day.range-between {
-        background: #fbf0e4 !important;
+        background: rgba(122, 31, 46, 0.12) !important;
         color: #1f1b18 !important;
         border-radius: 4px;
+      }
+      .date-cal-day.range-preview-end {
+        background: #7A1F2E;
+        color: #ffffff;
+        border-radius: 50%;
       }
       .date-cal-day.today.range-between {
         outline: 1.5px solid #7A1F2E;
@@ -1706,6 +1759,11 @@
         display: flex;
         align-items: center;
         justify-content: space-between;
+        position: sticky;
+        bottom: 0;
+        z-index: 4;
+        padding: 8px 0;
+        background: #ffffff;
       }
       .date-range-clear-btn {
         border: none;
@@ -1737,6 +1795,7 @@
         font-weight: 600;
         font-family: inherit;
         padding: 8px 22px;
+        min-height: 36px;
         cursor: pointer;
         transition: background 0.15s, border-color 0.15s;
         box-sizing: border-box;
@@ -1755,6 +1814,7 @@
         font-weight: 600;
         font-family: inherit;
         padding: 8px 26px;
+        min-height: 36px;
         cursor: pointer;
         transition: background 0.15s, opacity 0.15s;
         box-sizing: border-box;
@@ -1779,14 +1839,16 @@
       @media (max-width: 740px) {
         .date-range-panel {
           position: fixed;
-          top: 50%;
+          top: auto;
+          bottom: 0;
           left: 50%;
           right: auto;
-          transform: translate(-50%, -50%);
-          width: min(94vw, 360px);
-          max-height: 88vh;
+          transform: translateX(-50%);
+          width: min(100vw, 520px);
+          max-height: 92dvh;
           overflow-y: auto;
           flex-direction: column;
+          border-radius: 16px 16px 0 0;
         }
         .date-range-sidebar,
         .date-range-panel__sidebar {
@@ -1803,18 +1865,285 @@
         }
         .date-range-quick-list {
           flex-direction: row;
-          flex-wrap: wrap;
+          flex-wrap: nowrap;
+          overflow-x: auto;
+          width: 100%;
+        }
+        .date-range-presets-title {
           width: 100%;
         }
         .date-range-quick-btn {
           width: auto;
-          flex: 1 1 45%;
+          flex: 0 0 auto;
           text-align: center;
+          min-height: 40px;
         }
         .date-range-calendars,
         .date-range-calendars-row {
           grid-template-columns: 1fr;
           gap: 20px;
+        }
+        .date-range-calendars > .date-cal-month + .date-cal-month {
+          display: none;
+        }
+        .date-range-trigger {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+      }
+
+      .filter-dropdown--date-range:focus-within {
+        z-index: 2000;
+      }
+      .date-range-panel {
+        width: min(760px, calc(100vw - 32px));
+        max-width: calc(100vw - 32px);
+        max-height: calc(100dvh - 32px);
+        display: grid;
+        grid-template-columns: 160px minmax(0, 1fr);
+        grid-template-areas: "topbar topbar" "sidebar main";
+        grid-template-rows: 44px minmax(0, 1fr);
+        overflow: hidden;
+        overscroll-behavior: contain;
+        z-index: 2001;
+      }
+      .date-range-panel__topbar {
+        grid-area: topbar;
+        min-width: 0;
+        min-height: 44px;
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        padding: 6px 12px 0;
+        box-sizing: border-box;
+      }
+      .date-range-panel .date-range-close {
+        display: grid;
+        place-items: center;
+        width: 32px;
+        min-width: 32px;
+        height: 32px;
+        min-height: 32px;
+        margin: 0;
+        padding: 0;
+        border: 1px solid #e2ddd5;
+        border-radius: 50%;
+        background: #ffffff;
+        color: #4a3d38;
+        font-family: inherit;
+        font-size: 20px;
+        font-weight: 400;
+        line-height: 1;
+        cursor: pointer;
+        box-sizing: border-box;
+      }
+      .date-range-panel .date-range-close:focus {
+        outline: none;
+      }
+      .date-range-panel .date-range-close:focus-visible {
+        outline: 2px solid #7a1f2e;
+        outline-offset: 2px;
+      }
+      .date-range-panel .date-range-sidebar,
+      .date-range-panel .date-range-panel__sidebar {
+        grid-area: sidebar;
+        width: 160px;
+        min-width: 0;
+        min-height: 0;
+        overflow-y: auto;
+        box-sizing: border-box;
+      }
+      .date-range-panel .date-range-main,
+      .date-range-panel .date-range-panel__main {
+        grid-area: main;
+        display: flex;
+        flex-direction: column;
+        width: auto;
+        min-width: 0;
+        min-height: 0;
+        overflow: hidden;
+        padding: 12px 16px 14px;
+        box-sizing: border-box;
+      }
+      .date-range-panel .date-range-main__content {
+        flex: 1 1 auto;
+        min-width: 0;
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+      }
+      .date-range-panel .date-range-nav-row {
+        position: static;
+        min-width: 0;
+        margin: 0 0 8px;
+        z-index: auto;
+        pointer-events: auto;
+      }
+      .date-range-panel .date-cal-nav-btn {
+        flex: 0 0 36px;
+        width: 36px;
+        min-width: 36px;
+        height: 36px;
+        min-height: 36px;
+        box-sizing: border-box;
+      }
+      .date-range-panel .date-range-calendars,
+      .date-range-panel .date-range-calendars-row {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 24px;
+        min-width: 0;
+      }
+      .date-range-panel .date-cal-month {
+        min-width: 0;
+        width: 100%;
+      }
+      .date-range-panel .date-cal-month__title,
+      .date-range-panel .date-cal-title {
+        min-width: 0;
+        width: 100%;
+      }
+      .date-range-panel .date-cal-day-names,
+      .date-range-panel .date-cal-weekdays,
+      .date-range-panel .date-cal-grid {
+        min-width: 0;
+        grid-template-columns: repeat(7, minmax(0, 1fr));
+      }
+      .date-range-panel .date-cal-day-names,
+      .date-range-panel .date-cal-weekdays {
+        margin-left: 0;
+        margin-right: 0;
+      }
+      .date-range-panel .date-cal-grid {
+        column-gap: 0;
+        row-gap: 4px;
+      }
+      .date-range-panel .date-cal-day {
+        width: 100%;
+        min-width: 0;
+        height: 36px;
+        min-height: 36px;
+        margin: 0;
+        padding: 0;
+        line-height: 1;
+        box-sizing: border-box;
+      }
+      .date-range-panel .date-range-inputs-row,
+      .date-range-panel .date-range-footer {
+        min-width: 0;
+        box-sizing: border-box;
+      }
+      .date-range-panel .date-range-input-group {
+        min-width: 0;
+      }
+      .date-range-panel .date-range-input-group input {
+        box-sizing: border-box;
+        min-width: 0;
+      }
+      .date-range-panel .date-range-footer {
+        position: relative;
+        flex: 0 0 auto;
+        margin-top: auto;
+        z-index: 4;
+      }
+      .date-range-trigger {
+        min-width: 0;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      @media (min-width: 769px) and (max-height: 700px) {
+        .date-range-panel {
+          position: fixed;
+          top: auto;
+          right: auto;
+          bottom: 16px;
+          left: 50%;
+          transform: translateX(-50%);
+          width: min(760px, calc(100vw - 32px), calc(100% - 32px));
+          max-width: 760px;
+        }
+      }
+      @media (max-width: 768px) {
+        .date-range-panel {
+          position: fixed;
+          top: auto;
+          right: auto;
+          bottom: 16px;
+          left: 50%;
+          transform: translateX(-50%);
+          width: min(760px, calc(100vw - 32px), calc(100% - 32px));
+          max-width: 760px;
+          max-height: calc(100dvh - 32px);
+          grid-template-columns: minmax(0, 1fr);
+          grid-template-areas: "topbar" "sidebar" "main";
+          grid-template-rows: 44px auto minmax(0, 1fr);
+          border-radius: 16px;
+        }
+        .date-range-panel .date-range-sidebar,
+        .date-range-panel .date-range-panel__sidebar {
+          width: 100%;
+          border-right: 0;
+          border-bottom: 1px solid #ede8df;
+          flex-direction: row;
+          flex-wrap: wrap;
+          padding: 12px;
+          overflow-y: auto;
+        }
+        .date-range-panel .date-range-presets-title {
+          width: 100%;
+          margin-bottom: 6px;
+        }
+        .date-range-panel .date-range-quick-list {
+          flex-direction: row;
+          flex-wrap: nowrap;
+          overflow-x: auto;
+          width: 100%;
+          min-width: 0;
+          overscroll-behavior-x: contain;
+        }
+        .date-range-panel .date-range-quick-btn {
+          width: auto;
+          min-height: 40px;
+          flex: 0 0 auto;
+          text-align: center;
+        }
+        .date-range-panel .date-range-main,
+        .date-range-panel .date-range-panel__main {
+          width: 100%;
+          max-width: 440px;
+          justify-self: center;
+          padding: 12px;
+        }
+        .date-range-panel .date-range-main__content {
+          overflow-y: auto;
+        }
+        .date-range-panel .date-range-calendars,
+        .date-range-panel .date-range-calendars-row {
+          grid-template-columns: minmax(0, 1fr);
+          gap: 16px;
+        }
+        .date-range-panel .date-range-calendars > .date-cal-month + .date-cal-month {
+          display: none;
+        }
+        .date-range-panel .date-range-inputs-row {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 8px;
+        }
+        .date-range-panel .date-range-input-group {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr);
+          gap: 4px;
+        }
+        .date-range-panel .date-range-input-group input {
+          width: 100%;
+        }
+        .date-range-panel .date-range-val-msg {
+          grid-column: 1 / -1;
+          margin-left: 0;
         }
       }
 
@@ -2385,7 +2714,7 @@
             <input
               type="text"
               id="searchInput"
-              placeholder="PUP Connect!"
+              placeholder="Search events or categories..."
               aria-label="Search events"
             />
           </div>
@@ -2419,12 +2748,6 @@
                   data-value="CSC"
                 >
                   CSC</button
-                ><button
-                  type="button"
-                  class="filter-option"
-                  data-value="Teacher / Faculty"
-                >
-                  Teacher / Faculty</button
                 ><button
                   type="button"
                   class="filter-option"
@@ -2536,14 +2859,15 @@
             <div class="filter-dropdown filter-dropdown--date-range" id="dateRangeDropdown">
               <button
                 type="button"
-                class="filter-button"
+                class="filter-button date-range-trigger"
                 id="dateRangeBtn"
                 data-filter="date-range"
                 aria-expanded="false"
                 aria-controls="dateRangePanel"
                 aria-haspopup="dialog"
+                aria-label="Date filter: All Dates"
               >
-                Date
+                All Dates
               </button>
               <div
                 class="date-range-panel"
@@ -2552,6 +2876,9 @@
                 aria-label="Date range selector"
                 hidden
               >
+                <div class="date-range-panel__topbar">
+                  <button type="button" class="date-range-close" id="dateRangeCloseBtn" aria-label="Close date range picker">&times;</button>
+                </div>
                 <div class="date-range-sidebar">
                   <div class="date-range-presets-title">QUICK RANGES</div>
                   <div class="date-range-quick-list">
@@ -2566,15 +2893,16 @@
                   </div>
                 </div>
                 <div class="date-range-main">
-                  <div class="date-range-nav-row">
-                    <button type="button" class="date-cal-nav-btn" id="calNavPrev" aria-label="Previous month">
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"></polyline></svg>
-                    </button>
-                    <button type="button" class="date-cal-nav-btn" id="calNavNext" aria-label="Next month">
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"></polyline></svg>
-                    </button>
-                  </div>
-                  <div class="date-range-calendars">
+                  <div class="date-range-main__content">
+                    <div class="date-range-nav-row">
+                      <button type="button" class="date-cal-nav-btn" id="calNavPrev" aria-label="Previous month">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                      </button>
+                      <button type="button" class="date-cal-nav-btn" id="calNavNext" aria-label="Next month">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                      </button>
+                    </div>
+                    <div class="date-range-calendars">
                     <div class="date-cal-month" id="calMonth1">
                       <div class="date-cal-month__title" id="calTitle1"></div>
                       <div class="date-cal-day-names">
@@ -2589,25 +2917,26 @@
                       </div>
                       <div class="date-cal-grid" id="calGrid2"></div>
                     </div>
-                  </div>
-                  <div class="date-range-bottom">
-                    <div class="date-range-inputs-row">
-                      <div class="date-range-input-group">
-                        <label for="dateRangeInputStart">From</label>
-                        <input type="text" id="dateRangeInputStart" placeholder="YYYY-MM-DD" autocomplete="off" />
-                      </div>
-                      <div class="date-range-input-group">
-                        <label for="dateRangeInputEnd">To</label>
-                        <input type="text" id="dateRangeInputEnd" placeholder="YYYY-MM-DD" autocomplete="off" />
-                      </div>
-                      <div class="date-range-val-msg" id="dateRangeValidationMsg" role="alert"></div>
                     </div>
-                    <div class="date-range-footer">
-                      <button type="button" class="date-range-clear-btn" id="dateRangeClearBtn">Clear</button>
-                      <div class="date-range-actions">
-                        <button type="button" class="date-range-cancel-btn" id="dateRangeCancelBtn">Cancel</button>
-                        <button type="button" class="date-range-apply-btn" id="dateRangeApplyBtn">Apply</button>
+                    <div class="date-range-bottom">
+                      <div class="date-range-inputs-row">
+                        <div class="date-range-input-group">
+                          <label for="dateRangeInputStart">From</label>
+                          <input type="text" id="dateRangeInputStart" placeholder="YYYY-MM-DD" autocomplete="off" />
+                        </div>
+                        <div class="date-range-input-group">
+                          <label for="dateRangeInputEnd">To</label>
+                          <input type="text" id="dateRangeInputEnd" placeholder="YYYY-MM-DD" autocomplete="off" />
+                        </div>
+                        <div class="date-range-val-msg" id="dateRangeValidationMsg" role="alert"></div>
                       </div>
+                    </div>
+                  </div>
+                  <div class="date-range-footer">
+                    <button type="button" class="date-range-clear-btn" id="dateRangeClearBtn">Clear</button>
+                    <div class="date-range-actions">
+                      <button type="button" class="date-range-cancel-btn" id="dateRangeCancelBtn">Cancel</button>
+                      <button type="button" class="date-range-apply-btn" id="dateRangeApplyBtn">Apply</button>
                     </div>
                   </div>
                 </div>
@@ -2791,7 +3120,7 @@
     <script src="notification-count.js"></script>
     <script src="../EventDetailsModal.js"></script>
     <script type="module">
-      import { auth, db, rtdb, functions, isFirebaseConfigured, isRtdbConfigured } from "./firebaseConfig.js";
+      import { auth, db, rtdb, isFirebaseConfigured, isRtdbConfigured } from "./firebaseConfig.js";
       import {
         clearCachedStudentProfile,
         loadStudentProfile,
@@ -2814,17 +3143,18 @@
         doc,
         onSnapshot,
         query,
+        runTransaction,
         where,
       } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-      import { httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
       import { getEventDateRange } from "./calendarDateRange.mjs";
 
       /* ---------------------------------------------------------
          STATE
       --------------------------------------------------------- */
+      const DEBUG = false;
       let currentUid = null;
       let serverTimeOffset = 0;
-      let permanentQrToken = "";
+      let studentQrPayload = "";
       let eventsLoading = true;
       let eventLoadError = "";
       let eventLoadTimer = null;
@@ -2835,13 +3165,14 @@
       const registrationStates = new Map();
       let loadRequestSequence = 0;
       const registrationPendingIds = new Set();
+      const cancellationPendingIds = new Set();
 
       const studentProfile = {
-        firstName: "Student",
+        firstName: "",
         middleName: "",
         lastName: "",
-        fullName: "Student",
-        studentNo: "2025-00790-BN-1",
+        fullName: "",
+        studentNo: "",
         organization: "",
         department: "",
         departmentCode: "",
@@ -2865,7 +3196,7 @@
         category: "All Categories",
         from: "", // YYYY-MM-DD
         to: "", // YYYY-MM-DD
-        quickPreset: "", // "today" | "tomorrow" | "this_week" | "this_weekend" | "next_week" | "this_month" | "next_month" | "all"
+        quickPreset: "all", // "today" | "tomorrow" | "this_week" | "this_weekend" | "next_week" | "this_month" | "next_month" | "all"
         status: "all", // "all" | "upcoming" | "cancelled" | "rescheduled" | "completed"
         reg: "all", // legacy alias
         avail: "all", // "all" | "available" | "full" | "closed"
@@ -2874,10 +3205,13 @@
 
       // Date Range Picker State
       const datePickerState = {
-        viewYear: 2026,
-        viewMonth: 9, // 0-indexed: 9 = October
+        viewYear: new Date().getFullYear(),
+        viewMonth: new Date().getMonth(),
         pendingStart: "", // YYYY-MM-DD
         pendingEnd: "", // YYYY-MM-DD
+        pendingPreset: "all",
+        hoverDate: "",
+        previousBodyOverflow: null,
       };
 
       /* ---------------------------------------------------------
@@ -2965,12 +3299,32 @@
       function showToast(message) {
         const toast = document.getElementById("toast");
         if (!toast) return;
+        toast.classList.remove("has-action");
         toast.textContent = message;
         toast.classList.add("is-visible");
         window.clearTimeout(showToast.timer);
         showToast.timer = window.setTimeout(
           () => toast.classList.remove("is-visible"),
-          2500,
+          4000,
+        );
+      }
+
+      function showCancellationError(message, eventId) {
+        const toast = document.getElementById("toast");
+        if (!toast) return;
+        toast.replaceChildren(document.createTextNode(message));
+        const retryButton = document.createElement("button");
+        retryButton.type = "button";
+        retryButton.className = "toast-retry";
+        retryButton.dataset.action = "retry-cancel";
+        retryButton.dataset.eventId = eventId;
+        retryButton.textContent = "Retry";
+        toast.append(retryButton);
+        toast.classList.add("has-action", "is-visible");
+        window.clearTimeout(showToast.timer);
+        showToast.timer = window.setTimeout(
+          () => toast.classList.remove("is-visible", "has-action"),
+          8000,
         );
       }
 
@@ -2982,9 +3336,9 @@
             ["localhost", "127.0.0.1", "::1"].includes(globalThis.location?.hostname);
       }
 
-      function logLoadStep(step, details = {}) {
-        if (isDevelopment()) {
-          console.log(`[Student Events] ${step}`, details);
+      function logLoadStep(step) {
+        if (DEBUG && isDevelopment()) {
+          console.info(`[Student Events] ${step}`);
         }
       }
 
@@ -3079,32 +3433,20 @@
         }
       }
 
-      async function getStudentQrToken() {
-        if (permanentQrToken) return permanentQrToken;
-        const cached = localStorage.getItem("recovibe_permanent_qr_token");
-        if (cached) {
-          permanentQrToken = cached;
-          return cached;
+      async function getStudentQrPayload() {
+        if (!currentUid) throw new Error("Sign in to load your attendance QR code.");
+        if (auth?.currentUser?.uid !== currentUid) {
+          throw new Error("The signed-in account changed. Please retry.");
         }
-
-        if (functions && currentUid && isFirebaseConfigured) {
-          try {
-            const callable = httpsCallable(functions, "getMyQrToken");
-            const res = await callable();
-            if (res?.data?.token) {
-              permanentQrToken = res.data.token;
-              localStorage.setItem("recovibe_permanent_qr_token", permanentQrToken);
-              return permanentQrToken;
-            }
-          } catch (err) {
-            console.warn("getMyQrToken notice:", err);
-          }
+        if (studentQrPayload) return studentQrPayload;
+        const studentNumber = String(
+          studentProfile.studentNo || studentProfile.studentNumber || "",
+        ).trim().toUpperCase();
+        if (!/^\d{4}-\d{5}-BN-\d$/.test(studentNumber)) {
+          throw new Error("Your student number is missing or invalid.");
         }
-
-        const fallback = `${currentUid || studentProfile.studentNo}.1.fallback_signed_token`;
-        permanentQrToken = fallback;
-        localStorage.setItem("recovibe_permanent_qr_token", fallback);
-        return fallback;
+        studentQrPayload = studentNumber;
+        return studentQrPayload;
       }
 
       async function renderQrToCanvas(canvas, token) {
@@ -3128,10 +3470,9 @@
       function normalizeSource(source) {
         const val = String(source || "").trim().toLowerCase();
         if (/\bcsc\b/.test(val)) return "CSC";
-        if (/teacher|faculty/.test(val)) return "Teacher / Faculty";
         if (/organization|organizational|ibits|event organizer/.test(val)) return "Organizational";
         if (/external|admin|other/.test(val)) return "Others / External";
-        if (/pup|campus|cite/.test(val)) return "PUP Official";
+        if (/pup|campus|cite|teacher|faculty/.test(val)) return "PUP Official";
         return "Others / External";
       }
 
@@ -3160,6 +3501,46 @@
           ? categoryValue.map((value) => String(value)).join(", ")
           : String(categoryValue);
         const organizerName = String(data.organizerName || data.organizer || "Event Organizer");
+        const organizationValue =
+          data.organizationName ||
+          data.organization ||
+          data.orgName ||
+          data.organizerOrganization ||
+          data.organizationCode ||
+          data.orgCode ||
+          data.organizerName ||
+          data.organizer;
+        let organizationName = typeof organizationValue === "object"
+          ? String(
+              organizationValue?.name ||
+                organizationValue?.organizationName ||
+                organizationValue?.organizationCode ||
+                organizationValue?.code ||
+                "",
+            ).trim()
+          : String(organizationValue || "").trim();
+        if (["event organizer", "not specified", "n/a"].includes(organizationName.toLowerCase())) {
+          organizationName = "";
+        }
+        const registrationEnd = data.registrationEnd || data.registrationDeadline || "";
+        const registrationEndText = String(registrationEnd || "").trim();
+        const registrationDeadlineAt = registrationEnd instanceof Date
+          ? registrationEnd.getTime()
+          : typeof registrationEnd?.toDate === "function"
+            ? registrationEnd.toDate().getTime()
+            : Number.isFinite(registrationEnd?.seconds)
+              ? registrationEnd.seconds * 1000
+              : typeof registrationEnd === "number"
+                ? registrationEnd
+                : registrationEndText
+                  ? Date.parse(
+                      /^\d{4}-\d{2}-\d{2}$/.test(registrationEndText)
+                        ? `${registrationEndText}T23:59:59.999+08:00`
+                        : /^\d{4}-\d{2}-\d{2}[T ]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(registrationEndText)
+                          ? `${registrationEndText.replace(" ", "T")}+08:00`
+                          : registrationEndText,
+                    )
+                  : NaN;
 
         const capacityVal = data.capacity !== undefined ? data.capacity : (data.maxCapacity || null);
         const capacityNum = (capacityVal !== null && capacityVal !== undefined && !isNaN(Number(capacityVal)) && Number(capacityVal) > 0)
@@ -3183,7 +3564,12 @@
           capacity: capacityNum,
           registeredCount: regCount,
           registrationClosed:
-            data.registrationClosed === true || data.registrationEnabled === false,
+            data.registrationClosed === true ||
+            data.registrationEnabled === false ||
+            String(data.registrationStatus || "").trim().toLowerCase() === "closed",
+          registrationEnd,
+          registrationDeadline: data.registrationDeadline || registrationEnd,
+          registrationDeadlineAt,
           checkedInCount: typeof data.checkedInCount === "number" ? data.checkedInCount : undefined,
           organizerName,
           organizerUid: data.organizerUid || data.organizerId || "",
@@ -3196,7 +3582,7 @@
           organizationCode: data.organizationCode || "",
           organizerOrganization: data.organizerOrganization || "",
           organization: data.organization || "",
-          organizationName: data.organizationName || "",
+          organizationName,
           orgCode: data.orgCode || "",
           orgName: data.orgName || "",
           creatorRole: data.creatorRole || data.createdByRole || "",
@@ -3229,21 +3615,45 @@
 
       function renderRegistrationButton(ev, openSlots, includeQr = false) {
         const state = getRegistrationState(ev.id);
+        if (cancellationPendingIds.has(ev.id)) {
+          return '<button type="button" class="btn-live-cancel" disabled>Cancelling...</button>';
+        }
+        if (registrationPendingIds.has(ev.id)) {
+          return '<button type="button" class="btn-live-reg" disabled>Processing...</button>';
+        }
         if (state === "loading") {
           return '<button type="button" class="btn-live-reg" disabled>Checking registration...</button>';
-        }
-        if (state === "error") {
-          return `<button type="button" class="btn-live-reg" data-action="retry-registration" data-event-id="${ev.id}">Retry status</button>`;
         }
         if (state === "registered") {
           const qrButton = includeQr
             ? `<button type="button" class="btn-live-qr" data-action="toggle-qr" data-event-id="${ev.id}">${openQrEventId === ev.id ? "Hide QR" : "Show my QR"}</button>`
             : "";
-          return `${qrButton}<button type="button" class="btn-live-reg" disabled>Registered</button><button type="button" class="btn-live-cancel" data-action="cancel" data-event-id="${ev.id}">Cancel registration</button>`;
+          const canCancel = Number.isFinite(ev.startAt) && ev.startAt > 0 && getNow() < ev.startAt;
+          return `${qrButton}<button type="button" class="btn-live-reg" disabled>Registered</button>${canCancel ? `<button type="button" class="btn-live-cancel" data-action="cancel" data-event-id="${ev.id}">Cancel registration</button>` : ""}`;
+        }
+        if (
+          ev.registrationClosed ||
+          ev.status === "closed" ||
+          Number.isFinite(ev.registrationDeadlineAt) &&
+            getNow() > ev.registrationDeadlineAt
+        ) {
+          return '<button type="button" class="btn-live-reg" disabled>Registration Closed</button>';
+        }
+        if (!openSlots) {
+          return '<button type="button" class="btn-live-reg" disabled>Fully Booked</button>';
+        }
+        if (
+          ["cancelled", "canceled", "completed"].includes(ev.status) ||
+          getEventClassification(ev, getNow()) === "ended"
+        ) {
+          return '<button type="button" class="btn-live-reg" disabled>This event is no longer open for registration.</button>';
+        }
+        if (state === "error") {
+          return `<button type="button" class="btn-live-reg" data-action="retry-registration" data-event-id="${ev.id}">Retry status</button>`;
         }
         return `
-          <button type="button" class="btn-live-reg" data-action="register" data-event-id="${ev.id}" ${!openSlots ? "disabled" : ""}>
-            ${openSlots ? "Register" : "Full"}
+          <button type="button" class="btn-live-reg" data-action="register" data-event-id="${ev.id}">
+            Register
           </button>
         `;
       }
@@ -3268,12 +3678,16 @@
         if (!isLiveSection) {
           if (!hasRange) {
             // With NO range: ended events are hidden from All Events unless status is explicitly "completed"
-            if (activeStatus !== "completed" && classification === "ended") return false;
+            if (
+              activeStatus !== "completed" &&
+              classification === "ended" &&
+              !(activeStatus === "all" && filterState.avail === "closed")
+            ) return false;
           } else {
             // With A range: event matches if any part falls inside range
             // (startDate <= range end and endDate >= range start), whole days inclusive
-            const evStartDay = toPhDateStr(ev.startAt);
-            const evEndDay = toPhDateStr(ev.endAt || ev.startAt);
+            const evStartDay = new Date(ev.startAt).toLocaleDateString("en-CA");
+            const evEndDay = new Date(ev.endAt || ev.startAt).toLocaleDateString("en-CA");
             if (!(evStartDay <= filterState.to && evEndDay >= filterState.from)) {
               return false;
             }
@@ -3282,12 +3696,9 @@
 
         // Search query
         if (filterState.q) {
-          const q = filterState.q.toLowerCase();
-          const matchTitle = ev.name.toLowerCase().includes(q);
-          const matchVenue = ev.venue.toLowerCase().includes(q);
-          const matchCategory = ev.category.toLowerCase().includes(q);
-          const matchOrg = ev.organizerName.toLowerCase().includes(q);
-          if (!matchTitle && !matchVenue && !matchCategory && !matchOrg) return false;
+          const q = filterState.q.toLowerCase().replace(/\s+/g, " ").trim();
+          const eventName = ev.name.toLowerCase().replace(/\s+/g, " ").trim();
+          if (!eventName.includes(q)) return false;
         }
 
         // Source filter
@@ -3353,7 +3764,7 @@
         if (params.has("avail")) filterState.avail = params.get("avail").trim();
 
         if (filterState.from && filterState.to && !filterState.quickPreset) {
-          const todayStr = toPhDateStr(getNow());
+          const todayStr = new Date().toLocaleDateString("en-CA");
           const [ty, tm, td] = todayStr.split("-").map(Number);
           const firstDay = `${ty}-${String(tm).padStart(2, "0")}-01`;
           const lastDay = `${ty}-${String(tm).padStart(2, "0")}-${String(new Date(ty, tm, 0).getDate()).padStart(2, "0")}`;
@@ -3416,27 +3827,24 @@
 
         const dateBtn = document.getElementById("dateRangeBtn");
         if (dateBtn) {
-          if (filterState.from && filterState.to) {
-            if (filterState.quickPreset === "this_month") {
-              dateBtn.textContent = "This month";
-            } else if (filterState.quickPreset === "today") {
-              dateBtn.textContent = "Today";
-            } else if (filterState.quickPreset === "tomorrow") {
-              dateBtn.textContent = "Tomorrow";
-            } else if (filterState.quickPreset === "this_week") {
-              dateBtn.textContent = "This week";
-            } else if (filterState.quickPreset === "this_weekend") {
-              dateBtn.textContent = "This weekend";
-            } else if (filterState.quickPreset === "next_week") {
-              dateBtn.textContent = "Next week";
-            } else if (filterState.quickPreset === "next_month") {
-              dateBtn.textContent = "Next month";
-            } else {
-              dateBtn.textContent = `${formatPhDateDisplay(filterState.from)} – ${formatPhDateDisplay(filterState.to)}`;
-            }
-          } else {
-            dateBtn.textContent = "Date";
-          }
+          const quickLabels = {
+            today: "Today",
+            tomorrow: "Tomorrow",
+            this_week: "This week",
+            this_weekend: "This weekend",
+            next_week: "Next week",
+            this_month: "This month",
+            next_month: "Next month",
+          };
+          const label = filterState.from
+            ? quickLabels[filterState.quickPreset] ||
+              (filterState.from === filterState.to
+                ? formatPhDateDisplay(filterState.from)
+                : `${formatPhDateDisplay(filterState.from)} – ${formatPhDateDisplay(filterState.to)}`)
+            : "All Dates";
+          dateBtn.textContent = label;
+          dateBtn.setAttribute("aria-label", `Date filter: ${label}`);
+          dateBtn.classList.toggle("is-applied", Boolean(filterState.from));
         }
 
         const regBtn = document.getElementById("regFilterBtn") || document.getElementById("statusFilterBtn");
@@ -3570,6 +3978,7 @@
         const nextBtn = document.getElementById("calNavNext");
         const clearBtn = document.getElementById("dateRangeClearBtn");
         const cancelBtn = document.getElementById("dateRangeCancelBtn");
+        const closeBtn = document.getElementById("dateRangeCloseBtn");
         const applyBtn = document.getElementById("dateRangeApplyBtn");
         const inputStart = document.getElementById("dateRangeInputStart");
         const inputEnd = document.getElementById("dateRangeInputEnd");
@@ -3577,7 +3986,7 @@
         if (!btn || !panel) return;
 
         // Set initial view month based on today or existing filter
-        const now = new Date(getNow());
+        const now = new Date();
         datePickerState.viewYear = now.getFullYear();
         datePickerState.viewMonth = now.getMonth();
 
@@ -3595,7 +4004,6 @@
         document.addEventListener("keydown", (e) => {
           if (e.key === "Escape" && !panel.hidden) {
             closeDateRangePanel();
-            btn.focus();
           }
         });
 
@@ -3605,6 +4013,12 @@
             closeDateRangePanel();
           }
         });
+        if (closeBtn) {
+          closeBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            closeDateRangePanel();
+          });
+        }
 
         if (prevBtn) {
           prevBtn.addEventListener("click", (e) => {
@@ -3643,13 +4057,13 @@
           inputStart.addEventListener("input", () => {
             const val = inputStart.value.trim();
             datePickerState.pendingStart = val;
-            filterState.quickPreset = "";
-            if (/^\d{4}-\d{2}-\d{2}$/.test(val)) {
+            datePickerState.pendingPreset = "";
+            if (isValidDateValue(val)) {
               const [y, m] = val.split("-").map(Number);
               datePickerState.viewYear = y;
               datePickerState.viewMonth = m - 1;
-              renderDatePickerCalendars();
             }
+            renderDatePickerCalendars();
             validateAndSyncDatePickerInputs();
           });
         }
@@ -3657,28 +4071,43 @@
           inputEnd.addEventListener("input", () => {
             const val = inputEnd.value.trim();
             datePickerState.pendingEnd = val;
-            filterState.quickPreset = "";
-            if (/^\d{4}-\d{2}-\d{2}$/.test(val)) {
-              renderDatePickerCalendars();
+            datePickerState.pendingPreset = "";
+            if (isValidDateValue(val)) {
+              const [y, m] = val.split("-").map(Number);
+              datePickerState.viewYear = y;
+              datePickerState.viewMonth = m - 1;
             }
+            renderDatePickerCalendars();
             validateAndSyncDatePickerInputs();
           });
         }
+
+        ["calGrid1", "calGrid2"].forEach((gridId) => {
+          const grid = document.getElementById(gridId);
+          if (!grid) return;
+          grid.addEventListener("pointerover", (event) => {
+            const day = event.target.closest(".date-cal-day[data-iso]");
+            if (day && datePickerState.pendingStart && !datePickerState.pendingEnd) {
+              previewDateRange(day.dataset.iso);
+            }
+          });
+          grid.addEventListener("pointerleave", () => {
+            if (datePickerState.hoverDate) {
+              datePickerState.hoverDate = "";
+              renderDatePickerCalendars();
+            }
+          });
+        });
 
         if (clearBtn) {
           clearBtn.addEventListener("click", (e) => {
             e.stopPropagation();
             datePickerState.pendingStart = "";
             datePickerState.pendingEnd = "";
-            filterState.from = "";
-            filterState.to = "";
-            filterState.quickPreset = "all";
-            updateDropdownButtons();
-            writeUrlParams();
-            renderActiveChips();
-            closeDateRangePanel();
-            announce("Date filter removed.");
-            loadEvents();
+            datePickerState.pendingPreset = "all";
+            datePickerState.hoverDate = "";
+            validateAndSyncDatePickerInputs();
+            renderDatePickerCalendars();
           });
         }
 
@@ -3695,6 +4124,8 @@
             let s = datePickerState.pendingStart;
             let en = datePickerState.pendingEnd;
 
+            if (!s && en) s = en;
+            if (s && !en) en = s;
             if (s && en) {
               if (s > en) {
                 const tmp = s;
@@ -3703,7 +4134,8 @@
               }
               filterState.from = s;
               filterState.to = en;
-              filterState.quickPreset = "";
+              filterState.quickPreset = datePickerState.pendingPreset || "";
+              filterState.showCount = 20;
               updateDropdownButtons();
               writeUrlParams();
               renderActiveChips();
@@ -3714,6 +4146,7 @@
               filterState.from = "";
               filterState.to = "";
               filterState.quickPreset = "all";
+              filterState.showCount = 20;
               updateDropdownButtons();
               writeUrlParams();
               renderActiveChips();
@@ -3734,34 +4167,27 @@
         const panel = document.getElementById("dateRangePanel");
         if (!panel || !btn || panel.hidden) return;
 
-        // On mobile modal (< 740px), CSS handles fixed centered modal
+        // On mobile, CSS handles the bottom-sheet layout.
         if (window.innerWidth <= 740) {
           panel.style.left = "";
           panel.style.right = "";
+          panel.style.top = "";
+          panel.style.position = "";
           return;
         }
 
-        // Reset to default right-aligned state
-        panel.style.left = "auto";
-        panel.style.right = "0";
-
+        const buttonRect = btn.getBoundingClientRect();
         const panelRect = panel.getBoundingClientRect();
         const viewportWidth = window.innerWidth;
         const margin = 16;
-
-        // If the right edge of the panel overflows the viewport
-        if (panelRect.right > viewportWidth - margin) {
-          const overflowRight = panelRect.right - (viewportWidth - margin);
-          panel.style.right = `${overflowRight}px`;
-        }
-
-        // If the left edge of the panel overflows the viewport
-        const updatedRect = panel.getBoundingClientRect();
-        if (updatedRect.left < margin) {
-          const underflowLeft = margin - updatedRect.left;
-          const currentRight = parseFloat(panel.style.right) || 0;
-          panel.style.right = `${currentRight - underflowLeft}px`;
-        }
+        const left = Math.max(margin, Math.min(buttonRect.right - panelRect.width, viewportWidth - panelRect.width - margin));
+        const top = buttonRect.bottom + panelRect.height + margin > window.innerHeight
+          ? Math.max(margin, buttonRect.top - panelRect.height - 8)
+          : buttonRect.bottom + 8;
+        panel.style.position = "fixed";
+        panel.style.left = `${left}px`;
+        panel.style.right = "auto";
+        panel.style.top = `${top}px`;
       }
 
       function openDateRangePanel() {
@@ -3771,22 +4197,27 @@
 
         datePickerState.pendingStart = filterState.from;
         datePickerState.pendingEnd = filterState.to;
+        datePickerState.pendingPreset = filterState.from ? (filterState.quickPreset || "") : "all";
 
         if (filterState.from) {
           const parts = filterState.from.split("-").map(Number);
           datePickerState.viewYear = parts[0];
           datePickerState.viewMonth = parts[1] - 1;
         } else {
-          const now = new Date(getNow());
+          const now = new Date();
           datePickerState.viewYear = now.getFullYear();
           datePickerState.viewMonth = now.getMonth();
         }
 
         panel.hidden = false;
+        datePickerState.previousBodyOverflow = document.body.style.overflow;
+        document.body.style.overflow = "hidden";
         btn.setAttribute("aria-expanded", "true");
+        btn.classList.add("is-open");
         validateAndSyncDatePickerInputs();
         renderDatePickerCalendars();
         positionDateRangePanel();
+        panel.querySelector(".date-range-close")?.focus();
       }
 
       function closeDateRangePanel() {
@@ -3795,13 +4226,28 @@
         if (!panel || !btn) return;
         panel.hidden = true;
         btn.setAttribute("aria-expanded", "false");
+        btn.classList.remove("is-open");
         panel.style.left = "";
         panel.style.right = "";
+        panel.style.top = "";
+        panel.style.position = "";
+        if (datePickerState.previousBodyOverflow !== null) {
+          document.body.style.overflow = datePickerState.previousBodyOverflow;
+          datePickerState.previousBodyOverflow = null;
+        }
+        datePickerState.pendingStart = filterState.from || "";
+        datePickerState.pendingEnd = filterState.to || "";
+        datePickerState.pendingPreset = filterState.from ? (filterState.quickPreset || "") : "all";
+        datePickerState.hoverDate = "";
+        btn.focus();
+        validateAndSyncDatePickerInputs();
+        renderDatePickerCalendars();
       }
 
       function applyQuickRange(preset) {
-        const now = new Date(getNow());
-        const todayStr = toPhDateStr(now);
+        datePickerState.hoverDate = "";
+        const now = new Date();
+        const todayStr = now.toLocaleDateString("en-CA");
         const [ty, tm, td] = todayStr.split("-").map(Number);
         const curDate = new Date(ty, tm - 1, td);
 
@@ -3811,15 +4257,9 @@
         if (preset === "all") {
           datePickerState.pendingStart = "";
           datePickerState.pendingEnd = "";
-          filterState.from = "";
-          filterState.to = "";
-          filterState.quickPreset = "all";
-          updateDropdownButtons();
-          writeUrlParams();
-          renderActiveChips();
-          closeDateRangePanel();
-          announce("Date range cleared.");
-          loadEvents();
+          datePickerState.pendingPreset = "all";
+          validateAndSyncDatePickerInputs();
+          renderDatePickerCalendars();
           return;
         }
 
@@ -3829,7 +4269,7 @@
         } else if (preset === "tomorrow") {
           const tom = new Date(curDate);
           tom.setDate(tom.getDate() + 1);
-          startStr = toPhDateStr(tom.getTime());
+          startStr = tom.toLocaleDateString("en-CA");
           endStr = startStr;
         } else if (preset === "this_week") {
           const day = curDate.getDay(); // 0 is Sunday
@@ -3837,24 +4277,24 @@
           sunday.setDate(sunday.getDate() - day);
           const saturday = new Date(sunday);
           saturday.setDate(saturday.getDate() + 6);
-          startStr = toPhDateStr(sunday.getTime());
-          endStr = toPhDateStr(saturday.getTime());
+          startStr = sunday.toLocaleDateString("en-CA");
+          endStr = saturday.toLocaleDateString("en-CA");
         } else if (preset === "this_weekend") {
           const day = curDate.getDay();
           const sat = new Date(curDate);
-          sat.setDate(sat.getDate() + (6 - day));
+          sat.setDate(sat.getDate() + (day === 0 ? -1 : day === 6 ? 0 : 6 - day));
           const sun = new Date(sat);
           sun.setDate(sun.getDate() + 1);
-          startStr = toPhDateStr(sat.getTime());
-          endStr = toPhDateStr(sun.getTime());
+          startStr = day === 0 ? todayStr : sat.toLocaleDateString("en-CA");
+          endStr = day === 0 ? todayStr : sun.toLocaleDateString("en-CA");
         } else if (preset === "next_week") {
           const day = curDate.getDay();
           const nextSun = new Date(curDate);
           nextSun.setDate(nextSun.getDate() + (7 - day));
           const nextSat = new Date(nextSun);
           nextSat.setDate(nextSat.getDate() + 6);
-          startStr = toPhDateStr(nextSun.getTime());
-          endStr = toPhDateStr(nextSat.getTime());
+          startStr = nextSun.toLocaleDateString("en-CA");
+          endStr = nextSat.toLocaleDateString("en-CA");
         } else if (preset === "this_month") {
           startStr = `${ty}-${String(tm).padStart(2, "0")}-01`;
           const lastDay = new Date(ty, tm, 0).getDate();
@@ -3873,16 +4313,14 @@
 
         datePickerState.pendingStart = startStr;
         datePickerState.pendingEnd = endStr;
-        filterState.from = startStr;
-        filterState.to = endStr;
-        filterState.quickPreset = preset;
-
-        updateDropdownButtons();
-        writeUrlParams();
-        renderActiveChips();
-        closeDateRangePanel();
-        announce(`Applied quick range: ${preset}.`);
-        loadEvents();
+        datePickerState.pendingPreset = preset;
+        if (startStr) {
+          const [year, month] = startStr.split("-").map(Number);
+          datePickerState.viewYear = year;
+          datePickerState.viewMonth = month - 1;
+        }
+        validateAndSyncDatePickerInputs();
+        renderDatePickerCalendars();
       }
 
       function renderDatePickerCalendars() {
@@ -3900,28 +4338,48 @@
         renderSingleMonthCalendar("calTitle2", "calGrid2", y2, m2);
 
         // Highlight active quick range preset
-        const start = datePickerState.pendingStart || filterState.from;
-        const end = datePickerState.pendingEnd || filterState.to;
-        const todayStr = toPhDateStr(getNow());
+        const start = datePickerState.pendingStart;
+        const end = datePickerState.pendingEnd || start;
+        const todayStr = new Date().toLocaleDateString("en-CA");
         const [ty, tm, td] = todayStr.split("-").map(Number);
         const curDate = new Date(ty, tm - 1, td);
+        const formatDate = (date) => date.toLocaleDateString("en-CA");
+        const nextDay = (date) => {
+          const result = new Date(date);
+          result.setDate(result.getDate() + 1);
+          return result;
+        };
+        const sunday = new Date(curDate);
+        sunday.setDate(sunday.getDate() - sunday.getDay());
+        const saturday = new Date(sunday);
+        saturday.setDate(saturday.getDate() + 6);
+        const nextSunday = new Date(sunday);
+        nextSunday.setDate(nextSunday.getDate() + 7);
+        const nextSaturday = new Date(nextSunday);
+        nextSaturday.setDate(nextSaturday.getDate() + 6);
+        const weekendStart = new Date(curDate);
+        weekendStart.setDate(weekendStart.getDate() + (curDate.getDay() === 0 ? 0 : curDate.getDay() === 6 ? 0 : 6 - curDate.getDay()));
+        const nextMonthYear = tm === 12 ? ty + 1 : ty;
+        const nextMonthNumber = tm === 12 ? 1 : tm + 1;
+        const quickRanges = {
+          all: ["", ""],
+          today: [todayStr, todayStr],
+          tomorrow: [formatDate(nextDay(curDate)), formatDate(nextDay(curDate))],
+          this_week: [formatDate(sunday), formatDate(saturday)],
+          this_weekend: curDate.getDay() === 0
+            ? [todayStr, todayStr]
+            : [formatDate(weekendStart), formatDate(nextDay(weekendStart))],
+          next_week: [formatDate(nextSunday), formatDate(nextSaturday)],
+          this_month: [`${ty}-${String(tm).padStart(2, "0")}-01`, `${ty}-${String(tm).padStart(2, "0")}-${String(new Date(ty, tm, 0).getDate()).padStart(2, "0")}`],
+          next_month: [`${nextMonthYear}-${String(nextMonthNumber).padStart(2, "0")}-01`, `${nextMonthYear}-${String(nextMonthNumber).padStart(2, "0")}-${String(new Date(nextMonthYear, nextMonthNumber, 0).getDate()).padStart(2, "0")}`],
+        };
 
         document.querySelectorAll(".date-range-quick-btn").forEach((btn) => {
           const preset = btn.dataset.preset;
-          let isMatch = false;
-
-          if (filterState.quickPreset && filterState.quickPreset === preset && start === filterState.from && end === filterState.to) {
-            isMatch = true;
-          } else {
-            if (preset === "all" && !start && !end) isMatch = true;
-            if (preset === "today" && start === todayStr && end === todayStr) isMatch = true;
-            if (preset === "this_month" && start && end) {
-              const firstDay = `${ty}-${String(tm).padStart(2, "0")}-01`;
-              const lastDay = `${ty}-${String(tm).padStart(2, "0")}-${String(new Date(ty, tm, 0).getDate()).padStart(2, "0")}`;
-              if (start === firstDay && end === lastDay) isMatch = true;
-            }
-          }
+          const range = quickRanges[preset];
+          const isMatch = Boolean(range && start === range[0] && end === (range[1] || range[0]));
           btn.classList.toggle("active", isMatch);
+          btn.setAttribute("aria-pressed", String(isMatch));
         });
       }
 
@@ -3938,7 +4396,7 @@
 
         const firstDayOfWeek = dateObj.getDay(); // 0 is Sunday
         const totalDays = new Date(year, month + 1, 0).getDate();
-        const todayStr = toPhDateStr(getNow());
+        const todayStr = new Date().toLocaleDateString("en-CA");
 
         let start = datePickerState.pendingStart;
         let end = datePickerState.pendingEnd;
@@ -3958,13 +4416,16 @@
           const isToday = isoStr === todayStr;
           const isStart = Boolean(start && isoStr === start);
           const isEnd = Boolean(end && isoStr === end);
-          const isBetween = Boolean(start && end && isoStr > start && isoStr < end);
+          const rangeEnd = end || (datePickerState.hoverDate && datePickerState.pendingStart ? datePickerState.hoverDate : "");
+          const rangeStart = start && rangeEnd && rangeEnd < start ? rangeEnd : start;
+          const normalizedEnd = start && rangeEnd && rangeEnd < start ? start : rangeEnd;
+          const isBetween = Boolean(rangeStart && normalizedEnd && isoStr > rangeStart && isoStr < normalizedEnd);
 
           // Check if any loaded events occur on this day
           let hasEvent = false;
           for (const ev of rawEventsMap.values()) {
-            const evStart = toPhDateStr(ev.startAt);
-            const evEnd = toPhDateStr(ev.endAt || ev.startAt);
+            const evStart = new Date(ev.startAt).toLocaleDateString("en-CA");
+            const evEnd = new Date(ev.endAt || ev.startAt).toLocaleDateString("en-CA");
             if (isoStr >= evStart && isoStr <= evEnd) {
               hasEvent = true;
               break;
@@ -3982,6 +4443,7 @@
 
           const dateLabel = formatPhDateDisplay(isoStr);
           const pressed = isStart || isEnd ? 'aria-pressed="true"' : 'aria-pressed="false"';
+          const current = isToday ? 'aria-current="date"' : "";
 
           html += `
             <button
@@ -3990,6 +4452,7 @@
               data-iso="${isoStr}"
               aria-label="${dateLabel}"
               ${pressed}
+              ${current}
             >${day}</button>
           `;
         }
@@ -4001,11 +4464,41 @@
             e.stopPropagation();
             handleDateDayClick(dayBtn.dataset.iso);
           });
+          dayBtn.addEventListener("keydown", (e) => {
+            const offsets = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7 };
+            if (!offsets[e.key]) return;
+            e.preventDefault();
+            const [year, month, day] = dayBtn.dataset.iso.split("-").map(Number);
+            const next = new Date(year, month - 1, day + offsets[e.key]);
+            const nextIso = `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, "0")}-${String(next.getDate()).padStart(2, "0")}`;
+            const target = document.querySelector(`.date-cal-day[data-iso="${nextIso}"]`);
+            if (target) {
+              target.focus();
+            } else {
+              datePickerState.viewYear = next.getFullYear();
+              datePickerState.viewMonth = next.getMonth();
+              renderDatePickerCalendars();
+              document.querySelector(`.date-cal-day[data-iso="${nextIso}"]`)?.focus();
+            }
+          });
+        });
+      }
+
+      function previewDateRange(iso) {
+        if (datePickerState.hoverDate === iso) return;
+        datePickerState.hoverDate = iso;
+        const start = datePickerState.pendingStart;
+        const rangeStart = iso < start ? iso : start;
+        const rangeEnd = iso < start ? start : iso;
+        document.querySelectorAll(".date-cal-day[data-iso]").forEach((button) => {
+          const date = button.dataset.iso;
+          button.classList.toggle("range-between", date > rangeStart && date < rangeEnd);
+          button.classList.toggle("range-preview-end", date === iso);
         });
       }
 
       function handleDateDayClick(iso) {
-        filterState.quickPreset = "";
+        datePickerState.pendingPreset = "";
         if (!datePickerState.pendingStart || (datePickerState.pendingStart && datePickerState.pendingEnd)) {
           // First click
           datePickerState.pendingStart = iso;
@@ -4024,6 +4517,13 @@
         renderDatePickerCalendars();
       }
 
+      function isValidDateValue(value) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+        const [year, month, day] = value.split("-").map(Number);
+        const date = new Date(year, month - 1, day);
+        return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+      }
+
       function validateAndSyncDatePickerInputs() {
         const inputStart = document.getElementById("dateRangeInputStart");
         const inputEnd = document.getElementById("dateRangeInputEnd");
@@ -4036,19 +4536,18 @@
         if (inputStart && document.activeElement !== inputStart) inputStart.value = start || "";
         if (inputEnd && document.activeElement !== inputEnd) inputEnd.value = end || "";
 
-        if (start && !end) {
-          if (valMsg) valMsg.textContent = "Pick an end date to finish the range.";
-          if (applyBtn) applyBtn.disabled = true;
-        } else if (start && end && end < start) {
-          if (valMsg) valMsg.textContent = "End date must be on or after the start date.";
-          if (applyBtn) applyBtn.disabled = true;
-        } else if (start && end) {
-          if (valMsg) valMsg.textContent = "";
-          if (applyBtn) applyBtn.disabled = false;
-        } else {
-          if (valMsg) valMsg.textContent = "";
-          if (applyBtn) applyBtn.disabled = false;
+        const invalidDate = (start && !isValidDateValue(start)) || (end && !isValidDateValue(end));
+        const reversed = start && end && start > end;
+        if (valMsg) {
+          valMsg.textContent = invalidDate
+            ? "Enter a valid date (YYYY-MM-DD)."
+            : reversed
+              ? "Start date must be on or before end date."
+              : "";
         }
+        const unchanged = (start || end) === (filterState.from || "") &&
+          (end || start) === (filterState.to || "");
+        if (applyBtn) applyBtn.disabled = Boolean(invalidDate || reversed || unchanged);
       }
 
       /* ---------------------------------------------------------
@@ -4197,6 +4696,11 @@
             uid: user.uid,
             code: error?.code || "",
           });
+          if (String(error?.message || "").includes("not a student profile")) {
+            clearCachedStudentProfile();
+            window.location.replace("StudentLogin.html");
+            return;
+          }
           setEventLoadError(
             "Your student profile could not be loaded. Check your connection and retry.",
             error,
@@ -4515,7 +5019,7 @@
                         Live
                       </span>
                       <span class="filter-chip" style="font-size:11.5px; padding:2px 8px;">${escapeHTML(ev.category)}</span>
-                      <span class="filter-chip" style="font-size:11.5px; padding:2px 8px;">${escapeHTML(ev.source)}</span>
+                      <span class="filter-chip" style="max-width:100%; overflow-wrap:anywhere; font-size:11.5px; padding:2px 8px;">${escapeHTML(ev.source === "Organizational" && ev.organizationName ? `Organized by ${ev.organizationName}` : ev.source)}</span>
                     </div>
                     <span class="live-time-left">${timeLeftStr}</span>
                   </div>
@@ -4566,7 +5070,7 @@
           if (openQrEventId) {
             const canvas = document.getElementById(`inlineQrCanvas_${openQrEventId}`);
             if (canvas) {
-              getStudentQrToken().then((token) => renderQrToCanvas(canvas, token));
+              getStudentQrPayload().then((payload) => renderQrToCanvas(canvas, payload));
             }
           }
         } else {
@@ -4584,7 +5088,7 @@
 
           list.innerHTML = `
             <div class="empty-state-card">
-              <p>No events happening now.</p>
+              <p>No ongoing events</p>
               ${nextUpHint ? `<p class="empty-next-up">${nextUpHint}</p>` : ""}
             </div>
           `;
@@ -4749,7 +5253,7 @@
                 <div class="event-body">
                   <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-bottom:4px;">
                     <span class="filter-chip" style="font-size:11px; padding:2px 7px;">${escapeHTML(ev.category)}</span>
-                    <span class="filter-chip" style="font-size:11px; padding:2px 7px;">${escapeHTML(ev.source)}</span>
+                    <span class="filter-chip" style="max-width:100%; overflow-wrap:anywhere; font-size:11px; padding:2px 7px;">${escapeHTML(ev.source === "Organizational" && ev.organizationName ? `Organized by ${ev.organizationName}` : ev.source)}</span>
                     ${statusBadges}
                   </div>
                   <h3 class="event-title">${escapeHTML(ev.name)}</h3>
@@ -4789,6 +5293,9 @@
          USER ACTIONS: REGISTER & CANCEL
       --------------------------------------------------------- */
       async function handleRegister(eventId) {
+        const ev = rawEventsMap.get(eventId);
+        const evName = ev ? ev.name : "event";
+
         try {
           const sys = JSON.parse(localStorage.getItem("recovibeSystemSettings") || "{}");
           if (sys && sys.registrationEnabled === false) {
@@ -4800,11 +5307,47 @@
           console.warn("[Student Events] Could not read registration settings:", error);
         }
 
-        const ev = rawEventsMap.get(eventId);
-        const evName = ev ? ev.name : "event";
-
         if (registrationPendingIds.has(eventId)) return false;
-        if (!functions || !isFirebaseConfigured) {
+        const eventStatus = String(ev?.status || "").toLowerCase();
+        const eventIsClosed = Boolean(
+          ev &&
+            (ev.registrationClosed ||
+              eventStatus === "closed" ||
+              Number.isFinite(ev.registrationDeadlineAt) &&
+                getNow() > ev.registrationDeadlineAt),
+        );
+        if (eventIsClosed) {
+          showToast("Registration Closed");
+          announce("Registration Closed");
+          renderAll();
+          return false;
+        }
+        if (ev && !hasOpenSlots(ev)) {
+          showToast("Fully Booked");
+          announce("Fully Booked");
+          renderAll();
+          return false;
+        }
+        if (registeredEventIds.has(eventId) || getRegistrationState(eventId) === "registered") {
+          registeredEventIds.add(eventId);
+          registrationStates.set(eventId, "registered");
+          showToast("You are already registered for this event.");
+          announce("You are already registered for this event.");
+          renderAll();
+          return false;
+        }
+        if (
+          ev &&
+          (["cancelled", "canceled", "completed"].includes(eventStatus) ||
+            getEventClassification(ev, getNow()) === "ended")
+        ) {
+          const message = "This event is no longer open for registration.";
+          showToast(message);
+          announce(message);
+          renderAll();
+          return false;
+        }
+        if (!db || !isFirebaseConfigured) {
           showToast("Registration is unavailable. Please try again later.");
           announce("Registration is unavailable.");
           return false;
@@ -4817,16 +5360,72 @@
         renderAll();
 
         try {
-          const callable = httpsCallable(functions, "registerForEvent");
-          const result = await callable({ eventId });
-          if (ev && Number.isFinite(Number(result?.data?.registeredCount))) {
-            ev.registeredCount = Number(result.data.registeredCount);
+          const uid = String(auth?.currentUser?.uid || "");
+          if (!uid || uid !== currentUid) {
+            throw new Error("Your session is not ready. Please sign in again.");
           }
+          const eventRef = doc(db, "events", eventId);
+          const registrationRef = doc(db, "events", eventId, "registrations", uid);
+          const registeredCount = await runTransaction(db, async (transaction) => {
+            const [eventSnapshot, registrationSnapshot] = await Promise.all([
+              transaction.get(eventRef),
+              transaction.get(registrationRef),
+            ]);
+            if (!eventSnapshot.exists()) {
+              throw new Error("This event is no longer available.");
+            }
+            const eventData = eventSnapshot.data();
+            if (
+              registrationSnapshot.exists() &&
+              registrationSnapshot.data()?.status === "registered"
+            ) {
+              const error = new Error("You are already registered for this event.");
+              error.code = "already-exists";
+              throw error;
+            }
+            const status = String(eventData.status || eventData.publicationStatus || "")
+              .trim()
+              .toLowerCase();
+            if (
+              status !== "published" &&
+              eventData.published !== true &&
+              eventData.isPublished !== true
+            ) {
+              throw new Error("Registration is closed because this event is not published.");
+            }
+            const capacity = Number(eventData.capacity ?? eventData.maxCapacity);
+            const count = Math.max(0, Number(eventData.registeredCount) || 0);
+            if (capacity > 0 && count >= capacity) {
+              throw new Error("This event is full.");
+            }
+            const nextCount = count + 1;
+            const now = Date.now();
+            transaction.update(eventRef, {
+              registeredCount: nextCount,
+              updatedAt: now,
+            });
+            if (registrationSnapshot.exists()) {
+              transaction.update(registrationRef, {
+                uid,
+                status: "registered",
+                registeredAt: now,
+                cancelledAt: null,
+                at: now,
+              });
+            } else {
+              transaction.set(registrationRef, {
+                uid,
+                status: "registered",
+                registeredAt: now,
+                at: now,
+              });
+            }
+            return nextCount;
+          });
+          if (ev) ev.registeredCount = registeredCount;
           registeredEventIds.add(eventId);
           registrationStates.set(eventId, "registered");
-          const responseMessage = result?.data?.alreadyRegistered
-            ? `You are already registered for ${evName}.`
-            : `Registered for ${evName}.`;
+          const responseMessage = `Registered for ${evName}.`;
           announce(responseMessage);
           showToast(responseMessage);
           return true;
@@ -4835,26 +5434,47 @@
           registrationStates.set(eventId, "not-registered");
           const code = String(error?.code || "").toLowerCase();
           const message = String(error?.message || "").toLowerCase();
-          let userMessage = "Could not register for this event. Please try again.";
-          if (code.includes("permission-denied")) {
-            userMessage = "You do not have permission to register for this event.";
-          } else if (
+          const eventStatus = String(ev?.status || "").toLowerCase();
+          const eventIsClosed = Boolean(
+            ev &&
+              (ev.registrationClosed ||
+                eventStatus === "closed" ||
+                Number.isFinite(ev.registrationDeadlineAt) &&
+                  getNow() > ev.registrationDeadlineAt),
+          );
+          const alreadyRegistered =
             code.includes("already-exists") ||
             message.includes("already registered") ||
-            error?.details?.alreadyRegistered === true
-          ) {
+            error?.details?.alreadyRegistered === true;
+          const eventIsFull =
+            Boolean(ev && !hasOpenSlots(ev)) ||
+            message.includes("event is full") ||
+            message.includes("fully booked");
+          const eventHasEndedOrCancelled =
+            Boolean(
+              ev &&
+                (["cancelled", "canceled", "completed"].includes(eventStatus) ||
+                  getEventClassification(ev, getNow()) === "ended"),
+            ) ||
+            message.includes("event has ended") ||
+            message.includes("event is cancelled") ||
+            message.includes("event is canceled");
+          let userMessage = "Could Not Register for this Event. Please try again.";
+          if (code.includes("permission-denied")) {
+            userMessage = "Couldn't register. Please contact the organizer.";
+          } else if (eventIsClosed || message.includes("registration is closed") || message.includes("deadline")) {
+            userMessage = "Registration Closed";
+          } else if (eventIsFull) {
+            userMessage = "Fully Booked";
+            if (ev && ev.capacity !== null) ev.registeredCount = ev.capacity;
+          } else if (alreadyRegistered) {
             registeredEventIds.add(eventId);
             registrationStates.set(eventId, "registered");
             userMessage = "You are already registered for this event.";
-          } else if (
-            code.includes("failed-precondition") ||
-            message.includes("event is full") ||
-            message.includes("full")
-          ) {
-            userMessage = "This event is full.";
-            if (ev && ev.capacity !== null) ev.registeredCount = ev.capacity;
+          } else if (eventHasEndedOrCancelled) {
+            userMessage = "This event is no longer open for registration.";
           }
-          console.error("[Student Events] Registration failed:", error);
+          if (DEBUG) console.error("[Student Events] Registration failed:", error);
           showToast(userMessage);
           announce(userMessage);
           return false;
@@ -4867,36 +5487,119 @@
 
       async function handleCancelRegistration(eventId) {
         const ev = rawEventsMap.get(eventId);
-        const evName = ev ? ev.name : "event";
+        if (cancellationPendingIds.has(eventId)) return false;
+        if (!db || !isFirebaseConfigured || !auth?.currentUser?.uid) {
+          const message = "Couldn't cancel. Please contact the organizer.";
+          showCancellationError(message, eventId);
+          announce(message);
+          return false;
+        }
+        if (!ev || !Number.isFinite(ev.startAt) || ev.startAt <= 0 || getNow() >= ev.startAt) {
+          renderAll();
+          return false;
+        }
+        if (getRegistrationState(eventId) !== "registered") {
+          startRegistrationListeners(eventId);
+          renderAll();
+          return false;
+        }
+        if (!window.confirm(`Cancel your registration for ${ev.name}?`)) return false;
 
-        // Optimistic update
-        registeredEventIds.delete(eventId);
-        registrationStates.set(eventId, "not-registered");
+        const uid = String(auth.currentUser.uid);
+        const eventPath = `events/${eventId}`;
+        const registrationPath = `${eventPath}/registrations/${uid}`;
+        cancellationPendingIds.add(eventId);
         if (openQrEventId === eventId) openQrEventId = null;
-        syncAttendanceListeners();
         renderAll();
 
-        announce(`Cancelled registration for ${evName}.`);
-        showToast(`Cancelled registration for ${evName}`);
-
-        if (functions && isFirebaseConfigured) {
-          try {
-            const callable = httpsCallable(functions, "cancelRegistration");
-            const result = await callable({ eventId });
-            if (ev && Number.isFinite(Number(result?.data?.registeredCount))) {
-              ev.registeredCount = Number(result.data.registeredCount);
+        try {
+          const eventRef = doc(db, "events", eventId);
+          const registrationRef = doc(db, "events", eventId, "registrations", uid);
+          const result = await runTransaction(db, async (transaction) => {
+            const [eventSnapshot, registrationSnapshot] = await Promise.all([
+              transaction.get(eventRef),
+              transaction.get(registrationRef),
+            ]);
+            if (!registrationSnapshot.exists()) {
+              return {
+                cancelled: false,
+                registeredCount: eventSnapshot.exists()
+                  ? Math.max(0, Number(eventSnapshot.data().registeredCount) || 0)
+                  : 0,
+              };
             }
-          } catch (err) {
-            console.warn("cancelRegistration notice:", err);
-            // Revert optimistic update
-            registeredEventIds.add(eventId);
-            registrationStates.set(eventId, "registered");
-            syncAttendanceListeners();
-            renderAll();
-            const msg = err.message || "Could not cancel registration.";
-            showToast(msg);
-            announce(msg);
+            const registration = registrationSnapshot.data();
+            if (registration?.status !== "registered") {
+              return {
+                cancelled: false,
+                registeredCount: eventSnapshot.exists()
+                  ? Math.max(0, Number(eventSnapshot.data().registeredCount) || 0)
+                  : 0,
+              };
+            }
+            if (!eventSnapshot.exists()) {
+              throw new Error("The event could not be found.");
+            }
+            const eventData = eventSnapshot.data();
+            const eventDates = getEventDateRange(eventData);
+            const startAt = eventDates?.start?.getTime();
+            if (Number.isFinite(startAt) && getNow() >= startAt) {
+              const error = new Error("Registration can't be cancelled after the event starts.");
+              error.code = "cancellation-closed";
+              throw error;
+            }
+            const now = Date.now();
+            const registeredCount = Math.max(0, Number(eventData.registeredCount) || 0);
+            const nextCount = Math.max(0, registeredCount - 1);
+            transaction.update(registrationRef, {
+              uid,
+              status: "cancelled",
+              cancelledAt: now,
+              at: now,
+            });
+            transaction.update(eventRef, {
+              registeredCount: nextCount,
+              updatedAt: now,
+            });
+            return { cancelled: true, registeredCount: nextCount };
+          });
+          if (!result.cancelled) {
+            registeredEventIds.delete(eventId);
+            registrationStates.set(eventId, "not-registered");
+            startRegistrationListeners(eventId);
+            return true;
           }
+          ev.registeredCount = result.registeredCount;
+          registeredEventIds.delete(eventId);
+          registrationStates.set(eventId, "not-registered");
+          syncAttendanceListeners();
+          const message = "Registration cancelled";
+          announce(message);
+          showToast(message);
+          return true;
+        } catch (error) {
+          registeredEventIds.add(eventId);
+          registrationStates.set(eventId, "registered");
+          const code = String(error?.code || "unknown");
+          const message = code === "cancellation-closed"
+            ? "Registration can't be cancelled after the event starts."
+            : code === "permission-denied"
+              ? "Couldn't cancel. Please contact the organizer."
+              : "Could not cancel your registration. Please try again.";
+          if (DEBUG) {
+            console.error("[Student Events] Cancellation transaction failed:", {
+              code,
+              eventPath,
+              registrationPath,
+              error,
+            });
+          }
+          showCancellationError(message, eventId);
+          announce(message);
+          return false;
+        } finally {
+          cancellationPendingIds.delete(eventId);
+          renderAll();
         }
       }
 
@@ -5014,6 +5717,14 @@
         // Event actions delegation
         document.addEventListener("click", (e) => {
           const target = e.target;
+
+          const retryCancelBtn = target.closest("button[data-action='retry-cancel']");
+          if (retryCancelBtn) {
+            e.preventDefault();
+            const eventId = retryCancelBtn.dataset.eventId;
+            if (eventId) handleCancelRegistration(eventId);
+            return;
+          }
 
           const retryBtn = target.closest("button[data-retry-events]");
           if (retryBtn) {
@@ -5172,6 +5883,7 @@
                     Object.keys(studentProfile).forEach((key) => {
                       delete studentProfile[key];
                     });
+                    studentQrPayload = "";
                     renderStudentSidebar({});
                   }
                   currentUid = user?.uid || null;
@@ -5179,11 +5891,9 @@
                     clearCachedStudentProfile();
                     renderStudentSidebar({});
                     setEventLoadError("Sign in to load events.");
+                    window.location.replace("StudentLogin.html");
                     return;
                   }
-                  getStudentQrToken().catch((error) => {
-                    console.error("[Student Events] QR token lookup failed:", error);
-                  });
                   startEventsLoad(user);
                 } catch (error) {
                   setEventLoadError("Could not initialize your events session. Please retry.", error);

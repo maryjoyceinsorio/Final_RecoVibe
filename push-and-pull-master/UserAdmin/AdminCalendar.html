@@ -55,10 +55,10 @@
           </a>
         </nav>
         <footer>
-          <span class="admin-avatar" data-avatar>HA</span>
+          <span class="admin-avatar" data-avatar></span>
           <span class="admin-user">
-            <strong data-name>ADMIN</strong>
-            <small data-role>Head of Academic Programs</small>
+            <strong data-name></strong>
+            <small data-role></small>
           </span>
           <a class="admin-logout" href="AdminLogin.html" aria-label="Logout" title="Logout">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17l5-5-5-5M15 12H3M13 4h6a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6" /></svg>
@@ -66,16 +66,9 @@
         </footer>
       </aside>
       <main class="admin-main">
-        <header class="admin-page-heading">
-          <div>
-            <p class="admin-eyebrow">ADMINISTRATION</p>
-            <h1>Calendar</h1>
-          </div>
-          <p class="admin-today">Today / <strong data-today></strong></p>
-        </header>
-        <section class="admin-content">
-          <div id="calendarRoot" aria-live="polite">
-            <div class="admin-calendar-layout">
+        <section class="admin-content" id="calendarRoot" aria-live="polite">
+          <div class="admin-loading" id="calendarStatus" role="status">Loading calendar…</div>
+          <div class="admin-calendar-layout" id="calendarLayout" hidden>
               <section class="admin-calendar">
                 <div class="admin-calendar-toolbar">
                   <div class="admin-calendar-selectors">
@@ -95,28 +88,29 @@
               </section>
               <aside class="admin-calendar-side">
                 <section class="admin-calendar-panel admin-upcoming-panel">
-                  <h2>Upcoming</h2>
+                  <h2>Upcoming Events</h2>
                   <div id="adminUpcomingItems"><p class="admin-upcoming-empty">Loading events…</p></div>
                 </section>
                 <section class="admin-calendar-panel admin-filter-panel">
                   <div class="admin-panel-header">
-                    <h2>Filter by category</h2>
+                    <h2>Category</h2>
                     <button type="button" id="resetCalendarFilters">Reset</button>
                   </div>
-                  <label class="admin-filter-option"><input type="checkbox" data-calendar-category="Academic" checked /><span>Academic</span></label>
-                  <label class="admin-filter-option"><input type="checkbox" data-calendar-category="Organization" checked /><span>Organization</span></label>
-                  <label class="admin-filter-option"><input type="checkbox" data-calendar-category="Institutional" checked /><span>Institutional</span></label>
+                  <label class="admin-filter-option"><input type="checkbox" data-calendar-category="PUP Official" checked /><span>PUP Official</span></label>
+                  <label class="admin-filter-option"><input type="checkbox" data-calendar-category="CSC" checked /><span>CSC</span></label>
+                  <label class="admin-filter-option"><input type="checkbox" data-calendar-category="Organizational" checked /><span>Organizational</span></label>
+                  <label class="admin-filter-option"><input type="checkbox" data-calendar-category="Others/External" checked /><span>Others/External</span></label>
                   <label class="admin-filter-option"><input type="checkbox" data-calendar-category="Holiday" checked /><span>Holiday</span></label>
                 </section>
                 <section class="admin-calendar-panel admin-calendar-legend" id="calendarLegend" aria-label="Calendar legend">
-                  <strong>Calendar legend</strong>
-                  <span class="admin-legend-item"><i class="admin-legend-dot dot-holiday"></i>Holiday</span>
-                  <span class="admin-legend-item"><i class="admin-legend-dot dot-academic"></i>Academic</span>
-                  <span class="admin-legend-item"><i class="admin-legend-dot dot-organization"></i>Organization</span>
-                  <span class="admin-legend-item"><i class="admin-legend-dot dot-institutional"></i>Institutional</span>
+                  <strong>Legend</strong>
+                  <span class="admin-legend-item"><i class="admin-legend-swatch category-pup-official"></i>PUP Official</span>
+                  <span class="admin-legend-item"><i class="admin-legend-swatch category-csc"></i>CSC</span>
+                  <span class="admin-legend-item"><i class="admin-legend-swatch category-organizational"></i>Organizational</span>
+                  <span class="admin-legend-item"><i class="admin-legend-swatch category-others-external"></i>Others/External</span>
+                  <span class="admin-legend-item"><i class="admin-legend-swatch category-holiday"></i>Holiday</span>
                 </section>
               </aside>
-            </div>
           </div>
         </section>
       </main>

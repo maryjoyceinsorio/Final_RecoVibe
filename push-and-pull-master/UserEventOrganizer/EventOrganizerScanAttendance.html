@@ -144,7 +144,7 @@
               <label for="eventSelect" id="eventSelectHeading" class="field-label">Active Event</label>
               <div class="event-select-wrapper">
                 <select id="eventSelect" class="scan-event-select" aria-label="Select active event for attendance">
-                  <option value="" disabled selected>Loading events...</option>
+                  <option value="" disabled selected>Loading published events...</option>
                 </select>
               </div>
             </div>
@@ -192,8 +192,8 @@
           </div>
           <div class="banner-body-col">
             <div class="banner-status-badge" id="bannerStatusTitle">Checked in</div>
-            <div class="banner-student-name" id="bannerStudentName">Juan Dela Cruz</div>
-            <div class="banner-student-meta" id="bannerStudentMeta">2023-00123-BN-0 · BSIT</div>
+            <div class="banner-student-name" id="bannerStudentName"></div>
+            <div class="banner-student-meta" id="bannerStudentMeta"></div>
             <div class="banner-extra-note" id="bannerExtraNote" hidden></div>
             <div class="banner-actions" id="bannerActions" hidden>
               <button type="button" class="btn-walkin-confirm" id="btnWalkInConfirm">
@@ -376,7 +376,7 @@
       <div class="scan-modal-dialog">
         <h3 id="confirmModalHeading">Complete Event?</h3>
         <p id="confirmModalDescription">
-          Are you sure you want to complete <strong id="confirmModalEventName">this event</strong>? Completing this event will close QR scanning and manual attendance immediately. All unscanned registered students will be recorded as absent.
+          Mark this event as completed? Check-ins will stop.
         </p>
         <div class="scan-modal-warning" id="confirmModalWarning" hidden style="background:#fef2f2; border:1px solid #f87171; border-radius:8px; padding:10px 12px; color:#991b1b; font-size:13px; line-height:1.4; margin-bottom:14px;"></div>
         <div class="scan-modal-stats">

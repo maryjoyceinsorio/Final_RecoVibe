@@ -1,8 +1,41 @@
 (() => {
   const notificationStorageKey = "recovibeTeacherNotifications";
   const deletedStorageKey = "recovibeTeacherDeletedNotifications";
-  const deletedLifetime = 7 * 24 * 60 * 60 * 1000;
+  const deletedLifetime = 30 * 24 * 60 * 60 * 1000;
   const defaultNotifications = [];
+  let teacherProfile = {};
+  try {
+    teacherProfile = JSON.parse(
+      localStorage.getItem("recovibeCurrentTeacher") ||
+      localStorage.getItem("recovibeTeacher") ||
+      "{}",
+    );
+  } catch (error) {
+    console.warn("[Teacher Notifications] Could not read the signed-in teacher profile:", error);
+  }
+  const teacherIdentifiers = new Set([
+    localStorage.getItem("recovibeTeacherId"),
+    teacherProfile.uid,
+    teacherProfile.userId,
+    teacherProfile.id,
+    teacherProfile.email,
+    teacherProfile.teacherId,
+    teacherProfile.employeeId,
+  ].filter(Boolean).map((value) => String(value).trim().toLowerCase()));
+
+  function belongsToCurrentTeacher(item) {
+    const owners = [
+      item.teacherId,
+      item.teacherUid,
+      item.recipientUid,
+      item.recipientId,
+      item.userId,
+      item.ownerId,
+      item.recipientEmail,
+      item.email,
+    ].filter(Boolean).map((value) => String(value).trim().toLowerCase());
+    return owners.some((owner) => teacherIdentifiers.has(owner));
+  }
 
   function safeReadArray(key) {
     try {
@@ -18,9 +51,10 @@
     if (!badge) return;
 
     const saved = safeReadArray(notificationStorageKey);
-    const current = saved.length
+    const current = (saved.length
       ? saved
-      : defaultNotifications.map((item) => ({ ...item }));
+      : defaultNotifications.map((item) => ({ ...item })))
+      .filter(belongsToCurrentTeacher);
     const knownIds = new Set(current.map((item) => item.id));
     defaultNotifications.forEach((item) => {
       if (!knownIds.has(item.id)) current.push({ ...item });
@@ -28,7 +62,8 @@
     const now = Date.now();
     const deletedIds = new Set(
       safeReadArray(deletedStorageKey)
-        .filter((item) => !item.expiresAt || item.expiresAt > now)
+        .filter((item) => belongsToCurrentTeacher(item) &&
+          (!item.deletedAt || now - item.deletedAt <= deletedLifetime))
         .map((item) => item.id),
     );
     const unreadCount = current.filter(
@@ -86,18 +121,24 @@
 
   const savedNotifications = readArray(notificationStorageKey);
   let notifications = savedNotifications.length
-    ? savedNotifications
+    ? savedNotifications.filter(belongsToCurrentTeacher)
     : defaultNotifications.map((item) => ({ ...item }));
+  notifications = notifications.filter(belongsToCurrentTeacher);
   const knownIds = new Set(notifications.map((item) => item.id));
   defaultNotifications.forEach((item) => {
     if (!knownIds.has(item.id)) notifications.push({ ...item });
   });
-  let deletedNotifications = readArray(deletedStorageKey).map((item) => ({
-    ...item,
-    expiresAt: item.expiresAt || Date.now() + deletedLifetime,
-  }));
+  let deletedNotifications = readArray(deletedStorageKey)
+    .filter(belongsToCurrentTeacher)
+    .map((item) => {
+      const deletedAt = Number(item.deletedAt) || (Number(item.expiresAt) ? Number(item.expiresAt) - 7 * 86400000 : Date.now());
+      return { ...item, deletedAt, expiresAt: deletedAt + deletedLifetime };
+    })
+    .filter((item) => Date.now() - item.deletedAt <= deletedLifetime);
   let activeFilter = "all";
   let pendingDeleteId = null;
+  let undoDeletedItem = null;
+  let undoTimer = null;
 
   const searchInput = document.getElementById("notificationSearch");
   const notificationList = document.getElementById("notificationList");
@@ -107,39 +148,112 @@
   const deleteOverlay = document.getElementById("deleteConfirmOverlay");
 
   function save() {
-    localStorage.setItem(notificationStorageKey, JSON.stringify(notifications));
-    localStorage.setItem(
-      deletedStorageKey,
-      JSON.stringify(deletedNotifications),
+    const storedNotifications = safeReadArray(notificationStorageKey);
+    const otherNotifications = storedNotifications.filter(
+      (item) => !belongsToCurrentTeacher(item),
     );
+    const storedDeleted = safeReadArray(deletedStorageKey);
+    const otherDeleted = storedDeleted.filter(
+      (item) => !belongsToCurrentTeacher(item),
+    );
+    localStorage.setItem(notificationStorageKey, JSON.stringify([
+      ...otherNotifications,
+      ...notifications,
+    ]));
+    localStorage.setItem(deletedStorageKey, JSON.stringify([
+      ...otherDeleted,
+      ...deletedNotifications,
+    ]));
+  }
+
+  function notificationTimestamp(item) {
+    const value = item.createdAt ?? item.createdAtMillis ?? item.timestamp ?? item.time;
+    if (value && typeof value.toDate === "function") return value.toDate();
+    if (value && typeof value.toMillis === "function") return new Date(value.toMillis());
+    if (value && typeof value.seconds === "number") return new Date(value.seconds * 1000);
+    if (typeof value === "number" && Number.isFinite(value)) return new Date(value);
+    if (typeof value === "string" && value.trim()) {
+      const dateOnly = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (dateOnly) return new Date(+dateOnly[1], +dateOnly[2] - 1, +dateOnly[3]);
+      const parsed = new Date(value);
+      if (Number.isFinite(parsed.getTime())) return parsed;
+    }
+    return null;
+  }
+
+  function notificationGroup(item) {
+    const date = notificationTimestamp(item);
+    if (!date) return "Earlier";
+    const today = new Date();
+    if (date.toDateString() === today.toDateString()) return "Today";
+    const weekStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    weekStart.setDate(weekStart.getDate() - weekStart.getDay());
+    return date >= weekStart ? "This week" : "Earlier";
+  }
+
+  function notificationDateLabel(item) {
+    const date = notificationTimestamp(item);
+    return date
+      ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(date)
+      : "";
+  }
+
+  function notificationRelativeLabel(item) {
+    const date = notificationTimestamp(item);
+    if (!date) return "";
+    const now = new Date();
+    const difference = Math.max(0, now.getTime() - date.getTime());
+    if (difference < 60000) return "Just now";
+    if (date.toDateString() === now.toDateString()) {
+      const minutes = Math.floor(difference / 60000);
+      return minutes < 60 ? `${minutes} minute${minutes === 1 ? "" : "s"} ago` : `${Math.floor(minutes / 60)} hours ago`;
+    }
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
+    const days = Math.floor(difference / 86400000);
+    return days < 7 ? `${days} days ago` : `${Math.floor(days / 7)} weeks ago`;
+  }
+
+  function notificationIcon(item) {
+    const type = String(item.type || "").toLowerCase();
+    if (type.includes("register") || type.includes("confirm")) {
+      return '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 4 4 8-8"/></svg>';
+    }
+    if (type.includes("event") || type.includes("publish")) {
+      return '<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="13" rx="1.5"/><path d="M3 8h14M7 2.5v3M13 2.5v3"/></svg>';
+    }
+    return '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M8 20a2 2 0 0 0 4 0"/></svg>';
+  }
+
+  function renderNotificationCard(item, inTrash = false) {
+    const timestamp = notificationDateLabel(item);
+    const relative = notificationRelativeLabel(item);
+    const tag = item.tag || (String(item.type || "").toLowerCase().includes("register") ? "Registered" : String(item.type || "").toLowerCase().includes("event") ? "New event" : "");
+    const id = escapeHTML(item.id);
+    const controls = inTrash
+      ? `<button type="button" data-deleted-action="restore">Restore</button><button type="button" data-deleted-action="delete-permanently">Delete forever</button><small>Removed in ${Math.max(0, Math.ceil((item.expiresAt - Date.now()) / 86400000))} days</small>`
+      : `<button class="notification-read-toggle" type="button" data-notification-action="${item.read ? "unread" : "read"}" aria-label="Mark as ${item.read ? "unread" : "read"}" title="Mark as ${item.read ? "unread" : "read"}"><span aria-hidden="true"></span></button><button class="notification-trash-toggle" type="button" data-notification-action="delete" aria-label="Move to Recently Deleted" title="Move to Recently Deleted"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h12M8 6V4.5h4V6m-6.5 0 .7 10h7.6l.7-10M8.5 9v4m3-4v4"/></svg></button>`;
+    return `<li><article class="notification-card ${item.read ? "is-read" : "is-unread"}" ${inTrash ? `data-deleted-notification-id="${id}"` : `data-notification-id="${id}"`} tabindex="0" aria-label="${escapeHTML(item.title)}, ${item.read ? "read" : "unread"}">
+      <span class="notification-icon" aria-hidden="true">${notificationIcon(item)}</span>
+      <span class="notification-copy"><strong class="notification-title">${escapeHTML(item.title)}</strong><span class="notification-message">${escapeHTML(item.message)}</span><span class="notification-meta">${tag ? `<span class="notification-tag">${escapeHTML(tag)}</span>` : ""}${timestamp ? `<time>${escapeHTML(timestamp)}</time>` : ""}${relative ? `<span>${escapeHTML(relative)}</span>` : ""}</span>
+      ${inTrash ? `<span class="notification-trash-actions">${controls}</span>` : ""}</span>${inTrash ? "" : `<span class="notification-card-actions">${controls}</span>`}
+    </article></li>`;
   }
 
   function renderDeleted() {
     const now = Date.now();
     deletedNotifications = deletedNotifications.filter(
-      (item) => item.expiresAt > now,
+      (item) => item.expiresAt > now && belongsToCurrentTeacher(item),
     );
     deletedList.innerHTML = deletedNotifications.length
-      ? deletedNotifications
-          .map(
-            (item) => `
-        <article class="notification-card deleted-notification-card type-${escapeHTML(item.type)}" data-deleted-notification-id="${escapeHTML(item.id)}">
-          <h3 class="notification-title">${escapeHTML(item.title)}</h3>
-          <p class="notification-message">${escapeHTML(item.message)}</p>
-          <div class="notification-meta">${Math.max(1, Math.ceil((item.expiresAt - now) / 86400000))} day(s) left in trash</div>
-          <div class="deleted-notification-actions">
-            <button type="button" data-deleted-action="restore">Restore</button>
-            <button type="button" data-deleted-action="delete-permanently">Delete Permanently</button>
-          </div>
-        </article>`,
-          )
-          .join("")
-      : '<div class="empty-notifications">Trash bin is empty.</div>';
+      ? `<ul class="notification-list">${deletedNotifications.map((item) => renderNotificationCard(item, true)).join("")}</ul>`
+      : '<div class="notification-state"><span class="notification-state-icon" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M16 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M8 20a2 2 0 0 0 4 0"/></svg></span><strong>Recently Deleted is empty</strong><p>Notifications you delete will wait here for 30 days before they are removed.</p></div>';
   }
 
   function renderNotifications() {
     const query = searchInput.value.trim().toLowerCase();
-    const visible = notifications.filter((item) => {
+    const visible = notifications.filter((item) => belongsToCurrentTeacher(item) && (() => {
       const stateMatches =
         activeFilter === "all" ||
         (activeFilter === "read" ? item.read : !item.read);
@@ -148,34 +262,35 @@
         (!query ||
           `${item.title} ${item.message}`.toLowerCase().includes(query))
       );
-    });
-
+    })());
+    const groups = ["Today", "This week", "Earlier"].map((group) => [
+      group,
+      visible.filter((item) => notificationGroup(item) === group),
+    ]);
     notificationList.innerHTML = visible.length
-      ? visible
-          .map(
-            (item) => `
-        <article class="notification-card type-${escapeHTML(item.type)} ${item.read ? "is-read" : ""}" data-notification-id="${escapeHTML(item.id)}" tabindex="0" aria-label="${escapeHTML(item.title)}, ${item.read ? "read" : "unread"}">
-          <div class="notification-actions">
-            <button class="notification-menu-toggle" type="button" aria-label="More actions for ${escapeHTML(item.title)}" aria-expanded="false">
-              <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><circle cx="4" cy="10" r="1.5"/><circle cx="10" cy="10" r="1.5"/><circle cx="16" cy="10" r="1.5"/></svg>
-            </button>
-            <div class="notification-menu" hidden>
-              <button type="button" data-notification-action="read">Mark as read</button>
-              <button type="button" data-notification-action="unread">Mark as unread</button>
-              <button type="button" data-notification-action="delete">Delete</button>
-            </div>
-          </div>
-          <h3 class="notification-title">${escapeHTML(item.title)}</h3>
-          <p class="notification-message">${escapeHTML(item.message)}</p>
-          <div class="notification-meta"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.3"/><path d="M10 6v4l2.5 2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>${escapeHTML(item.time)}</div>
-        </article>`,
-          )
-          .join("")
-      : '<div class="empty-notifications">No notifications match your filters.</div>';
+      ? groups.filter(([, items]) => items.length).map(([group, items]) =>
+          `<section class="notification-group"><h2>${group.toUpperCase()}</h2><ul class="notification-list">${items.map((item) => renderNotificationCard(item)).join("")}</ul></section>`,
+        ).join("")
+      : `<div class="notification-state"><span class="notification-state-icon" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M16 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M8 20a2 2 0 0 0 4 0"/></svg></span><strong>${activeFilter === "unread" ? "No unread notifications" : "You have no notifications"}</strong><p>${activeFilter === "unread" ? "Everything has been read. Nice work." : "New notifications will show up here."}</p></div>`;
 
     renderDeleted();
     save();
     updateUnreadBadge();
+    const unreadCount = notifications.filter((item) => !item.read && belongsToCurrentTeacher(item)).length;
+    const unreadBadge = document.getElementById("notificationUnreadCount");
+    if (unreadBadge) unreadBadge.textContent = String(unreadCount);
+    document.querySelectorAll("[data-notification-filter]").forEach((button) => {
+      const selected = button.dataset.notificationFilter === activeFilter ||
+        (button.dataset.notificationFilter === "all" && activeFilter === "read");
+      button.classList.toggle("is-active", selected);
+      button.setAttribute("aria-pressed", String(selected));
+    });
+    document.getElementById("recentDeletedInfo").hidden = !showingDeleted();
+    const primaryAction = document.getElementById("markAllRead");
+    primaryAction.disabled = showingDeleted()
+      ? deletedNotifications.length === 0
+      : unreadCount === 0;
+    primaryAction.textContent = showingDeleted() ? "Empty trash" : "Mark all as read";
   }
 
   function updatePanelControls(showingDeleted) {
@@ -183,9 +298,10 @@
     document.getElementById("showDeletedNotificationsLabel").textContent =
       showingDeleted ? "All Notifications" : "Recently Deleted";
     document.getElementById("markAllRead").textContent = showingDeleted
-      ? "Delete All"
-      : "Mark All As Read";
+      ? "Empty trash"
+      : "Mark all as read";
     button.setAttribute("aria-pressed", String(showingDeleted));
+    button.setAttribute("aria-label", showingDeleted ? "Return to notifications" : "Open Recently Deleted");
     document.getElementById("showDeletedNotificationsIcon").innerHTML =
       showingDeleted
         ? '<path d="M3.5 5.5h13M5 5.5v10h10v-10M7.5 3.5h5l1 2h-7l1-2M8 8v5m4-5v5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>'
@@ -261,8 +377,19 @@
       deletedAt: Date.now(),
       expiresAt: Date.now() + deletedLifetime,
     });
+    undoDeletedItem = deletedNotifications[0];
     closeDeleteConfirmation();
     renderNotifications();
+    const toast = document.getElementById("teacherNotificationToast");
+    if (toast) {
+      toast.innerHTML = 'Moved to Recently Deleted <button type="button" data-undo-delete>Undo</button>';
+      toast.hidden = false;
+      clearTimeout(undoTimer);
+      undoTimer = setTimeout(() => {
+        undoDeletedItem = null;
+        toast.hidden = true;
+      }, 6000);
+    }
   }
 
   const notificationFilter = document.getElementById("notificationFilter");
@@ -359,18 +486,30 @@
     activeFilter = event.target.value;
     renderNotifications();
   });
+  document.querySelectorAll("[data-notification-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      notificationFilter.value = button.dataset.notificationFilter;
+      notificationFilter.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  });
   document.getElementById("markAllRead").addEventListener("click", () => {
     if (showingDeleted()) {
-      if (
-        !deletedNotifications.length ||
-        !window.confirm(
-          "Permanently delete all recently deleted notifications?",
-        )
-      )
-        return;
+      const count = deletedNotifications.length;
+      if (!count || !window.confirm(`Permanently delete all ${count} notifications? This cannot be undone.`)) return;
       deletedNotifications = [];
+      save();
     } else {
       notifications = notifications.map((item) => ({ ...item, read: true }));
+      save();
+      const toast = document.getElementById("teacherNotificationToast");
+      if (toast) {
+        toast.textContent = "All notifications marked as read.";
+        toast.hidden = false;
+        clearTimeout(undoTimer);
+        undoTimer = setTimeout(() => {
+          toast.hidden = true;
+        }, 3000);
+      }
     }
     renderNotifications();
   });
@@ -385,6 +524,7 @@
         isShowingDeleted ? deletedPanel : allPanel,
       );
       updatePanelControls(!isShowingDeleted);
+      renderNotifications();
     });
   notificationList.addEventListener("click", (event) => {
     const card = event.target.closest("[data-notification-id]");
@@ -392,21 +532,7 @@
     const item = notifications.find(
       (notification) => notification.id === card.dataset.notificationId,
     );
-    const toggle = event.target.closest(".notification-menu-toggle");
     const action = event.target.closest("[data-notification-action]");
-    if (toggle) {
-      const menu = card.querySelector(".notification-menu");
-      const open = menu.hidden;
-      document.querySelectorAll(".notification-menu").forEach((element) => {
-        element.hidden = true;
-      });
-      document
-        .querySelectorAll(".notification-menu-toggle")
-        .forEach((element) => element.setAttribute("aria-expanded", "false"));
-      menu.hidden = !open;
-      toggle.setAttribute("aria-expanded", String(open));
-      return;
-    }
     if (!item) return;
     if (action) {
       event.stopPropagation();
@@ -424,14 +550,12 @@
     renderNotifications();
     if (item.eventId) {
       window.location.href = `TeacherMyEvent.html?event=${encodeURIComponent(item.eventId)}`;
-      return;
     }
-    showNotification(item);
   });
   notificationList.addEventListener("keydown", (event) => {
     if (
       !["Enter", " "].includes(event.key) ||
-      event.target.closest(".notification-menu")
+      event.target.closest("button, a, input, select")
     )
       return;
     const card = event.target.closest("[data-notification-id]");
@@ -443,7 +567,9 @@
     if (item) {
       item.read = true;
       renderNotifications();
-      showNotification(item);
+      if (item.eventId) {
+        window.location.href = `TeacherMyEvent.html?event=${encodeURIComponent(item.eventId)}`;
+      }
     }
   });
   deletedList.addEventListener("click", (event) => {
@@ -457,10 +583,21 @@
     if (action.dataset.deletedAction === "restore") {
       const { deletedAt, expiresAt, ...restoredItem } = item;
       notifications.unshift(restoredItem);
+    } else if (action.dataset.deletedAction === "delete-permanently") {
+      if (!window.confirm("Permanently delete this notification? This cannot be undone.")) return;
     }
     deletedNotifications = deletedNotifications.filter(
       (notification) => notification.id !== item.id,
     );
+    renderNotifications();
+  });
+  document.getElementById("notificationMain").addEventListener("click", (event) => {
+    if (!event.target.closest("[data-undo-delete]") || !undoDeletedItem) return;
+    const { deletedAt, expiresAt, ...restoredItem } = undoDeletedItem;
+    deletedNotifications = deletedNotifications.filter((item) => item.id !== undoDeletedItem.id);
+    notifications.unshift(restoredItem);
+    undoDeletedItem = null;
+    clearTimeout(undoTimer);
     renderNotifications();
   });
   document
@@ -502,7 +639,7 @@
     }
   });
 
-  let teacher = null;
+  let teacher = teacherProfile;
   try {
     teacher = JSON.parse(
       localStorage.getItem("recovibeCurrentTeacher") || "null",

@@ -1,25 +1,16 @@
 import {
   collection,
+  doc,
+  getDoc,
   onSnapshot,
-  orderBy,
   query,
-  where,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { auth, authReady, db, functions, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
-import { syncApproverOrganization } from "../organizationScope.js";
+import { signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { auth, authReady, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
 
 (() => {
   "use strict";
-  const profile = read("recovibeAdminProfile", null),
-    identity = localStorage.getItem("recovibeAdminId");
-  if (
-    !profile ||
-    String(profile.role || "").toLowerCase() !== "admin" ||
-    !identity
-  ) {
-    location.replace("AdminLogin.html");
-    return;
-  }
+  let profile = {};
   const root = document.getElementById("allEventsRoot"),
     params = new URLSearchParams(location.search),
     now = new Date(),
@@ -27,6 +18,9 @@ import { syncApproverOrganization } from "../organizationScope.js";
   let shown = 10,
     searchTimer;
   let firestoreEvents = [];
+  let unsubscribeEvents = null;
+  let loadTimer = null;
+  let loadExpired = false;
   const months = [
     "January",
     "February",
@@ -44,7 +38,6 @@ import { syncApproverOrganization } from "../organizationScope.js";
   const sources = [
     "PUP Official",
     "CSC",
-    "Teacher / Faculty",
     "Organizational",
     "Others / External",
   ];
@@ -71,33 +64,84 @@ import { syncApproverOrganization } from "../organizationScope.js";
     status: params.get("status") || "",
     availability: params.get("availability") || "",
   };
-  document.querySelector("[data-name]").textContent = (
-    profile.name || identity
-  ).toUpperCase();
-  document.querySelector("[data-avatar]").textContent = (profile.name || "HA")
-    .trim()
-    .split(/\s+/)
-    .slice(0, 2)
-    .map((p) => p[0])
-    .join("")
-    .toUpperCase();
-  document.querySelector("[data-role]").textContent =
-    "Head of Academic Programs";
-  document.querySelector("[data-today]").textContent =
-    new Date().toLocaleDateString("en-US", {
-      timeZone: "Asia/Manila",
-      month: "long",
-      day: "numeric",
-      year: "numeric",
-    });
-  document.querySelector(".admin-logout").onclick = () =>
-    localStorage.removeItem("recovibeAdminId");
-  function read(key, fallback) {
+  document.querySelector(".admin-logout").onclick = async (event) => {
+    event.preventDefault();
     try {
-      return JSON.parse(localStorage.getItem(key) || "null") ?? fallback;
-    } catch {
-      return fallback;
+      await signOut(auth);
+    } finally {
+      localStorage.removeItem("recovibeAdminId");
+      localStorage.removeItem("recovibeAdminProfile");
+      location.replace("AdminLogin.html");
     }
+  };
+  function getApprovalPosition(adminProfile) {
+    const labels = {
+      org_adv: "Organization Adviser",
+      sir_abelida: "Laboratory Head, Property Custodian, Administrative Officer",
+      hap: "Head of Academic Programs, QAC Coordinator (HAP)",
+      osas: "OSAS",
+    };
+    const normalize = (value) => String(value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+    const declared = [
+      adminProfile?.approvalStage, adminProfile?.approvalStageKey,
+      adminProfile?.assignedApprovalStage, adminProfile?.approverStage,
+      adminProfile?.approverKey, adminProfile?.approvalRole,
+      adminProfile?.approverRole, adminProfile?.assignedRole,
+      adminProfile?.assignedApprover, adminProfile?.adminRole,
+      adminProfile?.roleName, adminProfile?.stageKey, adminProfile?.position,
+    ].map(normalize);
+    const account = normalize(adminProfile?.accountNumber || adminProfile?.accountNo || adminProfile?.account_number || adminProfile?.account_no);
+    const keys = ["org_adv", "sir_abelida", "hap", "osas"];
+    const aliases = {
+      org_adv: ["orgadv", "orgadviser", "organizationadviser", "organizationadvisor", "adviser"],
+      sir_abelida: ["sirabelida", "abelida", "abelidas", "laboratoryhead", "propertycustodian", "administrativeofficer", "labhead"],
+      hap: ["hap", "headofacademicprograms", "qaccoordinator"],
+      osas: ["osas"],
+    };
+    const stage = keys.find((key) =>
+      aliases[key].some((alias) => declared.some((value) => value === alias || value.includes(alias)) || account.includes(alias)),
+    );
+    return labels[stage] || [adminProfile?.position, adminProfile?.title, adminProfile?.role_title, adminProfile?.approver_role, adminProfile?.approverRole]
+      .map((value) => String(value || "").trim())
+      .find(Boolean) || "";
+  }
+  async function loadVerifiedAdminProfile() {
+    await authReady;
+    if (!auth) throw new Error("Please sign in with an Admin account.");
+    await auth.authStateReady();
+    const user = auth.currentUser;
+    if (!user || !db) throw new Error("Please sign in with an Admin account.");
+    const [adminResult, userResult] = await Promise.allSettled([
+      getDoc(doc(db, "adminUser", user.uid)),
+      getDoc(doc(db, "users", user.uid)),
+    ]);
+    const adminProfile = adminResult.status === "fulfilled" && adminResult.value.exists()
+      ? adminResult.value.data()
+      : {};
+    const userProfile = userResult.status === "fulfilled" && userResult.value.exists()
+      ? userResult.value.data()
+      : {};
+    if (adminResult.status === "rejected" && userResult.status === "rejected") {
+      throw adminResult.reason;
+    }
+    const verifiedProfile = { ...userProfile, ...adminProfile };
+    const role = String(verifiedProfile.role || verifiedProfile.userRole || "").trim().toLowerCase().replace(/[\s_-]+/g, "");
+    if (role !== "admin") {
+      throw new Error("This account is not authorized to access Admin pages.");
+    }
+    profile = { ...verifiedProfile, uid: user.uid, email: user.email || "" };
+    const name = profile.name || [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(" ") || user.displayName || user.email?.split("@")[0] || "";
+    document.querySelector("[data-name]").textContent = name.toUpperCase();
+    document.querySelector("[data-avatar]").textContent = name
+      .trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
+    const roleElement = document.querySelector("[data-role]");
+    roleElement.textContent = getApprovalPosition(profile);
+    roleElement.title = roleElement.textContent;
+    return profile;
+  }
+  function showLoadError(message) {
+    root.innerHTML = `<div class="admin-error" role="alert">${esc(message)} <button class="admin-row-action" id="retryAllEvents" type="button">Try again</button></div>`;
+    root.querySelector("#retryAllEvents").addEventListener("click", init);
   }
   function esc(value) {
     return String(value ?? "").replace(
@@ -117,11 +161,9 @@ import { syncApproverOrganization } from "../organizationScope.js";
       date,
     );
   }
-  function normalizeSource(source, role = "") {
+  function normalizeSource(source) {
     const value = String(source || "").trim().toLowerCase();
-    if (!value && role === "Teacher") return "Teacher / Faculty";
     if (/\bcsc\b/.test(value)) return "CSC";
-    if (/teacher|faculty/.test(value)) return "Teacher / Faculty";
     if (/organization|organizational|ibits|event organizer|organizer/.test(value))
       return "Organizational";
     if (/external|admin|other/.test(value)) return "Others / External";
@@ -199,7 +241,7 @@ import { syncApproverOrganization } from "../organizationScope.js";
         `${state.year}-${String(Number(state.month) + 1).padStart(2, "0")}`,
       );
     const full = openSlots(event) === 0;
-    const source = normalizeSource(event.source, event._role);
+    const source = normalizeSource(event.source);
     return (
       (!query || text.includes(query)) &&
       (!state.source || source === normalizeSource(state.source)) &&
@@ -306,13 +348,10 @@ import { syncApproverOrganization } from "../organizationScope.js";
       event.isRescheduled && st !== "Completed" ? '<span class="admin-chip">Rescheduled</span>' : "",
       open === 0 ? '<span class="admin-chip chip-full">Full</span>' : "",
     ].filter(Boolean);
-    const organizer =
-      event._role === "Teacher"
-        ? `Teacher - ${event.organizer || event.organizerName || "Teacher"}`
-        : event.organizerName || event.organizer || event.organization || "Event Organizer";
+    const organizer = event.organizerName || event.organizer || event.organization || "Event Organizer";
     const monthName = date ? new Date(`${date}T00:00:00`).toLocaleDateString("en-US", { month: "short", timeZone: "Asia/Manila" }) : "—";
     const dayNum = parts[2] ? parts[2].replace(/^0+/, '') || parts[2] : "—";
-    return `<article class="admin-event-card"><div class="event-card-header"><div class="event-date-tile"><small>${esc(monthName)}</small><strong>${esc(parts[2] || "—")}</strong></div><div class="event-card-titles"><h3 class="event-card-title">${esc(event.title || "Untitled event")}</h3><p class="event-organizer-text"><strong>Event Organizer:</strong> ${esc(organizer)}</p><p class="event-source-text"><strong>Source:</strong> ${esc(normalizeSource(event.source, event._role))}</p></div></div><div class="event-card-meta"><span><strong>Date:</strong> ${esc(date || "—")}</span><span><strong>Start:</strong> ${esc(time[0] || "—")}</span><span><strong>End:</strong> ${esc(time[1] || "—")}</span><span><strong>Venue:</strong> ${esc(event.venueOther || event.location || event.venue || "—")}</span><span style="grid-column: 1 / -1;"><strong>Capacity:</strong> ${caps === null ? "No capacity limit" : `${open} out of ${caps} Slots are Open`}</span></div><div class="event-card-bottom"><div class="admin-pills">${cats.map((category) => `<span class="admin-category-pill">${esc(category)}</span>`).join("")} ${chips.join(" ")}</div><button class="admin-row-action" type="button" data-event-view="${esc(event.eventId || event.id)}">View Details</button></div></article>`;
+    return `<article class="admin-event-card"><div class="event-card-header"><div class="event-date-tile"><small>${esc(monthName)}</small><strong>${esc(parts[2] || "—")}</strong></div><div class="event-card-titles"><h3 class="event-card-title">${esc(event.title || "Untitled event")}</h3><p class="event-organizer-text"><strong>Event Organizer:</strong> ${esc(organizer)}</p><p class="event-source-text"><strong>Source:</strong> ${esc(normalizeSource(event.source))}</p></div></div><div class="event-card-meta"><span><strong>Date:</strong> ${esc(date || "—")}</span><span><strong>Start:</strong> ${esc(time[0] || "—")}</span><span><strong>End:</strong> ${esc(time[1] || "—")}</span><span><strong>Venue:</strong> ${esc(event.venueOther || event.location || event.venue || "—")}</span><span style="grid-column: 1 / -1;"><strong>Capacity:</strong> ${caps === null ? "No capacity limit" : `${open} out of ${caps} Slots are Open`}</span></div><div class="event-card-bottom"><div class="admin-pills">${cats.map((category) => `<span class="admin-category-pill">${esc(category)}</span>`).join("")} ${chips.join(" ")}</div><button class="admin-row-action" type="button" data-event-view="${esc(event.eventId || event.id)}">View Details</button></div></article>`;
   }
   function dropdown(key, label, options) {
     const current = state[key];
@@ -490,32 +529,44 @@ import { syncApproverOrganization } from "../organizationScope.js";
     if (clear) clear.style.display = hasFilters() ? "inline-flex" : "none";
   }).observe(root, { childList: true, subtree: true });
   async function init() {
+    clearTimeout(loadTimer);
+    unsubscribeEvents?.();
+    unsubscribeEvents = null;
     if (!isFirebaseConfigured || !db) {
-      root.innerHTML =
-        '<div class="admin-error">Event data is unavailable. Please contact support.</div>';
+      showLoadError("Event data is unavailable. Please check your connection and try again.");
       return;
     }
     root.innerHTML = '<div class="admin-loading">Loading events…</div>';
-    let organizationCode;
+    loadExpired = false;
+    loadTimer = setTimeout(() => {
+      loadExpired = true;
+      unsubscribeEvents?.();
+      showLoadError("Could not load events in time. Please check your connection and try again.");
+    }, 15000);
     try {
-      await authReady;
-      if (auth?.authStateReady) await auth.authStateReady();
-      organizationCode = await syncApproverOrganization(functions);
+      await loadVerifiedAdminProfile();
+      if (loadExpired) return;
     } catch (error) {
-      console.error("Could not verify approval organization:", error);
-      root.innerHTML = '<div class="admin-error">Could not verify your approval access. Please refresh and try again.</div>';
+      clearTimeout(loadTimer);
+      loadTimer = null;
+      loadExpired = false;
+      if (!auth?.currentUser) {
+        location.replace("AdminLogin.html");
+        return;
+      }
+      console.error("Could not verify Admin access:", error);
+      showLoadError("Could not verify your Admin access. Please try again.");
       return;
     }
-    const eventsQuery = organizationCode === "*"
-      ? query(collection(db, "events"), orderBy("createdAt", "desc"))
-      : query(
-          collection(db, "events"),
-          where("organizationCode", "==", organizationCode),
-        );
-    const unsubscribe = onSnapshot(
-      eventsQuery,
+    unsubscribeEvents?.();
+    unsubscribeEvents = onSnapshot(
+      query(collection(db, "events")),
       (snapshot) => {
-        firestoreEvents = snapshot.docs
+      if (loadExpired) return;
+      clearTimeout(loadTimer);
+      loadTimer = null;
+      loadExpired = false;
+      firestoreEvents = snapshot.docs
           .map((eventDocument) => {
             const data = eventDocument.data();
             if (!isPublishedEvent(data)) return null;
@@ -536,11 +587,18 @@ import { syncApproverOrganization } from "../organizationScope.js";
         render();
       },
       (error) => {
+        if (loadExpired) return;
+        clearTimeout(loadTimer);
+        loadTimer = null;
+        loadExpired = false;
         console.error("Unable to load all events:", error);
-        root.innerHTML = `<div class="admin-error">Could not load events. ${esc(error.message || "Please try again later.")}</div>`;
+        showLoadError("Could not load events. Please check your connection and try again.");
       },
     );
-        window.addEventListener("beforeunload", unsubscribe, { once: true });
   }
+  window.addEventListener("beforeunload", () => {
+    clearTimeout(loadTimer);
+    unsubscribeEvents?.();
+  }, { once: true });
   init();
 })();

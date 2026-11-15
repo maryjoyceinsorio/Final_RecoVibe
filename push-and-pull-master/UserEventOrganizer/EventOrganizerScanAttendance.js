@@ -82,6 +82,10 @@ const btnExportCsv = document.getElementById("btnExportCsv");
 // Application State
 let currentEvents = [];
 let currentEventId = null;
+let organizerUid = "";
+let organizerDisplayName = "";
+let eventsRefreshTimer = null;
+let eventLoadInProgress = false;
 const scanUrlParams = new URLSearchParams(window.location.search);
 const requestedEventId = scanUrlParams.get("eventId")?.trim() || "";
 const requestedEventContext = {
@@ -93,7 +97,7 @@ const requestedEventContext = {
   status: "published",
   allowWalkIn: false,
 };
-if (requestedEventContext.id && requestedEventContext.name) {
+if (false && requestedEventContext.id && requestedEventContext.name) {
   const dateLabel = requestedEventContext.dateISO ? ` (${requestedEventContext.dateISO})` : "";
   eventSelect?.replaceChildren(new Option(
     `${requestedEventContext.name}${dateLabel}`,
@@ -123,9 +127,10 @@ let isWalkInAllowed = false;
 let pendingWalkInToken = null;
 let pendingWalkInState = null;
 let pendingManualStudentNo = null;
+let manualCheckInInProgress = false;
 
 // Initialize Date & Profile
-(() => {
+if (false) (() => {
   if (organizerTodayDate) {
     organizerTodayDate.textContent = new Date().toLocaleDateString("en-US", {
       month: "long",
@@ -187,29 +192,43 @@ let pendingManualStudentNo = null;
   }
 })();
 
-// Task 1: Auth & Role Guard (Must be event_organizer, teacher, or admin)
+function renderOrganizerProfile() {
+  let profile = {};
+  try {
+    profile = JSON.parse(localStorage.getItem("recovibeOrganizerProfile") || "{}");
+  } catch {}
+  organizerDisplayName = profile.fullName || profile.name ||
+    [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(" ") ||
+    auth?.currentUser?.displayName || auth?.currentUser?.email || "Event Organizer";
+  if (organizerName) organizerName.textContent = organizerDisplayName;
+  if (organizerRole) organizerRole.textContent = `${profile.organization || ""} organizer`.trim();
+  if (organizerAvatar) {
+    organizerAvatar.textContent = organizerDisplayName
+      .split(/\s+/).filter(Boolean).map((part) => part[0]).slice(0, 2).join("").toUpperCase() || "EO";
+  }
+}
+
+// Task 1: Auth & Role Guard (event organizers only)
 authReady.then(() => onAuthStateChanged(auth, async (user) => {
   if (!user) {
-    // If running in development / demo mode with localStorage session, allow preview
-    const localOrganizer = localStorage.getItem("recovibeOrganizerId");
-    if (!localOrganizer && isFirebaseConfigured) {
+    window.location.replace("EventOrganizerLogin.html");
+    return;
+  }
+
+  try {
+    const roleSnap = await get(ref(rtdb, `roles/${user.uid}`));
+    if (roleSnap.val() !== "event_organizer") {
       window.location.replace("EventOrganizerLogin.html");
       return;
     }
-  } else if (rtdb) {
-    try {
-      const roleSnap = await get(ref(rtdb, `roles/${user.uid}`));
-      const roleVal = roleSnap.val();
-      const allowedRoles = ["event_organizer", "admin", "teacher"];
-      if (roleVal && !allowedRoles.includes(roleVal)) {
-        console.warn("Unauthorized role for scan attendance:", roleVal);
-        window.location.replace("EventOrganizerLogin.html");
-        return;
-      }
-    } catch (roleErr) {
-      console.warn("Role check notice:", roleErr);
-    }
+  } catch (roleErr) {
+    console.error("Could not verify event organizer role:", roleErr);
+    window.location.replace("EventOrganizerLogin.html");
+    return;
   }
+
+  organizerUid = user.uid;
+  renderOrganizerProfile();
 
   initApp().catch((error) => {
     console.error("Could not initialize attendance events:", error);
@@ -360,8 +379,6 @@ function showResultBanner({ type, title, name, meta, note, allowWalkInAction, to
         <polyline points="12 6 12 12 14 14"/>
       </svg>
     `;
-    playWarningBuzz();
-    triggerVibration([100, 50, 100]);
   } else if (type === "not-registered") {
     iconSvg = `
       <svg viewBox="0 0 24 24" fill="none" stroke="#b45309" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -370,8 +387,6 @@ function showResultBanner({ type, title, name, meta, note, allowWalkInAction, to
         <line x1="12" y1="16" x2="12.01" y2="16"/>
       </svg>
     `;
-    playWarningBuzz();
-    triggerVibration([100, 50, 100]);
   } else {
     // replaced or error
     iconSvg = `
@@ -381,8 +396,6 @@ function showResultBanner({ type, title, name, meta, note, allowWalkInAction, to
         <line x1="9" y1="9" x2="15" y2="15"/>
       </svg>
     `;
-    playErrorTone();
-    triggerVibration([120, 60, 120]);
   }
   if (bannerIconCol) bannerIconCol.innerHTML = iconSvg;
 
@@ -425,6 +438,109 @@ if (btnWalkInConfirm) {
 
 // Task 2: Event Selector & Default to Today / Next Upcoming
 async function loadEventsList() {
+  if (eventLoadInProgress) return;
+  eventLoadInProgress = true;
+  if (eventSelect) eventSelect.replaceChildren(new Option("Loading published events...", ""));
+
+  const normalizeDate = (value) => {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    const match = text.match(/^(\d{4})[-\/]?(\d{2})[-\/]?(\d{2})/);
+    return match ? `${match[1]}-${match[2]}-${match[3]}` : "";
+  };
+  const normalizeTime = (value) => {
+    const match = String(value || "").trim().match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+    if (!match) return null;
+    let hour = Number(match[1]);
+    const minute = Number(match[2] || 0);
+    const meridiem = String(match[3] || "").toLowerCase();
+    if (meridiem === "pm" && hour < 12) hour += 12;
+    if (meridiem === "am" && hour === 12) hour = 0;
+    if (hour > 23 || minute > 59) return null;
+    return hour * 60 + minute;
+  };
+  const eventIsOwnedByOrganizer = (data) =>
+    [data.createdBy, data.organizerId, data.organizerUid].some((id) => String(id || "") === String(organizerUid));
+  const eventIsPublished = (data) => String(data.status || "").trim().toLowerCase() === "published";
+  const eventIsHappeningNow = (event) => {
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    if (!event.dateISO || !event.dateEndISO || today < event.dateISO || today > event.dateEndISO) return false;
+    if (event.startMinutes === null && event.endMinutes === null) return true;
+    const minutes = now.getHours() * 60 + now.getMinutes();
+    return (event.startMinutes === null || minutes >= event.startMinutes) &&
+      (event.endMinutes === null || minutes <= event.endMinutes);
+  };
+  const normalizeEvent = (id, data) => {
+    const startAt = data.startAt || data.startTime || data.timeStart || data.time || "";
+    const endAt = data.endAt || data.endTime || data.timeEnd || "";
+    const startDate = normalizeDate(data.eventDate || data.dateISO || data.date || data.dateStart || startAt);
+    const endDate = normalizeDate(data.endDate || data.endDateISO || data.dateEnd || data.dateEndISO || startDate);
+    const timeRange = String(startAt).match(/(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*(?:-|–|to)\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i);
+    const startTime = timeRange ? timeRange[1] : startAt;
+    const endTime = timeRange ? timeRange[2] : endAt;
+    return {
+      ...data,
+      id: String(id),
+      name: data.eventName || data.title || data.name || "Untitled event",
+      dateISO: startDate,
+      dateEndISO: endDate || startDate,
+      startAt: startTime,
+      endAt: endTime,
+      startMinutes: normalizeTime(startTime),
+      endMinutes: normalizeTime(endTime),
+      venue: data.venue || data.location || "—",
+      status: String(data.status || "").trim().toLowerCase(),
+      allowWalkIn: Boolean(data.allowWalkIn),
+    };
+  };
+
+  try {
+    const eventsMap = new Map();
+    if (db) {
+      const eventSnapshot = await getDocs(query(
+        collection(db, "events"),
+        where("status", "==", "published"),
+      ));
+      eventSnapshot.docs.forEach((eventDocument) => {
+        const data = eventDocument.data();
+        if (eventIsOwnedByOrganizer(data) && eventIsPublished(data)) {
+          const event = normalizeEvent(eventDocument.id, data);
+          if (eventIsHappeningNow(event)) eventsMap.set(event.id, event);
+        }
+      });
+    }
+    if (rtdb) {
+      const snapshot = await get(ref(rtdb, "events"));
+      Object.entries(snapshot.val() || {}).forEach(([id, data]) => {
+        if (!data || !eventIsOwnedByOrganizer(data) || !eventIsPublished(data)) return;
+        const event = normalizeEvent(id, data);
+        if (eventIsHappeningNow(event)) eventsMap.set(event.id, event);
+      });
+    }
+    currentEvents = [...eventsMap.values()];
+    populateEventDropdown();
+  } catch (error) {
+    console.error("Could not load published attendance events:", error);
+    currentEvents = [];
+    populateEventDropdown();
+    if (eventSelect) {
+      eventSelect.disabled = false;
+      eventSelect.replaceChildren(new Option("Couldn't load events. Click to retry", "__retry__"));
+      eventSelect.onchange = () => loadEventsList();
+    }
+    if (scanEmptyEventsBox) {
+      scanEmptyEventsBox.hidden = false;
+      scanEmptyEventsBox.querySelector("h3")?.replaceChildren(document.createTextNode("Couldn't load published events"));
+      scanEmptyEventsBox.querySelector("p")?.replaceChildren(document.createTextNode("Check your connection and choose retry above."));
+    }
+  } finally {
+    eventLoadInProgress = false;
+  }
+  return;
+
+  /* Legacy unfiltered event loader retained below only as page-local history. */
+  /*
   const eventsMap = new Map();
 
   // Start the realtime load without blocking the Firestore event list.
@@ -551,6 +667,7 @@ async function loadEventsList() {
   await realtimeEventsPromise;
   currentEvents = Array.from(eventsMap.values());
   populateEventDropdown();
+  */
 }
 
 function populateEventDropdown() {
@@ -558,12 +675,30 @@ function populateEventDropdown() {
   const scanLayoutGrid = document.querySelector(".scan-layout-grid");
   const scanRosterSection = document.querySelector(".scan-attendance-list-section");
 
-  // Empty state when no events are published or completed
+  const setAttendanceControlsDisabled = (disabled) => {
+    [btnCompleteEvent, walkInToggle, btnToggleCamera, btnSwitchCamera, btnManualSubmit,
+      manualStudentNo, btnExportCsv].forEach((control) => {
+      if (control) control.disabled = disabled;
+    });
+  };
+
   if (currentEvents.length === 0) {
+    currentEventId = null;
+    stopCameraScanner();
+    setAttendanceControlsDisabled(true);
+    if (eventSelect) eventSelect.replaceChildren(new Option("No published event is happening right now", ""));
+    if (metaDateTime) metaDateTime.textContent = "—";
+    if (metaVenue) metaVenue.textContent = "—";
+    if (metaCount) metaCount.textContent = "0 checked in";
+    currentAttendanceRows = [];
+    currentAbsentRows = [];
+    updateRosterDisplay();
     if (scanEmptyEventsBox) scanEmptyEventsBox.hidden = false;
-    if (scanEventCard) scanEventCard.style.display = "none";
-    if (scanLayoutGrid) scanLayoutGrid.style.display = "none";
-    if (scanRosterSection) scanRosterSection.style.display = "none";
+    if (scanEmptyEventsBox.querySelector("h3")) scanEmptyEventsBox.querySelector("h3").textContent = "No published event is happening right now";
+    if (scanEmptyEventsBox.querySelector("p")) scanEmptyEventsBox.querySelector("p").textContent = "Attendance controls will be enabled when one of your published events is in progress.";
+    if (scanEventCard) scanEventCard.style.display = "";
+    if (scanLayoutGrid) scanLayoutGrid.style.display = "";
+    if (scanRosterSection) scanRosterSection.style.display = "";
     return;
   }
 
@@ -571,6 +706,7 @@ function populateEventDropdown() {
   if (scanEventCard) scanEventCard.style.display = "";
   if (scanLayoutGrid) scanLayoutGrid.style.display = "";
   if (scanRosterSection) scanRosterSection.style.display = "";
+  setAttendanceControlsDisabled(false);
 
   if (!eventSelect) return;
   eventSelect.innerHTML = "";
@@ -581,7 +717,8 @@ function populateEventDropdown() {
     bestMatchEvent = currentEvents.find((e) => String(e.id) === requestedEventId);
   }
 
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const nowForSelection = new Date();
+  const todayStr = `${nowForSelection.getFullYear()}-${String(nowForSelection.getMonth() + 1).padStart(2, "0")}-${String(nowForSelection.getDate()).padStart(2, "0")}`;
 
   // 1. Look for event happening today
   if (!bestMatchEvent) {
@@ -624,11 +761,14 @@ function populateEventDropdown() {
 
 async function selectEvent(eventId) {
   if (!eventId) return;
+  await stopCameraScanner();
+  dismissBanner();
   currentEventId = eventId;
   const ev = currentEvents.find((e) => String(e.id) === String(eventId));
   if (!ev) return;
 
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const nowForSelection = new Date();
+  const todayStr = `${nowForSelection.getFullYear()}-${String(nowForSelection.getMonth() + 1).padStart(2, "0")}-${String(nowForSelection.getDate()).padStart(2, "0")}`;
   const dateFormatted = ev.dateISO || "Date TBA";
   const timeFormatted = ev.startAt ? ` · ${ev.startAt}` : "";
   if (metaDateTime) metaDateTime.textContent = `${dateFormatted}${timeFormatted}`;
@@ -658,9 +798,6 @@ async function selectEvent(eventId) {
     if (tabCheckedIn) tabCheckedIn.classList.add("is-active");
     if (tabAbsent) tabAbsent.classList.remove("is-active");
 
-    if (cameraStatus !== "running") {
-      startCameraScanner();
-    }
   }
 
   // Restore walk-in policy for selected event
@@ -765,6 +902,7 @@ function updateRosterDisplay() {
   const countAbsent = currentAbsentRows.length;
 
   if (metaCount) metaCount.textContent = `${countCheckedIn} checked in`;
+  if (btnExportCsv) btnExportCsv.disabled = !currentEventId || countCheckedIn === 0;
   if (tabCountCheckedIn) tabCountCheckedIn.textContent = countCheckedIn;
   if (tabCountAbsent) tabCountAbsent.textContent = countAbsent;
 
@@ -1065,8 +1203,8 @@ if (btnConfirmCompleteModal) {
       ev.status = "completed";
       ev.completedAt = Date.now();
 
-      // Persist to localStorage across all relevant lists
-      ["recovibeOrganizerEvents", "recovibeTeacherEvents", "recovibeEvents"].forEach((key) => {
+      // Keep only this page's organizer-side cache in sync; the authoritative status is saved above.
+      ["recovibeOrganizerEvents"].forEach((key) => {
         try {
           const list = JSON.parse(localStorage.getItem(key) || "[]");
           if (Array.isArray(list)) {
@@ -1085,8 +1223,12 @@ if (btnConfirmCompleteModal) {
         } catch (e) {}
       });
 
+      const completedEventId = currentEventId;
+      await stopCameraScanner();
       if (completeConfirmModalOverlay) completeConfirmModalOverlay.hidden = true;
-      selectEvent(currentEventId);
+      currentEvents = currentEvents.filter((item) => String(item.id) !== String(completedEventId));
+      currentEventId = null;
+      populateEventDropdown();
     } catch (err) {
       alert("Could not complete event: " + (err.message || err));
     } finally {
@@ -1109,15 +1251,13 @@ if (btnExportCsv) {
         alert("No attendance records to export yet.");
         return;
       }
-      const headers = ["Timestamp", "Check-in Time", "Student Name", "Student Number", "Organization", "Attendance Type", "Scanned By"];
+      const headers = ["Time", "Student Name", "Student Number", "Organization", "Type", "Scanned By"];
       const csvLines = [headers.join(",")];
       currentAttendanceRows.forEach((row) => {
         const d = new Date(row.scannedAt);
         const timeStr = !Number.isNaN(d.getTime()) ? d.toLocaleTimeString("en-US") : "";
-        const dateStr = !Number.isNaN(d.getTime()) ? d.toISOString() : "";
         const typeStr = row.walkIn ? "Walk-in" : "Registered";
         csvLines.push([
-          `"${dateStr}"`,
           `"${timeStr}"`,
           `"${(row.name || "").replace(/"/g, '""')}"`,
           `"${(row.studentNo || "").replace(/"/g, '""')}"`,
@@ -1163,6 +1303,13 @@ function downloadCsv(content, filename) {
 
 // Task 3: Camera Scanner with html5-qrcode
 async function startCameraScanner() {
+  if (!currentEventId) return;
+  if (!window.isSecureContext && location.hostname !== "localhost" && location.hostname !== "127.0.0.1") {
+    if (cameraErrorBox) cameraErrorBox.hidden = false;
+    if (cameraErrorTitle) cameraErrorTitle.textContent = "Secure connection required";
+    if (cameraErrorMessage) cameraErrorMessage.textContent = "Camera scanning requires HTTPS or localhost. Use manual student number check-in instead.";
+    return;
+  }
   if (typeof window.Html5Qrcode === "undefined") {
     console.warn("html5-qrcode library is not loaded yet.");
     return;
@@ -1175,6 +1322,11 @@ async function startCameraScanner() {
   if (cameraPausedBox) cameraPausedBox.hidden = true;
 
   try {
+    if (typeof window.Html5Qrcode.getCameras === "function") {
+      const cameras = await window.Html5Qrcode.getCameras();
+      if (!cameras.length) throw new Error("No camera found");
+      if (btnSwitchCamera) btnSwitchCamera.disabled = cameras.length < 2;
+    }
     if (!html5QrCodeInstance) {
       html5QrCodeInstance = new window.Html5Qrcode("qrReader");
     }
@@ -1518,24 +1670,14 @@ async function processAttendance({ eventId, token, allowWalkIn }) {
 
 // Local Fallback Processor (for offline / client-direct RTDB mode)
 async function handleLocalAttendanceProcessing(eventId, token, allowWalkIn) {
-  // Token format: <uid>.<version>.<signature>
-  const parts = String(token || "").split(".");
-  const uid = parts[0] || "student";
-  const tokenVersion = Number(parts[1] || 1);
-
-  // Check version against qrVersions/{uid} if RTDB is connected
-  if (rtdb) {
-    try {
-      const vSnap = await get(ref(rtdb, `qrVersions/${uid}`));
-      const liveV = vSnap.val();
-      if (liveV && liveV.v && Number(liveV.v) !== tokenVersion) {
-        return {
-          status: "replaced",
-          message: "This QR code was replaced. Ask the student to download their new one.",
-        };
-      }
-    } catch {}
+  const normalizedStudentNo = formatStudentNo(token);
+  if (!STUDENT_NO_REGEX.test(normalizedStudentNo)) {
+    return { status: "invalid_format", student: { studentNo: normalizedStudentNo } };
   }
+  let uid = "";
+  let studentData = null;
+
+  // The QR code contains the normalized student number.
 
   // Check if student is already checked in
   const existingRow = currentAttendanceRows.find((r) => r.uid === uid || r.studentNo === uid);
@@ -1552,27 +1694,41 @@ async function handleLocalAttendanceProcessing(eventId, token, allowWalkIn) {
   }
 
   // Lookup student details from Firestore or local storage
-  let studentData = {
-    name: "Student",
-    studentNo: uid.includes("-") ? uid : "2023-00000-BN-0",
+  /*
     organization: "PUP Biñan",
-  };
+  */
 
   if (db) {
     try {
-      const snap = await getDoc(doc(db, "users", uid));
-      if (snap.exists()) {
-        const d = snap.data();
+      const studentSnap = await getDocs(query(collection(db, "users"), where("studentNumber", "==", normalizedStudentNo)));
+      if (!studentSnap.empty) {
+        const studentDoc = studentSnap.docs[0];
+        const d = studentDoc.data() || {};
+        uid = studentDoc.id;
         studentData = {
-          name: d.fullName || `${d.firstName || ""} ${d.lastName || ""}`.trim() || "Student",
-          studentNo: d.studentNumber || d.studentId || uid,
+          name: d.fullName || `${d.firstName || ""} ${d.lastName || ""}`.trim(),
+          studentNo: formatStudentNo(d.studentNumber || d.studentId || normalizedStudentNo),
           organization: d.organization || "PUP Biñan",
         };
+        studentData.organization = d.organization || d.courseOrganization || d.department || "";
       }
-    } catch {}
+    } catch (lookupErr) {
+      console.warn("Student lookup notice:", lookupErr);
+    }
   }
 
-  // Check registration: Check currentAbsentRows, RTDB, and local storage
+  if (!studentData || !uid) {
+    return { status: "not_found", student: { studentNo: normalizedStudentNo } };
+  }
+
+  const knownAttendance = currentAttendanceRows.find((r) =>
+    String(r.uid || "") === uid || stripStudentNo(r.studentNo) === stripStudentNo(normalizedStudentNo)
+  );
+  if (knownAttendance) {
+    return { status: "already", student: knownAttendance, scannedAt: knownAttendance.scannedAt };
+  }
+
+  // Check registration from the selected event's existing registration records.
   const cleanUid = stripStudentNo(uid);
   const cleanStudentNo = stripStudentNo(studentData.studentNo);
 
@@ -1607,20 +1763,6 @@ async function handleLocalAttendanceProcessing(eventId, token, allowWalkIn) {
     } catch {}
   }
 
-  // 3. Fallback: check localStorage participations or registered events if any
-  if (!isRegistered) {
-    try {
-      const participations = JSON.parse(localStorage.getItem("recovibeParticipations") || "[]");
-      if (Array.isArray(participations)) {
-        isRegistered = participations.some((p) => {
-          const matchEvent = String(p.eventId || p.id) === String(eventId);
-          const matchStudent = !p.studentNo || stripStudentNo(p.studentNo) === cleanStudentNo;
-          return matchEvent && matchStudent;
-        });
-      }
-    } catch {}
-  }
-
   if (!isRegistered && !allowWalkIn) {
     return {
       status: "not_registered",
@@ -1630,8 +1772,7 @@ async function handleLocalAttendanceProcessing(eventId, token, allowWalkIn) {
 
   // Record attendance
   const now = Date.now();
-  const organizerProfile = JSON.parse(localStorage.getItem("recovibeOrganizerProfile") || "{}");
-  const scannedBy = organizerProfile.name || auth?.currentUser?.email || "Event Organizer";
+  const scannedBy = organizerDisplayName || auth?.currentUser?.displayName || auth?.currentUser?.email || "Event Organizer";
 
   const isWalkIn = !isRegistered;
   const attendanceRow = {
@@ -1679,7 +1820,7 @@ function handleAttendanceResult(result, originalToken) {
   if (!result) return;
 
   const student = result.student || {};
-  const sName = student.name || "Student";
+  const sName = student.name || "";
   const sNum = student.studentNo || student.studentNumber || "—";
   const sOrg = student.organization || "PUP Biñan";
   const metaText = `${sNum} · ${sOrg}`;
@@ -1715,6 +1856,22 @@ function handleAttendanceResult(result, originalToken) {
       allowWalkInAction: true,
       token: originalToken,
     });
+  } else if (result.status === "not_found") {
+    showResultBanner({
+      type: "error",
+      title: "Student not found",
+      name: "",
+      meta: sNum,
+      note: "No student with this student number was found.",
+    });
+  } else if (result.status === "invalid_format") {
+    showResultBanner({
+      type: "error",
+      title: "Invalid student number",
+      name: "",
+      meta: sNum,
+      note: "Student number must follow the format 2023-00123-BN-0.",
+    });
   } else if (result.status === "replaced") {
     showResultBanner({
       type: "replaced",
@@ -1735,15 +1892,10 @@ function handleAttendanceResult(result, originalToken) {
 }
 
 // Task 6: Manual Lookup Fallback with Input Validation & Confirmation Modal
-const STUDENT_NO_REGEX = /^(20\d{2})[-\s]?(\d{4,5})[-\s]?([A-Za-z]{2})[-\s]?(\d)$/i;
+const STUDENT_NO_REGEX = /^\d{4}-\d{5}-BN-\d$/;
 
 function formatStudentNo(val) {
-  const clean = String(val || "").trim().toUpperCase();
-  const match = clean.match(/^(20\d{2})[-\s]?(\d{4,5})[-\s]?([A-Za-z]{2})[-\s]?(\d)$/i);
-  if (match) {
-    return `${match[1]}-${match[2]}-${match[3]}-${match[4]}`;
-  }
-  return clean;
+  return String(val || "").trim().toUpperCase();
 }
 
 if (manualStudentNo) {
@@ -1777,6 +1929,8 @@ if (manualCheckInForm) {
   manualCheckInForm.addEventListener("submit", (e) => {
     e.preventDefault();
 
+    if (manualCheckInInProgress) return;
+
     if (!currentEventId) {
       if (manualValidationError) {
         manualValidationError.textContent = "Please select an active event first.";
@@ -1806,10 +1960,10 @@ if (manualCheckInForm) {
     }
 
     const formattedNo = formatStudentNo(rawVal);
-    const isValidFormat = STUDENT_NO_REGEX.test(formattedNo) || /^[0-9A-Z]{2,4}[-\s]?[0-9A-Z]{3,6}[-\s]?[0-9A-Z]{1,4}[-\s]?[0-9A-Z]?$/i.test(formattedNo);
-    if (!isValidFormat && formattedNo.length < 8) {
+    const isValidFormat = STUDENT_NO_REGEX.test(formattedNo);
+    if (!isValidFormat) {
       if (manualValidationError) {
-        manualValidationError.textContent = "Please enter a valid student number format (e.g. 2023-00123-BN-0).";
+        manualValidationError.textContent = "Student number must follow the format 2023-00123-BN-0.";
         manualValidationError.hidden = false;
       }
       manualStudentNo?.classList.add("input-error");
@@ -1868,6 +2022,7 @@ if (btnAcceptManualConfirm) {
     if (!pendingManualStudentNo || !currentEventId) return;
     const studentNo = pendingManualStudentNo;
     closeManualConfirmModal();
+    manualCheckInInProgress = true;
 
     const allowWalkIn = isWalkInAllowed;
     if (btnManualSubmit) {
@@ -1913,17 +2068,14 @@ if (btnAcceptManualConfirm) {
         btnManualSubmit.disabled = false;
         btnManualSubmit.textContent = "Check In";
       }
+      manualCheckInInProgress = false;
     }
   });
 }
 
 // App Initialization
 async function initApp() {
+  if (eventsRefreshTimer) clearInterval(eventsRefreshTimer);
   await loadEventsList();
-  if (currentEvents.length > 0) {
-    const active = currentEvents.find((e) => String(e.id) === String(currentEventId));
-    if (active && active.status !== "completed") {
-      await startCameraScanner();
-    }
-  }
+  eventsRefreshTimer = window.setInterval(() => loadEventsList(), 60000);
 }

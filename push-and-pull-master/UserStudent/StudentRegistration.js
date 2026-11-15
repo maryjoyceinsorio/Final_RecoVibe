@@ -35,11 +35,12 @@ const noMiddleNameBox = document.getElementById("no-middle-name");
 const namePattern = /^[\p{L}\p{M}]+(?:[ .'-][\p{L}\p{M}]+)*\.?$/u;
 const emailPattern =
   /^(?=.{1,254}$)(?!.*\.\.)[A-Z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,}$/i;
-const studentNumberPattern = /^\d{4}-\d{5}-BN-\d$/;
+const studentNumberPattern = /^(\d{4})-(\d{5})-BN-([01])$/;
 const contactPattern = /^09[0-9]{9}$/;
 const yearPattern = /^[1-5]-[1-5]$/;
 const touchedFields = new Set();
 let submitted = false;
+let studentNumberPasteError = "";
 const defaultPreferences = {
   categories: ["Academic & Learning", "Tech & Innovation"],
   sources: [
@@ -114,7 +115,29 @@ function normalizePhone(value) {
 }
 
 function normalizeStudentNumber(value) {
-  return value.trim().toUpperCase();
+  return String(value || "")
+    .replace(/\s/g, "")
+    .toUpperCase()
+    .replace(/[^0-9BN-]/g, "")
+    .slice(0, 16);
+}
+
+function studentNumberValidationMessage(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (!normalized) return "Student number is required.";
+  const parts = /^(\d{4})-(\d{5})-([A-Z]{2})-(\d+)$/.exec(normalized);
+  if (!parts) return "Student number must follow the format 2025-12345-BN-0.";
+  const year = Number(parts[1]);
+  const currentYear = new Date().getFullYear();
+  if (year < 2000 || year > currentYear) {
+    return `Enter a valid year in the first 4 digits (2000 to ${currentYear}).`;
+  }
+  if (parts[2] === "00000") return "Enter a valid 5-digit student number.";
+  if (parts[3] !== "BN") return "Campus code must be BN (PUP Biñan).";
+  if (!/^[01]$/.test(parts[4])) return "The last digit must be 0 or 1.";
+  return studentNumberPattern.test(normalized)
+    ? ""
+    : "Student number must follow the format 2025-12345-BN-0.";
 }
 
 function normalizeWithCaret(control, normalize) {
@@ -222,13 +245,16 @@ function validateField(name) {
   }
 
   if (name === "studentId") {
-    const valid = studentNumberPattern.test(value.trim().toUpperCase());
+    const normalized = normalizeStudentNumber(fields.studentId.value);
+    fields.studentId.value = normalized;
+    const message = studentNumberPasteError ||
+      studentNumberValidationMessage(normalized);
     setInvalid(
       "field-reg-student-id",
-      !valid,
-      "Student number must follow the format 2023-00123-BN-0.",
+      Boolean(message),
+      message,
     );
-    return valid;
+    return !message;
   }
 
   if (name === "contact") {
@@ -428,6 +454,31 @@ fields.year.addEventListener("paste", (event) => {
   fields.year.dispatchEvent(new Event("input", { bubbles: true }));
 });
 
+fields.studentId.addEventListener("paste", (event) => {
+  event.preventDefault();
+  touchedFields.add("studentId");
+  const pasted = String(event.clipboardData?.getData("text") || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s/g, "");
+  const message = studentNumberValidationMessage(pasted);
+  if (message) {
+    studentNumberPasteError = message;
+    setInvalid("field-reg-student-id", true, message);
+    return;
+  }
+  studentNumberPasteError = "";
+  const start = fields.studentId.selectionStart ?? fields.studentId.value.length;
+  const end = fields.studentId.selectionEnd ?? start;
+  const value = normalizeStudentNumber(fields.studentId.value);
+  fields.studentId.value = normalizeStudentNumber(
+    value.slice(0, start) + pasted + value.slice(end),
+  );
+  const caret = Math.min(start + pasted.length, fields.studentId.value.length);
+  fields.studentId.setSelectionRange(caret, caret);
+  fields.studentId.dispatchEvent(new Event("input", { bubbles: true }));
+});
+
 Object.entries(fields).forEach(([name, control]) => {
   const normalize = () => {
     if (
@@ -460,6 +511,7 @@ Object.entries(fields).forEach(([name, control]) => {
     });
   } else {
     control.addEventListener("input", () => {
+      if (name === "studentId") studentNumberPasteError = "";
       normalize();
       if (name === "password") updatePasswordChecklist();
       updateLiveValidation(name);

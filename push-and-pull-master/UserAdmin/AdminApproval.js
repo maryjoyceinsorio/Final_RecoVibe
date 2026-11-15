@@ -117,7 +117,6 @@ import {
   };
 
   const root = document.getElementById("approvalRoot");
-  const pageHeadingTitle = document.getElementById("pageHeadingTitle");
   const toastElement = document.querySelector(".admin-toast");
   if (!document.querySelector("[data-admin-event-details-styles]")) {
     const detailsStyles = document.createElement("link");
@@ -154,17 +153,8 @@ import {
   let toastTimer = null;
   let firestorePendingEventsTimeout = null;
   let firestoreProposalLoadTimeout = null;
-
-  // Initialize Page Header Today's Date
-  const todayElement = document.querySelector("[data-today]");
-  if (todayElement) {
-    todayElement.textContent = new Date().toLocaleDateString("en-US", {
-      timeZone: "Asia/Manila",
-      month: "long",
-      day: "numeric",
-      year: "numeric",
-    });
-  }
+  let adminStartupTimeout = null;
+  let adminStartupExpired = false;
 
   // Logout Handler
   const logoutBtn = document.querySelector(".admin-logout");
@@ -177,6 +167,7 @@ import {
         console.error("Could not sign out administrator:", error);
       }
       localStorage.removeItem("recovibeAdminId");
+      localStorage.removeItem("recovibeAdminProfile");
       location.href = "AdminLogin.html";
     });
   }
@@ -216,6 +207,23 @@ import {
       approverDirectory[key]?.label || key || "Approval role not assigned";
   }
 
+  function formatQueueDate(value) {
+    const text = String(value || "").trim();
+    if (!text) return "Date TBA";
+    const dateOnly = /^(\d{4})-(\d{2})-(\d{2})/.exec(text);
+    const date = dateOnly
+      ? new Date(Date.UTC(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]), 12))
+      : new Date(text);
+    return Number.isNaN(date.getTime())
+      ? text
+      : date.toLocaleDateString("en-US", {
+          timeZone: "Asia/Manila",
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+        });
+  }
+
   function getProfileName(profile, fallback = "") {
     if (!profile || typeof profile !== "object") return fallback;
     const nameParts = [profile.firstName, profile.middleName, profile.lastName]
@@ -225,7 +233,7 @@ import {
   }
 
   async function loadAdminProfileSafely(user, cachedProfile) {
-    if (!user || !db) return cachedProfile;
+    if (!user || !db) throw new Error("Please sign in with an Admin account.");
     const [adminProfileResult, userProfileResult] = await Promise.allSettled([
       getDoc(doc(db, "adminUser", user.uid)),
       getDoc(doc(db, "users", user.uid)),
@@ -243,7 +251,8 @@ import {
       const readError = [adminProfileResult, userProfileResult]
         .find((result) => result.status === "rejected")?.reason;
       if (readError) throw readError;
-      return cachedProfile;
+      if (readError) throw readError;
+      throw new Error("No verified Admin profile was found for this account.");
     }
     verifiedAdminProfileUid = user.uid;
     return {
@@ -435,10 +444,9 @@ import {
       }
       const stageStatus = String(stageSource?.status || "").trim().toLowerCase().replace(/[\s_-]+/g, " ");
       const alreadyApplied = decision === "approve"
-        ? ["ok", "approved", "complete", "completed"].includes(stageStatus) ||
-          String(event.approvalStatus || event.status || "").toLowerCase() === "approved"
+        ? ["ok", "approved", "complete", "completed"].includes(stageStatus)
         : stageStatus === "rejected" ||
-          String(event.approvalStatus || event.status || "").toLowerCase() === "rejected";
+          stageStatus === "rejected";
       const currentStageKey = getFirestoreCurrentStageKey(event);
       if (currentStageKey !== stage.key) {
         if (alreadyApplied) {
@@ -517,48 +525,29 @@ import {
         }).sort((a, b) => a.step - b.step);
         const stageIndex = configuredStages.findIndex((item) => item.key === stage.key);
         const nextStage = configuredStages[stageIndex + 1];
-        if (nextStage) {
-          const nextSource = findFirestoreStageSource(
-            getFirestoreStageEntries({ approvalStages }),
-            nextStage,
-          );
-          const nextStatus = String(nextSource?.status || "").trim().toLowerCase().replace(/[\s_-]+/g, " ");
-          if (!["ok", "approved", "complete", "completed"].includes(nextStatus)) {
-            const nextPatch = { status: "Reviewing", startedAt: now, updatedAt: now };
-            if (Array.isArray(approvalStages)) {
-              const nextIndex = approvalStages.findIndex((entry) => entry === nextSource);
-              if (nextIndex >= 0) {
-                approvalStages[nextIndex] = { ...approvalStages[nextIndex], ...nextPatch };
-              } else {
-                approvalStages.push({
-                  id: nextStage.key,
-                  key: nextStage.key,
-                  name: nextStage.label,
-                  step: nextStage.step,
-                  ...nextPatch,
-                });
-              }
-            } else {
-              const nextEntry = getFirestoreStageEntries({ approvalStages })
-                .find(([, source]) => source === nextSource);
-              const nextId = nextEntry?.[0] || nextStage.key;
-              approvalStages[nextId] = {
-                ...(nextSource || {}),
-                id: nextSource?.id || nextStage.key,
-                key: nextSource?.key || nextStage.key,
-                name: nextSource?.name || nextStage.label,
-                step: nextSource?.step || nextStage.step,
-                ...nextPatch,
-              };
-            }
-          }
+        const approvedStatuses = ["ok", "approved", "complete", "completed"];
+        const allRequiredApproved = configuredStages.every((item) =>
+          item.required !== false && approvedStatuses.includes(
+            String(item.source?.status || "").trim().toLowerCase().replace(/[\s_-]+/g, " "),
+          ) || item.required === false,
+        );
+        if (nextStage && !allRequiredApproved) {
           updates.approvalCurrentStep = nextStage.step;
           updates.approvalStatus = "pending";
           updates.status = "pending";
-        } else {
+        } else if (allRequiredApproved) {
           updates.approvalCurrentStep = null;
           updates.approvalStatus = "approved";
           updates.status = "approved";
+        } else {
+          const nextRequiredStage = configuredStages.find((item) =>
+            item.required !== false && !approvedStatuses.includes(
+              String(item.source?.status || "").trim().toLowerCase().replace(/[\s_-]+/g, " "),
+            ),
+          );
+          updates.approvalCurrentStep = nextRequiredStage?.step || null;
+          updates.approvalStatus = "pending";
+          updates.status = "pending";
         }
       }
 
@@ -578,17 +567,19 @@ import {
   }
 
   // 1. Auth Guard (Must be admin)
+  adminStartupTimeout = setTimeout(() => {
+    adminStartupExpired = true;
+    showDashboardLoadError(new Error("Admin setup timed out."));
+  }, 15000);
   onAuthStateChanged(auth, async (user) => {
+    if (adminStartupExpired) return;
     if (!user) {
-      const localAdminId = localStorage.getItem("recovibeAdminId");
-      if (!localAdminId && isFirebaseConfigured) {
-        location.replace("AdminLogin.html");
-        return;
-      }
-      currentAdminUid = localAdminId || "admin-demo-uid";
-    } else {
-      currentAdminUid = user.uid;
+      clearTimeout(adminStartupTimeout);
+      adminStartupTimeout = null;
+      location.replace("AdminLogin.html");
+      return;
     }
+    currentAdminUid = user.uid;
     verifiedAdminProfileUid = null;
 
     let storedProfile = {};
@@ -598,34 +589,38 @@ import {
       console.warn("Could not read the cached administrator profile:", error);
     }
     if (user && storedProfile.uid && storedProfile.uid !== user.uid) storedProfile = {};
-    currentAdminProfile = {
-      ...storedProfile,
-      ...(user ? { uid: user.uid, email: user.email || storedProfile.email || "" } : {}),
-    };
+    try {
+      currentAdminProfile = await loadAdminProfileSafely(user, storedProfile);
+      if (adminStartupExpired) return;
+    } catch (error) {
+      clearTimeout(adminStartupTimeout);
+      adminStartupTimeout = null;
+      showDashboardLoadError(error);
+      return;
+    }
+    clearTimeout(adminStartupTimeout);
+    adminStartupTimeout = null;
 
     const profileRole = String(currentAdminProfile.role || currentAdminProfile.userRole || "")
-      .trim()
-      .toLowerCase()
-      .replace(/[\s_-]+/g, "");
-    if (
-      user &&
-      profileRole &&
-      !["admin", "superadmin"].includes(profileRole) &&
-      !getApprovalStageForProfile(currentAdminProfile)
-    ) {
+      .trim().toLowerCase().replace(/[\s_-]+/g, "");
+    if (profileRole !== "admin" || !getApprovalStageForProfile(currentAdminProfile)) {
       alert("Access restricted to administrators.");
       location.replace("AdminLogin.html");
       return;
     }
 
     const assignedStage = getAccountStage();
-    if (assignedStage && !getProfileName(currentAdminProfile)) {
-      currentAdminProfile.name = assignedStage.name || assignedStage.label;
-    }
     const adminName = getProfileName(
       currentAdminProfile,
-      assignedStage?.name || assignedStage?.label || auth?.currentUser?.displayName || "Administrator",
+      auth?.currentUser?.displayName || auth?.currentUser?.email?.split("@")[0] || "",
     );
+    const adminPosition = [
+      currentAdminProfile.position,
+      currentAdminProfile.title,
+      currentAdminProfile.role_title,
+      currentAdminProfile.approver_role,
+      currentAdminProfile.approverRole,
+    ].map((value) => String(value || "").trim()).find(Boolean) || "";
     const nameEl = document.querySelector("[data-name]");
     const avatarEl = document.querySelector("[data-avatar]");
 
@@ -637,7 +632,12 @@ import {
         .slice(0, 2)
         .map((p) => p[0])
         .join("")
-        .toUpperCase() || "AD";
+        .toUpperCase();
+    }
+    const roleEl = document.querySelector("[data-role]");
+    if (roleEl) {
+      roleEl.textContent = getStageLabel(assignedStage?.key) || adminPosition;
+      roleEl.title = roleEl.textContent;
     }
 
     try {
@@ -646,21 +646,6 @@ import {
       showDashboardLoadError(error);
     }
 
-    if (user && db) {
-      loadAdminProfileSafely(user, storedProfile)
-        .then((profile) => {
-          currentAdminProfile = profile;
-          if (getApprovalStageForProfile(profile)) {
-            findOrAssignAdminKey();
-            subscribeFirestorePendingEvents();
-            if (activeReviewEventId) renderReviewScreen();
-            else renderReviewQueue();
-          }
-        })
-        .catch((error) => {
-          console.warn("Could not load the signed-in administrator profile; using assigned event reviewer identity:", error);
-        });
-    }
   });
 
   function showDashboardLoadError(error) {
@@ -673,15 +658,7 @@ import {
         <button type="button" class="btn-queue-review" id="retryApprovalDashboard">Try again</button>
       </div>
     `;
-    root.querySelector("#retryApprovalDashboard")?.addEventListener("click", async (event) => {
-      const button = event.currentTarget;
-      button.disabled = true;
-      try {
-        await initAdminData();
-      } catch (retryError) {
-        showDashboardLoadError(retryError);
-      }
-    });
+    root.querySelector("#retryApprovalDashboard")?.addEventListener("click", () => window.location.reload());
   }
 
   async function initAdminData() {
@@ -852,20 +829,15 @@ import {
     if (assignedStage) {
       currentAdminKey = assignedStage.key;
       localStorage.setItem("recovibeAdminKey", currentAdminKey);
-      const roleEl = document.querySelector("[data-role]");
-      if (roleEl) roleEl.textContent = assignedStage.label;
       return;
     }
 
     const uidMatch = Object.entries(approverDirectory).find(([, item]) => item?.uid === currentAdminUid);
     currentAdminKey = resolveApprovalStage(uidMatch?.[0] || uidMatch?.[1]?.key)?.key || uidMatch?.[0] || null;
-    const roleEl = document.querySelector("[data-role]");
     if (currentAdminKey) {
       localStorage.setItem("recovibeAdminKey", currentAdminKey);
-      if (roleEl) roleEl.textContent = getStageLabel(currentAdminKey);
     } else {
       localStorage.removeItem("recovibeAdminKey");
-      if (roleEl) roleEl.textContent = "Approval role not assigned";
     }
   }
 
@@ -1095,6 +1067,12 @@ import {
     const contactPhone = contact.phone || event.contactPhone || contactParts.find((part) => /\+?[\d() -]{7,}/.test(part) && /\d{7}/.test(part)) || "";
     const contactName = valueText(contact.name || event.contactName || contactParts.find((part) => part !== contactEmail && part !== contactPhone)) || "Not specified";
     const contactRole = valueText(contact.role || event.contactRole || contactParts.find((part) => part !== contactName && part !== contactEmail && part !== contactPhone));
+    const facultyInChargeValue = event.facultyInCharge || event.faculty_in_charge || "";
+    const facultyInChargeName = valueText(
+      typeof facultyInChargeValue === "object"
+        ? facultyInChargeValue.name || facultyInChargeValue.id
+        : facultyInChargeValue || event.facultyInChargeName || event.facultyInChargeId,
+    ) || "Not specified";
     const objectives = event.objectives || event.keyDetails || event.detailedInfo || event.focusAreas;
     const requirements = event.requirements && typeof event.requirements === "object" && !Array.isArray(event.requirements)
       ? [...values(event.requirements.required), ...values(event.requirements.recommended)]
@@ -1162,6 +1140,7 @@ import {
       <section class="student-event-section"><h3>Rules &amp; Reminders</h3>${listMarkup(rules)}</section>
       <section class="student-event-section student-event-documents"><h3>Documents for Admin Review</h3><p>Open the Google Drive links to review the submitted requirements.</p>${documentLinks(adminDocuments)}</section>
       <div class="student-event-bottom-grid">
+        <section class="student-event-section student-event-contact"><h3>Faculty In Charge</h3><p>${esc(facultyInChargeName)}</p></section>
         <section class="student-event-section student-event-contact"><h3>Contact Person</h3><p><strong>Name:</strong> ${esc(contactName)}</p>${contactRole ? `<p><strong>Role:</strong> ${esc(contactRole)}</p>` : ""}${contactEmail ? `<p><strong>Email:</strong> <a href="mailto:${esc(contactEmail)}">${esc(contactEmail)}</a></p>` : ""}${contactPhone ? `<p><strong>Number:</strong> ${esc(contactPhone)}</p>` : ""}</section>
         <section class="student-event-section student-event-documents"><h3>Participant Documents</h3><p>Open the Google Drive links to download the required files.</p>${documentLinks(participantDocuments)}</section>
       </div>`;
@@ -1207,10 +1186,11 @@ import {
   // =========================================================================
   function renderReviewQueue() {
     if (!root) return;
-    if (pageHeadingTitle) pageHeadingTitle.textContent = "Review Queue";
 
+    const firestoreEventIds = new Set(firestorePendingEvents.map((event) => String(event.id || "")));
+    const visibleQueueItems = queueItems.filter((item) => !firestoreEventIds.has(String(item.eventId || "")));
     let cardsHtml = "";
-    if (queueItems.length === 0) {
+    if (visibleQueueItems.length === 0) {
       cardsHtml = `
         <div class="queue-empty-box">
           <svg viewBox="0 0 24 24" fill="none" stroke="#a8a29e" stroke-width="1.5" width="40" height="40" style="margin-bottom:12px;">
@@ -1224,7 +1204,7 @@ import {
     } else {
       cardsHtml = `
         <div class="queue-cards-grid">
-          ${queueItems
+          ${visibleQueueItems
             .map((item) => {
               const isPaused = item.paused || item.status === "paused";
               return `
@@ -1245,7 +1225,7 @@ import {
                           <rect x="2.5" y="3.5" width="15" height="13.5" rx="1.6"/>
                           <path d="M2.5 8H17.5M6 2v3M14 2v3"/>
                         </svg>
-                        <span>${esc(item.date)}</span>
+                        <span>${esc(formatQueueDate(item.date))}</span>
                       </div>
                       <div class="queue-card-meta-item">
                         <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" width="14" height="14">
@@ -1282,7 +1262,7 @@ import {
       ? `<div class="queue-cards-grid">
           ${events.map((event) => {
             const eventName = event.eventName || event.title || "Untitled Event";
-            const eventDate = event.date || event.dateStart || event.startAt || "Date TBA";
+            const eventDate = formatQueueDate(event.date || event.dateStart || event.startAt);
             const eventVenue = event.venue || event.location || "Venue TBA";
             const adminDocumentsLink = getAdminDocumentsLink(event.adminDocuments);
             const currentStage = event.currentApprovalStage
@@ -1698,7 +1678,6 @@ import {
 
   function renderReviewScreen() {
     if (!root || !activeReviewEventId) return;
-    if (pageHeadingTitle) pageHeadingTitle.textContent = "Proposal Review";
 
     if (!activeEvent || !activeApproval) {
       root.innerHTML = `
@@ -1837,7 +1816,7 @@ import {
     });
 
     // 3. Finish Step
-    const isAllApproved = activeApproval.status === "approved" || (sortedMembers.length > 0 && sortedMembers.every((m) => m.status === "ok"));
+    const isAllApproved = sortedMembers.length > 0 && sortedMembers.every((m) => m.status === "ok");
     trackItemsHtml += `
       <div class="admin-tracker-step">
         <div class="admin-step-dot ${isAllApproved ? "dot-ok" : "dot-wait"}">${isAllApproved ? "✓" : "★"}</div>
@@ -2134,47 +2113,14 @@ import {
               });
               firestoreResult = reviseResult.data;
             } else {
-              let backendError = null;
-              if (functions && navigator.onLine) {
-                try {
-                  const callableName = decision === "approve"
-                    ? "approveFirestoreEvent"
-                    : "rejectFirestoreEvent";
-                  const result = await httpsCallable(functions, callableName)({
-                    eventId: activeReviewEventId,
-                    ...(decision === "reject" ? { note } : {}),
-                  });
-                  firestoreResult = result.data;
-                } catch (error) {
-                  backendError = error;
-                  console.warn(
-                    `Cloud Function ${decision} failed; applying the decision directly in Firestore.`,
-                    error,
-                  );
-                }
-              }
-
-              if (backendError || !functions || !navigator.onLine) {
-                try {
-                  firestoreResult = await applyFirestoreDecisionLocally(
-                    activeReviewEventId,
-                    decision,
-                    note,
-                    stage,
-                    user,
-                  );
-                  firestoreResult.localFallback = true;
-                } catch (fallbackError) {
-                  console.error("Could not save the approval decision directly in Firestore:", fallbackError);
-                  if (backendError) {
-                    throw new Error(
-                      `The approval service failed (${backendError.message || backendError}). ` +
-                      `The Firestore fallback also failed: ${fallbackError.message || fallbackError}`,
-                    );
-                  }
-                  throw fallbackError;
-                }
-              }
+              firestoreResult = await applyFirestoreDecisionLocally(
+                activeReviewEventId,
+                decision,
+                note,
+                stage,
+                user,
+              );
+              firestoreResult.localFallback = true;
             }
           } else if (functions && navigator.onLine) {
             const decideFn = httpsCallable(functions, "decideApproval");
@@ -2272,6 +2218,9 @@ import {
 
   // Cleanup on leaving page
   window.addEventListener("beforeunload", () => {
+    clearTimeout(adminStartupTimeout);
+    clearTimeout(firestorePendingEventsTimeout);
+    clearTimeout(firestoreProposalLoadTimeout);
     if (queueListenerRef) off(queueListenerRef);
     if (decisionsListenerRef) off(decisionsListenerRef);
     if (activeEventRef) off(activeEventRef);

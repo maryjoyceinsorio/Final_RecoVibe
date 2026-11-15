@@ -17,7 +17,7 @@
     <div class="admin-app" id="adminActSumApp">
       <aside class="admin-sidebar" id="adminSidebar">
         <a class="admin-brand" href="AdminDashboard.html" aria-label="RecoVibe home">
-          <span>RV</span>
+          <span class="admin-brand-mark">RV</span>
           <span><strong>RECOVIBE</strong><small>PUP Biñan Campus</small></span>
         </a>
         <nav aria-label="Admin navigation">
@@ -53,10 +53,10 @@
           </a>
         </nav>
         <footer>
-          <span class="admin-avatar" data-avatar>HA</span>
+          <span class="admin-avatar" data-avatar></span>
           <span class="admin-user">
-            <strong data-name>ADMIN</strong>
-            <small data-role>Head of Academic Programs</small>
+            <strong data-name></strong>
+            <small data-role></small>
           </span>
           <a class="admin-logout" href="AdminLogin.html" aria-label="Logout" title="Logout">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17l5-5-5-5M15 12H3M13 4h6a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6" /></svg>
@@ -71,24 +71,46 @@
             <p class="act-sum-scope-note" id="actSumScopeNote">All events</p>
           </div>
           <div class="act-sum-controls-bar">
-            <div class="period-pills" role="group" aria-label="Summary Period Selection">
-              <button type="button" class="period-pill is-active" data-period="today" aria-pressed="true">Today</button>
-              <button type="button" class="period-pill" data-period="week" aria-pressed="false">This Week</button>
-              <button type="button" class="period-pill" data-period="month" aria-pressed="false">This Month</button>
-              <button type="button" class="period-pill" data-period="year" aria-pressed="false">This Year</button>
-              <div class="custom-range-wrap">
-                <button type="button" class="period-pill" data-period="custom" aria-pressed="false" id="customRangeBtn">Custom Range</button>
-                <div class="custom-range-popover" id="customRangePopover" role="dialog" aria-label="Custom Date Range" hidden>
-                  <div class="popover-field">
-                    <label for="customFromDate">From</label>
-                    <input type="text" id="customFromDate" placeholder="MM / DD / YYYY" maxlength="10" inputmode="numeric" />
+            <div class="date-range-picker">
+              <button type="button" class="date-range-trigger" id="customRangeBtn" aria-haspopup="dialog" aria-expanded="false" aria-controls="customRangePopover" aria-label="Date range: All Dates">
+                <span id="dateRangeTriggerLabel">All Dates</span>
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 7.5 5 5 5-5" /></svg>
+              </button>
+              <div class="date-range-popover" id="customRangePopover" role="dialog" aria-label="Select activity summary date range" hidden>
+                <div class="date-range-quick-ranges" role="group" aria-label="Quick ranges">
+                  <button type="button" class="date-range-close" id="dateRangeCloseBtn" aria-label="Close date range picker" style="align-self:flex-end;width:36px;height:36px;margin:-8px -2px 2px 0;border:0;border-radius:50%;background:transparent;color:inherit;font-size:24px;cursor:pointer;">&times;</button>
+                  <p class="date-range-section-title">QUICK RANGES</p>
+                  <button type="button" class="date-range-quick-btn" data-preset="today">Today</button>
+                  <button type="button" class="date-range-quick-btn" data-preset="tomorrow">Tomorrow</button>
+                  <button type="button" class="date-range-quick-btn" data-preset="thisWeek">This week</button>
+                  <button type="button" class="date-range-quick-btn" data-preset="thisWeekend">This weekend</button>
+                  <button type="button" class="date-range-quick-btn" data-preset="nextWeek">Next week</button>
+                  <button type="button" class="date-range-quick-btn" data-preset="thisMonth">This month</button>
+                  <button type="button" class="date-range-quick-btn" data-preset="nextMonth">Next month</button>
+                  <button type="button" class="date-range-quick-btn" data-preset="all" aria-pressed="true">All time</button>
+                </div>
+                <div class="date-range-main">
+                  <div class="date-range-calendar-nav">
+                    <button type="button" class="date-range-nav-btn" id="dateRangePrevMonth" aria-label="Previous month">‹</button>
+                    <span id="dateRangeCalendarTitle" aria-live="polite"></span>
+                    <button type="button" class="date-range-nav-btn" id="dateRangeNextMonth" aria-label="Next month">›</button>
                   </div>
-                  <div class="popover-field">
-                    <label for="customToDate">To</label>
-                    <input type="text" id="customToDate" placeholder="MM / DD / YYYY" maxlength="10" inputmode="numeric" />
+                  <div class="date-range-calendars">
+                    <div class="date-range-calendar" id="dateRangeCalendarOne"></div>
+                    <div class="date-range-calendar" id="dateRangeCalendarTwo"></div>
                   </div>
-                  <p class="popover-error" id="customRangeError" role="alert" hidden></p>
-                  <button type="button" class="popover-apply-btn" id="customApplyBtn">Apply</button>
+                  <div class="date-range-inputs">
+                    <label>From<input type="text" id="customFromDate" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" aria-label="Start date, YYYY-MM-DD" /></label>
+                    <label>To<input type="text" id="customToDate" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" aria-label="End date, YYYY-MM-DD" /></label>
+                  </div>
+                  <p class="date-range-error" id="customRangeError" role="alert" hidden></p>
+                  <div class="date-range-footer">
+                    <button type="button" class="date-range-clear" id="dateRangeClear">Clear</button>
+                    <div>
+                      <button type="button" class="date-range-cancel" id="dateRangeCancel">Cancel</button>
+                      <button type="button" class="date-range-apply" id="customApplyBtn">Apply</button>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -225,4 +247,3 @@
     <script type="module" src="AdminActSum.js"></script>
   </body>
 </html>
-

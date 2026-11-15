@@ -18,23 +18,13 @@ import {
 import { auth, db, rtdb, functions, isFirebaseConfigured, isRtdbConfigured } from "./firebaseConfig.js";
 import { httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
 import { ref, onValue, off, set, update, push } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+import {
+  clearCachedStudentProfile,
+  loadStudentProfile,
+  renderStudentSidebar,
+} from "./studentIdentity.js";
 
-const DEFAULT_STUDENT = {
-  firstName: "Mc Joben",
-  middleName: "",
-  lastName: "Reyes",
-  fullName: "Mc Joben Reyes",
-  name: "Mc Joben Reyes",
-  studentNumber: "2025-00790-BN-1",
-  studentNo: "2025-00790-BN-1",
-  studentId: "2025-00790-BN-1",
-  yearSection: "1-1",
-  year: "1-1",
-  department: "Bachelor of Science in Information Technology",
-  organization: "IBITS",
-  email: "reyes.mcjoben@pup.edu.ph",
-  contactNumber: "09123456789",
-};
+const DEFAULT_STUDENT = {};
 
 function uniqueProfileValues(...values) {
   const seen = new Set();
@@ -48,27 +38,6 @@ function uniqueProfileValues(...values) {
       seen.add(key);
       return true;
     });
-}
-
-function getDepartmentShort(dept) {
-  dept = String(dept || "").trim().replace(/[()]+$/g, "");
-  if (!dept) return "BSIT";
-  const map = {
-    "Bachelor of Science in Information Technology": "BSIT",
-    "Bachelor of Science in Computer Science": "BSCS",
-    "Bachelor of Science in Computer Engineering": "BSCpE",
-    "Bachelor of Science in Business Administration": "BSBA",
-    "Bachelor of Science in Industrial Engineering": "BSIE",
-    "Bachelor of Science in Electronics Engineering": "BSECE",
-    "College of Computer and Information Sciences": "CCIS",
-  };
-  if (map[dept]) return map[dept];
-  if (dept.length <= 6) return dept;
-  const words = dept.split(/\s+/).filter((w) => !["of", "in", "and", "the"].includes(w.toLowerCase()));
-  if (words.length > 1) {
-    return words.map((w) => w[0].toUpperCase()).join("");
-  }
-  return dept.slice(0, 4).toUpperCase();
 }
 
 function formatPhilippinePhone(raw) {
@@ -98,8 +67,8 @@ function normalizeStudentNumber(value) {
 
 function hydrateUserProfile() {
   const local = JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null");
-  const user =
-    local && Object.keys(local).length > 0 ? { ...DEFAULT_STUDENT, ...local } : DEFAULT_STUDENT;
+  const authenticatedUid = auth?.currentUser?.uid || "";
+  const user = authenticatedUid && local?.uid === authenticatedUid ? { ...local } : {};
   user.StudentOrgs = uniqueProfileValues(
     user.StudentOrgs,
     user.studentOrgs,
@@ -124,53 +93,39 @@ function hydrateUserProfile() {
     .map((part) => String(part || "").trim())
     .filter(Boolean)
     .join(" ");
-  const displayName = storedFullName || nameFromProfile || "Mc Joben Reyes";
+  const displayName = storedFullName || nameFromProfile;
   const firstName =
     storedFirstName ||
     storedFullName.split(/\s+/).filter(Boolean)[0] ||
     nameFromProfile.split(/\s+/).filter(Boolean)[0] ||
-    "Mc Joben";
-  const avatarFallback = [
-    user.username,
-    user.studentNumber,
-    user.studentNo,
-    user.studentId,
-    user.email,
+    "";
+  const initials = [
+    firstName,
+    user.lastName || (storedFullName.split(/\s+/).filter(Boolean).length > 1
+      ? storedFullName.split(/\s+/).filter(Boolean).at(-1)
+      : ""),
   ]
-    .map((value) => String(value || "").trim())
-    .find(Boolean) || "";
-  const avatarLetter =
-    Array.from(firstName || displayName || avatarFallback || "M")[0]?.toUpperCase() || "M";
-  const organization = String(user.organization || "IBITS").trim() || "IBITS";
-  const role = organization;
-  const studentNo = normalizeStudentNumber(user.studentNo || user.studentNumber || user.studentId || "2025-00790-BN-1");
-  const yearSec = String(user.yearSection || user.year || "1-1").replace(/^Year\s+/i, "").trim() || "1-1";
-  const department = String(user.department || "Bachelor of Science in Information Technology").trim().replace(/[()]+$/g, "");
-  const deptShort = getDepartmentShort(department);
-  const email = String(user.email || "reyes.mcjoben@pup.edu.ph").trim().toLowerCase();
-  const contact = String(user.contactNumber || user.contact || "09123456789").trim();
+    .filter(Boolean)
+    .map((part) => Array.from(String(part))[0]?.toUpperCase() || "")
+    .join("");
+  const organization = String(user.organization || "").trim();
+  const studentNo = normalizeStudentNumber(user.studentNumber || user.studentId);
+  const yearSec = String(user.yearSection || user.year || "").replace(/^Year\s+/i, "").trim();
+  const department = String(user.department || user.program || user.course || "").trim();
+  const email = String(user.email || "").trim().toLowerCase();
+  const contact = String(user.contactNumber || user.contact || "").trim();
 
   // Header & sidebar elements
   document.querySelectorAll(".user-name, #userName, #heroUserName").forEach((element) => {
     element.textContent = displayName;
   });
-  document.querySelectorAll(".user-role, #userRole").forEach((element) => {
-    element.textContent = role;
-  });
-  document.querySelectorAll(".avatar, #userAvatar, #heroAvatar, .hero-avatar").forEach((element) => {
-    element.textContent = avatarLetter;
+  renderStudentSidebar(user);
+  document.querySelectorAll("#heroAvatar, .hero-avatar").forEach((element) => {
+    element.textContent = initials;
   });
   document.querySelectorAll("#userFirstName").forEach((element) => {
     element.textContent = firstName;
   });
-  const heroStudentEl = document.getElementById("heroStudentNumber");
-  if (heroStudentEl) heroStudentEl.textContent = studentNo;
-  const heroYearSecEl = document.getElementById("heroYearSection");
-  if (heroYearSecEl) heroYearSecEl.textContent = yearSec;
-  const heroDeptBadgeEl = document.getElementById("heroDeptBadge");
-  if (heroDeptBadgeEl) heroDeptBadgeEl.textContent = deptShort;
-  const heroOrgBadgeEl = document.getElementById("heroOrgBadge");
-  if (heroOrgBadgeEl) heroOrgBadgeEl.textContent = organization;
 
   // Name Card View
   const viewFirst = document.getElementById("viewFirstName");
@@ -184,7 +139,7 @@ function hydrateUserProfile() {
     }
   }
   const viewLast = document.getElementById("viewLastName");
-  if (viewLast) viewLast.textContent = storedLastName || "Reyes";
+  if (viewLast) viewLast.textContent = storedLastName;
 
   // Contact Card View
   const viewEm = document.getElementById("viewEmail");
@@ -241,7 +196,9 @@ function hydrateUserProfile() {
   hydrateUserProfile();
   const localUser = JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null");
   const user =
-    localUser && Object.keys(localUser).length > 0 ? { ...DEFAULT_STUDENT, ...localUser } : DEFAULT_STUDENT;
+    auth?.currentUser?.uid && localUser?.uid === auth.currentUser.uid
+      ? { ...DEFAULT_STUDENT, ...localUser }
+      : DEFAULT_STUDENT;
   const preferenceKey = "recovibePreferences";
   const accountPreferenceKey = `recovibePreferences:${user.uid || user.email || "student"}`;
   const categories = [
@@ -358,12 +315,14 @@ function hydrateUserProfile() {
     const element = document.getElementById(id);
     if (element) element.textContent = String(value || "").trim() || fallback;
   };
+  const studentNo = normalizeStudentNumber(user.studentNumber || user.studentId);
+  const department = String(user.department || user.program || user.course || "").trim();
   const storedName = String(user.fullName || user.name || "").trim();
   const nameParts = storedName.split(/\s+/).filter(Boolean);
-  const firstName = String(user.firstName || "").trim() || nameParts[0] || "Mc Joben";
+  const firstName = String(user.firstName || "").trim() || nameParts[0] || "";
   const lastName =
     String(user.lastName || "").trim() ||
-    (nameParts.length > 1 ? nameParts.at(-1) : "Reyes");
+    (nameParts.length > 1 ? nameParts.at(-1) : "");
   setText("profileFirstName", firstName);
   setText(
     "profileMiddleName",
@@ -372,19 +331,14 @@ function hydrateUserProfile() {
   );
   setText("profileLastName", lastName);
   setText("profileStudentId", studentNo);
-  setText("profileEmail", user.email || "reyes.mcjoben@pup.edu.ph");
-  setText("profileContact", user.contactNumber || user.contact || "09123456789");
+  setText("profileEmail", user.email);
+  setText("profileContact", user.contactNumber || user.contact);
   setText("profileDepartment", department);
-  setText("profileYear", user.year || "Year 1-2");
-  setText("profileOrganization", user.organization || "IBITS");
-  setText("profileStudentIdBanner", studentNo);
-  setText("profileYearBanner", user.year || "Year 1-2");
-  setText("profileDepartmentBanner", department);
-  setText("heroOrgBadge", user.organization || "IBITS");
-  setText("heroDeptBadge", user.department?.includes("Information Technology") ? "BSIT" : "BSIT");
-  setText("qrCardStudentName", storedName || "Mc Joben Reyes");
-  setText("qrCardStudentNumber", normalizeStudentNumber(user.studentNumber || user.studentId) || "2025-00790-BN-1");
-  setText("qrCardStudentOrg", user.organization || "IBITS");
+  setText("profileYear", user.year);
+  setText("profileOrganization", user.organization);
+  setText("qrCardStudentName", storedName);
+  setText("qrCardStudentNumber", normalizeStudentNumber(user.studentNumber || user.studentId));
+  setText("qrCardStudentOrg", user.organization);
   setText(
     "todayDate",
     new Date().toLocaleDateString("en-US", {
@@ -502,7 +456,7 @@ function hydrateUserProfile() {
     middleName: String(user.middleName || "").trim(),
     lastName: String(user.lastName || "").trim(),
     email: String(user.email || "").trim().toLowerCase(),
-    contactNumber: unformatPhone(user.contactNumber || user.contact || "09123456789"),
+    contactNumber: unformatPhone(user.contactNumber || user.contact),
   };
 
   let activeEditCard = null; // null | "name" | "contact" | "preferences"
@@ -1161,7 +1115,8 @@ function hydrateUserProfile() {
      ========================================================================== */
   if (isFirebaseConfigured && rtdb && user.uid) {
     const userRtdbRef = ref(rtdb, `users/${user.uid}`);
-    onValue(userRtdbRef, (snap) => {
+    const stopUserRealtimeSync = onValue(userRtdbRef, (snap) => {
+      if (auth?.currentUser?.uid !== user.uid) return;
       const val = snap.val();
       if (val) {
         let changed = false;
@@ -1193,6 +1148,7 @@ function hydrateUserProfile() {
         }
       }
     });
+    window.addEventListener("pagehide", stopUserRealtimeSync, { once: true });
   }
 
   if (isFirebaseConfigured && auth) {
@@ -1360,13 +1316,6 @@ function hydrateUserProfile() {
       submit.disabled = false;
     }
   });
-  const organization = String(user.organization || "").trim();
-  const role =
-    organization && organization.toLowerCase() !== "none"
-      ? organization
-      : "Student";
-  setText("userRole", role);
-  setText("userName", storedName || firstName);
   setText("heroUserName", storedName || firstName);
   hydrateUserProfile();
 
@@ -1769,27 +1718,34 @@ function hydrateUserProfile() {
    Student QR Attendance: Card Component, Full-Screen Modal & renderMyQr
    ========================================================================== */
 
+let qrLibraryLoadPromise = null;
+
 async function getQRCodeLib() {
-  if (typeof window !== "undefined" && window.QRCode && typeof window.QRCode.toCanvas === "function") {
+  if (window.QRCode && typeof window.QRCode.toCanvas === "function") {
     return window.QRCode;
   }
-  for (let i = 0; i < 20; i++) {
-    if (typeof window !== "undefined" && window.QRCode && typeof window.QRCode.toCanvas === "function") {
-      return window.QRCode;
-    }
-    await new Promise((r) => setTimeout(r, 50));
+  const existingScript = document.querySelector('script[src*="qrcode/build/qrcode.min.js"]');
+  if (!existingScript) throw new Error("QR code library is unavailable.");
+  if (!qrLibraryLoadPromise) {
+    qrLibraryLoadPromise = new Promise((resolve, reject) => {
+      const retryScript = document.createElement("script");
+      retryScript.src = existingScript.src;
+      retryScript.onload = () => {
+        if (window.QRCode && typeof window.QRCode.toCanvas === "function") {
+          resolve(window.QRCode);
+        } else {
+          qrLibraryLoadPromise = null;
+          reject(new Error("QR code library is unavailable."));
+        }
+      };
+      retryScript.onerror = () => {
+        qrLibraryLoadPromise = null;
+        reject(new Error("QR code library is unavailable."));
+      };
+      document.head.append(retryScript);
+    });
   }
-  try {
-    const mod = await import("https://esm.sh/qrcode@1.5.4");
-    const lib = mod.default || mod;
-    if (lib && typeof lib.toCanvas === "function") return lib;
-    if (typeof window !== "undefined" && window.QRCode) return window.QRCode;
-    return lib;
-  } catch (err) {
-    if (typeof window !== "undefined" && window.QRCode) return window.QRCode;
-    console.error("Failed to load QRCode library", err);
-    throw err;
-  }
+  return qrLibraryLoadPromise;
 }
 
 function formatScannedTime(scannedAt) {
@@ -1808,7 +1764,7 @@ function formatScannedTime(scannedAt) {
 }
 
 function downloadCanvasAsPng(canvas, filename = "student-qr-code.png") {
-  if (!canvas) return;
+  if (!canvas) return false;
   try {
     const dataUrl = canvas.toDataURL("image/png");
     const link = document.createElement("a");
@@ -1817,195 +1773,27 @@ function downloadCanvasAsPng(canvas, filename = "student-qr-code.png") {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    return true;
   } catch (err) {
     console.error("Failed to download QR code image", err);
+    return false;
   }
-}
-
-/**
- * renderMyQr(canvas, options)
- * Renders the student's signed QR attendance token onto the canvas.
- * Handles auto-refresh before expiry (~4 mins), visibility change refreshes,
- * live countdown updates, and cleanup on unmount.
- * Returns a cleanup function that cancels timers and listeners.
- */
-let currentPermanentToken = localStorage.getItem("recovibe_permanent_qr_token") || "";
-let qrCooldownTimer = null;
-
-function updateCooldownButtons(remainingMs) {
-  const refreshBtns = [
-    document.getElementById("btnRefreshQrCode"),
-    document.getElementById("qrModalRefreshBtn"),
-  ].filter(Boolean);
-
-  refreshBtns.forEach((btn) => {
-    const labelSpan = btn.querySelector("[data-label]") || btn;
-    if (remainingMs > 0) {
-      btn.disabled = true;
-      const totalSeconds = Math.ceil(remainingMs / 1000);
-      const m = Math.floor(totalSeconds / 60);
-      const s = String(totalSeconds % 60).padStart(2, "0");
-      labelSpan.textContent = `Refresh code (${m}:${s})`;
-    } else {
-      btn.disabled = false;
-      labelSpan.textContent = "Refresh code";
-    }
-  });
-}
-
-function startCooldown(cooldownMs) {
-  if (qrCooldownTimer) {
-    clearInterval(qrCooldownTimer);
-    qrCooldownTimer = null;
-  }
-
-  const savedUntil = Number(localStorage.getItem("recovibe_qr_cooldown_until") || 0);
-  const now = Date.now();
-  let targetTime = 0;
-
-  if (cooldownMs && cooldownMs > 0) {
-    targetTime = Math.max(now + cooldownMs, savedUntil);
-    localStorage.setItem("recovibe_qr_cooldown_until", String(targetTime));
-  } else if (savedUntil > now) {
-    targetTime = savedUntil;
-  }
-
-  if (targetTime <= now) {
-    localStorage.removeItem("recovibe_qr_cooldown_until");
-    updateCooldownButtons(0);
-    return;
-  }
-
-  function tick() {
-    const remaining = Math.max(0, targetTime - Date.now());
-    updateCooldownButtons(remaining);
-    if (remaining <= 0) {
-      clearInterval(qrCooldownTimer);
-      qrCooldownTimer = null;
-      localStorage.removeItem("recovibe_qr_cooldown_until");
-    }
-  }
-
-  tick();
-  qrCooldownTimer = setInterval(tick, 1000);
-}
-
-// Check on script load if a cooldown was running
-const initialCooldownUntil = Number(localStorage.getItem("recovibe_qr_cooldown_until") || 0);
-if (initialCooldownUntil > Date.now()) {
-  startCooldown(initialCooldownUntil - Date.now());
-}
-
-/**
- * downloadQrCard(token, student)
- * Builds a PNG card (QR at 480px plus name, student number,
- * organization, and "RecoVibe attendance code" below it).
- * Uses navigator.share with the file on mobile; downloads on desktop.
- */
-async function downloadQrCard(token, student = {}) {
-  const QRCodeLib = await getQRCodeLib();
-  const cardCanvas = document.createElement("canvas");
-  cardCanvas.width = 560;
-  cardCanvas.height = 760;
-  const ctx = cardCanvas.getContext("2d");
-
-  // Background
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, cardCanvas.width, cardCanvas.height);
-
-  // Gold accent border
-  ctx.lineWidth = 4;
-  ctx.strokeStyle = "#D9A93B";
-  ctx.strokeRect(12, 12, cardCanvas.width - 24, cardCanvas.height - 24);
-
-  // Render 480px QR onto canvas
-  const qrCanvas = document.createElement("canvas");
-  await QRCodeLib.toCanvas(qrCanvas, token, {
-    width: 480,
-    margin: 2,
-    color: {
-      dark: "#000000",
-      light: "#ffffff",
-    },
-    errorCorrectionLevel: "M",
-  });
-
-  ctx.drawImage(qrCanvas, 40, 40, 480, 480);
-
-  // Texts below QR
-  const studentName = student.name || "Student";
-  const studentNo = student.studentNo || "—";
-  const org = student.organization || "PUP Biñan";
-
-  ctx.textAlign = "center";
-
-  // Name
-  ctx.fillStyle = "#7A1F2E";
-  ctx.font = "bold 24px 'Inter', sans-serif";
-  ctx.fillText(studentName, cardCanvas.width / 2, 560);
-
-  // Student number & Organization
-  ctx.fillStyle = "#332628";
-  ctx.font = "600 16px 'Inter', sans-serif";
-  ctx.fillText(`${studentNo} · ${org}`, cardCanvas.width / 2, 596);
-
-  // Subtitle
-  ctx.fillStyle = "#7a6d66";
-  ctx.font = "14px 'Inter', sans-serif";
-  ctx.fillText("RecoVibe attendance code", cardCanvas.width / 2, 632);
-
-  // Footer label
-  ctx.fillStyle = "#D9A93B";
-  ctx.font = "bold 12px 'Inter', sans-serif";
-  ctx.fillText("Polytechnic University of the Philippines — Biñan Campus", cardCanvas.width / 2, 680);
-
-  const cleanNum = studentNo.replace(/[^a-zA-Z0-9_-]/g, "_");
-  const filename = `recovibe-attendance-code-${cleanNum || "student"}.png`;
-
-  // Mobile: use navigator.share with File so Save Image saves to gallery
-  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-  if (isMobile && navigator.canShare) {
-    try {
-      const blob = await new Promise((resolve) => cardCanvas.toBlob(resolve, "image/png"));
-      if (blob) {
-        const file = new File([blob], filename, { type: "image/png" });
-        if (navigator.canShare({ files: [file] })) {
-          await navigator.share({
-            files: [file],
-            title: "RecoVibe attendance code",
-            text: "My RecoVibe attendance code for PUP Biñan",
-          });
-          return;
-        }
-      }
-    } catch (shareErr) {
-      if (shareErr.name === "AbortError") {
-        return; // User dismissed share sheet
-      }
-      console.warn("navigator.share notice:", shareErr);
-    }
-  }
-
-  // Desktop or fallback: standard download
-  downloadCanvasAsPng(cardCanvas, filename);
 }
 
 function renderMyQr(canvas, options = {}) {
   if (!canvas) return () => {};
 
-  const width = options.width || 180;
-  const onStateChange = typeof options.onStateChange === "function" ? options.onStateChange : null;
-  const onError = typeof options.onError === "function" ? options.onError : null;
-
-  const skeleton =
-    options.skeletonEl ||
-    canvas.closest(".qr-code-box, .qr-modal-body, .qr-card, .qr-modal-container")?.querySelector(".qr-skeleton, .qr-modal-skeleton");
+  const studentNumber = normalizeStudentNumber(options.studentNumber);
+  const width = options.width || 720;
+  const displayWidth = options.displayWidth || 180;
+  const skeleton = options.skeletonEl;
   const canvasBox = options.canvasBoxEl || canvas.parentElement;
-  const errorBox =
-    options.errorEl ||
-    canvas.closest(".qr-code-box, .qr-modal-body, .qr-card, .qr-modal-container")?.querySelector(".qr-error, .qr-error-box, .qr-modal-error");
+  const errorBox = options.errorEl;
+  const errorMessage = options.errorMessageEl;
+  const onStateChange = typeof options.onStateChange === "function" ? options.onStateChange : null;
+  let active = true;
 
-  function setUIState(state) {
+  function setUIState(state, message = "Couldn't load your QR code") {
     if (skeleton) {
       skeleton.hidden = state !== "loading";
       skeleton.style.display = state === "loading" ? "flex" : "none";
@@ -2018,89 +1806,38 @@ function renderMyQr(canvas, options = {}) {
       errorBox.hidden = state !== "error";
       errorBox.style.display = state === "error" ? "flex" : "none";
     }
+    if (errorMessage) errorMessage.textContent = message;
     if (onStateChange) onStateChange(state);
   }
 
-  let active = true;
-
   async function loadAndRender() {
     if (!active) return;
+    setUIState("loading");
 
     try {
-      // 1. Resolve token immediately (cached, local user, or fallback)
-      let token = currentPermanentToken || localStorage.getItem("recovibe_permanent_qr_token") || "";
-
-      if (!token) {
-        let u = {};
-        try {
-          const local = JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null");
-          u = local && Object.keys(local).length > 0 ? { ...DEFAULT_STUDENT, ...local } : DEFAULT_STUDENT;
-        } catch {
-          u = DEFAULT_STUDENT;
-        }
-        const uid = auth?.currentUser?.uid || u.uid || u.studentNumber || u.studentId || "2025-00790-BN-1";
-        token = `${uid}.1.fallback_signed_token`;
-        localStorage.setItem("recovibe_permanent_qr_token", token);
+      if (!/^\d{4}-\d{5}-BN-\d$/.test(studentNumber)) {
+        throw new Error("Your student number is missing or invalid. Please contact OSAS.");
       }
 
-      currentPermanentToken = token;
-
-      // 2. Render immediately onto canvas
       const QRCodeLib = await getQRCodeLib();
-      if (!active) return;
-
-      await QRCodeLib.toCanvas(canvas, token, {
-        width: width,
-        margin: 2,
-        color: {
-          dark: "#000000",
-          light: "#ffffff",
-        },
-        errorCorrectionLevel: "M",
+      await QRCodeLib.toCanvas(canvas, studentNumber, {
+        width,
+        margin: 4,
+        color: { dark: "#000000", light: "#ffffff" },
+        errorCorrectionLevel: "H",
       });
+      canvas.style.width = `${displayWidth}px`;
+      canvas.style.height = `${displayWidth}px`;
 
-      if (!active) return;
-      setUIState("ready");
-
-      // 3. If online and authenticated with Firebase Functions, sync authoritative token in background
-      if (auth?.currentUser && functions && navigator.onLine) {
-        try {
-          const getMyQrTokenCallable = httpsCallable(functions, "getMyQrToken");
-          const timeoutPromise = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error("Token request timed out")), 4000)
-          );
-          const result = await Promise.race([getMyQrTokenCallable(), timeoutPromise]);
-          if (result?.data?.token && result.data.token !== token) {
-            token = result.data.token;
-            currentPermanentToken = token;
-            localStorage.setItem("recovibe_permanent_qr_token", token);
-            if (active) {
-              await QRCodeLib.toCanvas(canvas, token, {
-                width: width,
-                margin: 2,
-                color: {
-                  dark: "#000000",
-                  light: "#ffffff",
-                },
-                errorCorrectionLevel: "M",
-              });
-            }
-          }
-          if (typeof result?.data?.cooldownMs === "number") {
-            startCooldown(result.data.cooldownMs);
-          }
-        } catch (fnErr) {
-          console.warn("Background getMyQrToken notice:", fnErr);
-        }
-      }
-
+      if (active) setUIState("ready");
     } catch (err) {
       if (!active) return;
-      console.error("renderMyQr error:", err);
+      console.error("Could not render the student QR code:", err);
       const ctx = canvas.getContext("2d");
       if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
-      setUIState("error");
-      if (onError) onError(err);
+      setUIState("error", err.message === "Your student number is missing or invalid. Please contact OSAS."
+        ? err.message
+        : "Couldn't load your QR code");
     }
   }
 
@@ -2113,8 +1850,6 @@ function renderMyQr(canvas, options = {}) {
   };
 }
 
-window.renderMyQr = renderMyQr;
-
 // Initialize QR Attendance Card and Modal on the Profile Page
 (() => {
   const card = document.getElementById("studentQrCard");
@@ -2125,8 +1860,8 @@ window.renderMyQr = renderMyQr;
   const skeleton = document.getElementById("qrCardSkeleton");
   const canvasBox = document.getElementById("qrCardCanvasBox");
   const errorBox = document.getElementById("qrCardError");
+  const errorMessage = document.getElementById("qrCardErrorMessage");
   const retryBtn = document.getElementById("qrCardRetryBtn");
-  const countdownEl = document.getElementById("qrCardCountdown");
   const nameEl = document.getElementById("qrCardStudentName");
   const numberEl = document.getElementById("qrCardStudentNumber");
   const orgEl = document.getElementById("qrCardStudentOrg");
@@ -2137,6 +1872,7 @@ window.renderMyQr = renderMyQr;
   const checkedInBanner = document.getElementById("qrCheckedInBanner");
   const checkedInEventName = document.getElementById("qrCheckedInEventName");
   const checkedInTime = document.getElementById("qrCheckedInTime");
+  const checkedInUnsubscribers = [];
 
   // Full-screen Modal Elements
   const modalOverlay = document.getElementById("qrModalOverlay");
@@ -2147,8 +1883,8 @@ window.renderMyQr = renderMyQr;
   const modalSkeleton = document.getElementById("qrModalSkeleton");
   const modalCanvasBox = document.getElementById("qrModalCanvasBox");
   const modalError = document.getElementById("qrModalError");
+  const modalErrorMessage = document.getElementById("qrModalErrorMessage");
   const modalRetryBtn = document.getElementById("qrModalRetryBtn");
-  const modalCountdown = document.getElementById("qrModalCountdown");
   const modalStudentName = document.getElementById("qrModalStudentName");
   const modalEventName = document.getElementById("qrModalEventName");
   const modalRefreshBtn = document.getElementById("qrModalRefreshBtn");
@@ -2165,35 +1901,36 @@ window.renderMyQr = renderMyQr;
   if (checkedInBadge) checkedInBadge.hidden = true;
   if (checkedInBanner) checkedInBanner.hidden = true;
 
-  function updateStudentCardInfo(userObj) {
-    let user = userObj;
-    if (!user) {
-      try {
-        const local = JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null");
-        user = local && Object.keys(local).length > 0 ? { ...DEFAULT_STUDENT, ...local } : DEFAULT_STUDENT;
-      } catch {
-        user = DEFAULT_STUDENT;
-      }
-    }
+  let currentStudentNumber = "";
+  let currentStudentName = "";
 
+  function setCardQrActionsEnabled(enabled) {
+    if (downloadBtn) downloadBtn.disabled = !enabled;
+    if (refreshBtn) refreshBtn.disabled = !enabled;
+  }
+
+  function setModalQrActionsEnabled(enabled) {
+    if (modalDownloadBtn) modalDownloadBtn.disabled = !enabled;
+    if (modalRefreshBtn) modalRefreshBtn.disabled = !enabled;
+  }
+
+  function updateStudentCardInfo(userObj) {
+    const user = userObj || {};
     const storedFirstName = String(user.firstName || "").trim();
     const storedFullName = String(user.name || user.fullName || "").trim();
     const nameFromProfile = [storedFirstName, user.middleName, user.lastName]
       .map((part) => String(part || "").trim())
       .filter(Boolean)
       .join(" ");
-    const studentName = storedFullName || nameFromProfile || "Mc Joben Reyes";
-    const studentNumber =
-      normalizeStudentNumber(user.studentNumber || user.studentId || user.username) || "2025-00790-BN-1";
-    const organization = String(user.organization || "IBITS").trim() || "IBITS";
+    currentStudentName = storedFullName || nameFromProfile;
+    currentStudentNumber = normalizeStudentNumber(user.studentNumber || user.studentId);
+    const organization = String(user.organization || "").trim();
 
-    if (nameEl) nameEl.textContent = studentName;
-    if (numberEl) numberEl.textContent = studentNumber;
+    if (nameEl) nameEl.textContent = currentStudentName;
+    if (numberEl) numberEl.textContent = currentStudentNumber;
     if (orgEl) orgEl.textContent = organization;
-    if (modalStudentName) modalStudentName.textContent = studentName;
+    if (modalStudentName) modalStudentName.textContent = currentStudentName;
   }
-
-  updateStudentCardInfo();
 
   let cardQrCleanup = null;
 
@@ -2205,120 +1942,36 @@ window.renderMyQr = renderMyQr;
     if (!canvas) return;
 
     cardQrCleanup = renderMyQr(canvas, {
-      width: 180,
+      studentNumber: currentStudentNumber,
+      width: 720,
+      displayWidth: 180,
       skeletonEl: skeleton,
       canvasBoxEl: canvasBox,
       errorEl: errorBox,
-      countdownEl: countdownEl,
+      errorMessageEl: errorMessage,
+      onStateChange: (state) => setCardQrActionsEnabled(state === "ready"),
     });
   }
 
-  initCardQr();
-
-  function getStudentDownloadInfo() {
-    let u = {};
-    try {
-      const local = JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null");
-      u = local && Object.keys(local).length > 0 ? { ...DEFAULT_STUDENT, ...local } : DEFAULT_STUDENT;
-    } catch {
-      u = DEFAULT_STUDENT;
-    }
-    const storedFirstName = String(u.firstName || "").trim();
-    const storedFullName = String(u.name || u.fullName || "").trim();
-    const nameFromProfile = [storedFirstName, u.middleName, u.lastName]
-      .map((part) => String(part || "").trim())
-      .filter(Boolean)
-      .join(" ");
-    return {
-      name: storedFullName || nameFromProfile || "Mc Joben Reyes",
-      studentNo: normalizeStudentNumber(u.studentNumber || u.studentId || u.username) || "2025-00790-BN-1",
-      organization: String(u.organization || "IBITS").trim() || "IBITS",
-    };
-  }
-
-  async function handleRefreshCode() {
-    const confirmFn = window.showConfirmation || (typeof showConfirmation === "function" ? showConfirmation : null);
-    const confirmed = confirmFn
-      ? await confirmFn({
-          title: "Refresh Attendance QR Code?",
-          message:
-            "Generating a new code will invalidate any previously downloaded or printed QR code. Are you sure you want to refresh it?",
-          confirmText: "Refresh Code",
-          cancelText: "Cancel",
-          isDanger: true,
-        })
-      : window.confirm("Your saved QR image will stop working. Refresh your code?");
-    if (!confirmed) return;
-
-    try {
-      let newToken = "";
-      if (auth?.currentUser && functions) {
-        try {
-          const regenCallable = httpsCallable(functions, "regenerateMyQr");
-          const res = await regenCallable();
-          if (res && res.data && res.data.token) {
-            newToken = res.data.token;
-            const cooldownMs = res.data.cooldownMs || 180000;
-            startCooldown(cooldownMs);
-          }
-        } catch (callErr) {
-          console.warn("regenerateMyQr call failed, using local refresh:", callErr);
-        }
-      }
-
-      if (!newToken) {
-        let u = {};
-        try {
-          const local = JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null");
-          u = local && Object.keys(local).length > 0 ? { ...DEFAULT_STUDENT, ...local } : DEFAULT_STUDENT;
-        } catch {
-          u = DEFAULT_STUDENT;
-        }
-        const uid = auth?.currentUser?.uid || u.uid || u.studentNumber || u.studentId || "2025-00790-BN-1";
-        const currentV = Number(localStorage.getItem("recovibe_qr_version") || 1) + 1;
-        localStorage.setItem("recovibe_qr_version", String(currentV));
-        newToken = `${uid}.${currentV}.refreshed_signed_token`;
-        startCooldown(180000);
-      }
-
-      currentPermanentToken = newToken;
-      localStorage.setItem("recovibe_permanent_qr_token", newToken);
-
-      initCardQr();
-      if (modalOverlay && !modalOverlay.hidden && modalOverlay.style.display !== "none") {
-        initModalQr();
-      }
-
-      const toastFn = window.showToast || (typeof showToast === "function" ? showToast : null);
-      if (toastFn) {
-        toastFn("QR code refreshed successfully.");
-      } else {
-        alert("New code ready. Download it again so your saved copy works.");
-      }
-    } catch (err) {
-      console.warn("Failed to regenerate QR code:", err);
-      const toastFn = window.showToast || (typeof showToast === "function" ? showToast : null);
-      if (err.code === "functions/resource-exhausted" || err.message?.includes("wait")) {
-        const retryAfterMs = err.details?.retryAfterMs || 180000;
-        startCooldown(retryAfterMs);
-        if (toastFn) toastFn("Please wait before refreshing your code again.", true);
-        else alert("Please wait before refreshing your code again.");
-      } else {
-        const msg = err.message || "Could not refresh your code right now. Please try again later.";
-        if (toastFn) toastFn(msg, true);
-        else alert(msg);
-      }
+  function handleRefreshCode() {
+    initCardQr();
+    if (modalOverlay && !modalOverlay.hidden && modalOverlay.style.display !== "none") {
+      initModalQr();
     }
   }
 
-  async function handleDownloadCode() {
-    if (!currentPermanentToken) {
-      currentPermanentToken = localStorage.getItem("recovibe_permanent_qr_token") || "";
+  function handleDownloadCode(targetCanvas, targetButton) {
+    if (!currentStudentNumber || targetButton?.disabled) {
+      return;
     }
-    const studentInfo = getStudentDownloadInfo();
-    await downloadQrCard(currentPermanentToken, studentInfo);
+    const downloaded = downloadCanvasAsPng(
+      targetCanvas,
+      `recovibe-attendance-code-${currentStudentNumber}.png`,
+    );
     const toastFn = window.showToast || (typeof showToast === "function" ? showToast : null);
-    if (toastFn) toastFn("Attendance card downloaded.");
+    if (toastFn) {
+      toastFn(downloaded ? "QR code downloaded." : "Could not download your QR code. Please try again.", !downloaded);
+    }
   }
 
   if (retryBtn) {
@@ -2336,7 +1989,7 @@ window.renderMyQr = renderMyQr;
   if (downloadBtn) {
     downloadBtn.addEventListener("click", (e) => {
       e.preventDefault();
-      handleDownloadCode();
+      handleDownloadCode(canvas, downloadBtn);
     });
   }
 
@@ -2391,20 +2044,23 @@ window.renderMyQr = renderMyQr;
   }
 
   // Real-time checked-in state check across events (Task 5)
+  function stopCheckedInWatchers() {
+    checkedInUnsubscribers.splice(0).forEach((unsubscribe) => unsubscribe());
+    if (checkedInBadge) checkedInBadge.hidden = true;
+    if (checkedInBanner) checkedInBanner.hidden = true;
+  }
+
   function setupCheckedInWatcher() {
+    stopCheckedInWatchers();
     if (!rtdb) return;
-    let u = {};
-    try {
-      u = JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null") || {};
-    } catch {}
-    const uid = auth?.currentUser?.uid || u.uid;
+    const uid = auth?.currentUser?.uid;
     if (!uid) return;
 
     const eventIds = getAllKnownEventIds();
 
     eventIds.forEach((eventId) => {
       const attendanceRef = ref(rtdb, `attendance/${eventId}/${uid}`);
-      onValue(attendanceRef, (snapshot) => {
+      const unsubscribe = onValue(attendanceRef, (snapshot) => {
         const val = snapshot.val();
         if (val && val.scannedAt) {
           const title = getEventTitle(eventId);
@@ -2418,78 +2074,79 @@ window.renderMyQr = renderMyQr;
       }, (err) => {
         console.warn(`Attendance watcher notice for ${eventId}:`, err);
       });
+      checkedInUnsubscribers.push(unsubscribe);
     });
   }
 
-  setupCheckedInWatcher();
+  window.addEventListener("pagehide", stopCheckedInWatchers, { once: true });
 
   // Connect Firebase Auth to populate Profile and refresh QR
-  onAuthStateChanged(auth, async (user) => {
-    if (user && db) {
-      try {
-        const snap = await getDoc(doc(db, "users", user.uid));
-        if (snap.exists()) {
-          const profileData = snap.data();
-          let current = {};
-          try {
-            current = JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null") || {};
-          } catch {}
-          const merged = {
-            ...current,
-            ...profileData,
-            uid: user.uid,
-            email: profileData.email || user.email || current.email || "",
-            studentNumber: normalizeStudentNumber(profileData.studentNumber || profileData.studentId || current.studentNumber || current.studentId),
-            studentId: normalizeStudentNumber(profileData.studentNumber || profileData.studentId || current.studentNumber || current.studentId),
-            StudentOrgs: uniqueProfileValues(
-              profileData.StudentOrgs,
-              profileData.studentOrgs,
-              profileData.organizations,
-              profileData.organization,
-              profileData.courseOrganization,
-              profileData.courseOrg,
-              current.StudentOrgs,
-              current.organization,
-            ),
-            departments: uniqueProfileValues(
-              profileData.departments,
-              profileData.departmentCodes,
-              profileData.department,
-              profileData.departmentCode,
-              profileData.course,
-              profileData.program,
-              current.departments,
-            ),
-          };
-          const currentUserStorage = localStorage.getItem("recovibeCurrentUser")
-            ? localStorage
-            : sessionStorage;
-          currentUserStorage.setItem("recovibeCurrentUser", JSON.stringify(merged));
+  let profileAuthUid = "";
+  onAuthStateChanged(auth, async (authUser) => {
+    stopCheckedInWatchers();
+    if (!authUser) {
+      profileAuthUid = "";
+      currentStudentNumber = "";
+      currentStudentName = "";
+      setCardQrActionsEnabled(false);
+      setModalQrActionsEnabled(false);
+      clearCachedStudentProfile();
+      window.location.replace("StudentLogin.html");
+      return;
+    }
+    profileAuthUid = authUser.uid;
+    if (!db) return;
 
-          // Re-hydrate personal details
-          hydrateUserProfile();
-          const setText = (id, val) => {
-            const el = document.getElementById(id);
-            if (el) el.textContent = String(val || "").trim() || "Not provided";
-          };
-          const sName = String(merged.fullName || merged.name || "").trim();
-          const nParts = sName.split(/\s+/).filter(Boolean);
-          setText("profileFirstName", merged.firstName || nParts[0] || "");
-          setText("profileMiddleName", merged.middleName || (nParts.length > 2 ? nParts.slice(1, -1).join(" ") : ""));
-          setText("profileLastName", merged.lastName || (nParts.length > 1 ? nParts.at(-1) : ""));
-          setText("profileStudentId", normalizeStudentNumber(merged.studentNumber || merged.studentId));
-          setText("profileEmail", merged.email);
-          setText("profileContact", merged.contactNumber || merged.contact);
-          setText("profileDepartment", merged.department);
-          setText("profileYear", merged.year);
-          setText("profileOrganization", merged.organization);
-
-          updateStudentCardInfo(merged);
-        }
-      } catch (err) {
-        console.warn("Could not fetch user document:", err);
-      }
+    try {
+      const profileData = await loadStudentProfile(authUser);
+      if (auth.currentUser?.uid !== profileAuthUid) return;
+      const merged = {
+        ...profileData,
+        uid: authUser.uid,
+        email: profileData.email || authUser.email || "",
+        studentNumber: normalizeStudentNumber(profileData.studentNumber || profileData.studentId),
+        studentId: normalizeStudentNumber(profileData.studentNumber || profileData.studentId),
+        StudentOrgs: uniqueProfileValues(
+          profileData.StudentOrgs,
+          profileData.studentOrgs,
+          profileData.organizations,
+          profileData.organization,
+          profileData.courseOrganization,
+          profileData.courseOrg,
+        ),
+        departments: uniqueProfileValues(
+          profileData.departments,
+          profileData.departmentCodes,
+          profileData.department,
+          profileData.departmentCode,
+          profileData.course,
+          profileData.program,
+        ),
+      };
+      hydrateUserProfile();
+      const setText = (id, val) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = String(val || "").trim() || "Not provided";
+      };
+      const sName = String(merged.fullName || merged.name || "").trim();
+      const nParts = sName.split(/\s+/).filter(Boolean);
+      setText("profileFirstName", merged.firstName || nParts[0] || "");
+      setText("profileMiddleName", merged.middleName || (nParts.length > 2 ? nParts.slice(1, -1).join(" ") : ""));
+      setText("profileLastName", merged.lastName || (nParts.length > 1 ? nParts.at(-1) : ""));
+      setText("profileStudentId", normalizeStudentNumber(merged.studentNumber || merged.studentId));
+      setText("profileEmail", merged.email);
+      setText("profileContact", merged.contactNumber || merged.contact);
+      setText("profileDepartment", merged.department || merged.program || merged.course);
+      setText("profileYear", merged.year);
+      setText("profileOrganization", merged.organization);
+      updateStudentCardInfo(merged);
+      document.getElementById("profileMain")?.removeAttribute("hidden");
+      initCardQr();
       setupCheckedInWatcher();
+    } catch (err) {
+      console.error("Could not load the signed-in student profile:", err);
+      clearCachedStudentProfile();
+      window.location.replace("StudentLogin.html");
     }
   });
 
@@ -2501,13 +2158,7 @@ window.renderMyQr = renderMyQr;
     if (!modalOverlay) return;
     previousFocusedElement = document.activeElement;
 
-    let u = {};
-    try {
-      u = JSON.parse(localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser") || "null") || {};
-    } catch {}
-    const sName = u.name || u.fullName || "Student";
-
-    if (modalStudentName) modalStudentName.textContent = sName;
+    if (modalStudentName) modalStudentName.textContent = currentStudentName;
     if (modalEventName) {
       if (eventName) {
         modalEventName.textContent = eventName;
@@ -2554,11 +2205,14 @@ window.renderMyQr = renderMyQr;
     if (!modalCanvas) return;
 
     modalQrCleanup = renderMyQr(modalCanvas, {
-      width: 260,
+      studentNumber: currentStudentNumber,
+      width: 720,
+      displayWidth: 260,
       skeletonEl: modalSkeleton,
       canvasBoxEl: modalCanvasBox,
       errorEl: modalError,
-      countdownEl: modalCountdown,
+      errorMessageEl: modalErrorMessage,
+      onStateChange: (state) => setModalQrActionsEnabled(state === "ready"),
     });
   }
 
@@ -2615,7 +2269,7 @@ window.renderMyQr = renderMyQr;
     modalDownloadBtn.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      handleDownloadCode();
+      handleDownloadCode(modalCanvas, modalDownloadBtn);
     });
   }
 

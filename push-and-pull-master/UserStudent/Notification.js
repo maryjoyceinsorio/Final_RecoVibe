@@ -1,50 +1,67 @@
 import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
   collection,
+  collectionGroup,
   deleteDoc,
   doc,
+  getDoc,
   onSnapshot,
   query,
   updateDoc,
   where,
-  writeBatch,
-  serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {
   onValue,
   ref as databaseRef,
-  remove as removeDatabase,
-  update as updateDatabase,
+  remove as removeRtdbValue,
+  update as updateRtdbValue,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
-import { auth, authReady, db, rtdb } from "./firebaseConfig.js";
+import { auth, authReady, db, isRtdbConfigured, rtdb } from "./firebaseConfig.js";
+import { isEventVisibleToStudent } from "./eventAudience.js";
 import {
   clearCachedStudentProfile,
   loadStudentProfile,
   renderStudentSidebar,
 } from "./studentIdentity.js";
 
-let notifications = [];
-let deletedNotifications = [];
-let notificationsLoading = true;
-let notificationLoadError = "";
-let notificationUnsubscribes = [];
-let currentUid = "";
-let recipientIds = [];
-let notificationSubscriptionVersion = 0;
-let activeFilter = "all";
-let pendingDeleteId = null;
-const LOCAL_NOTIFICATIONS_KEY = "recovibeNotifications";
-const NOTIFICATION_RECIPIENT_FIELDS = [
-  "recipientUid",
-  "recipientUserId",
-  "recipientId",
-  "userId",
-  "organizerUid",
-  "organizerId",
-];
+const DEBUG = false;
+const TWO_WEEKS = 14 * 24 * 60 * 60 * 1000;
+const ONE_DAY = 24 * 60 * 60 * 1000;
+const TRASH_LIFETIME = 30 * ONE_DAY;
+const STORAGE_PREFIX = "recovibeStudentNotifications:";
+const notificationRoot = document.getElementById("notificationMain");
 
-function logNotificationStep(step, details = {}) {
-  console.log(`[Student Notifications] ${step}`, details);
+let currentUid = "";
+let studentProfile = {};
+let notificationItems = [];
+let notificationsLoading = true;
+let notificationError = "";
+let activeFilter = "all";
+let showingTrash = false;
+let searchQuery = "";
+let toastTimer = null;
+let undoDelete = null;
+let statusMessage = "";
+let pendingNotificationWrites = new Set();
+let state = { read: {}, deleted: {}, restored: {}, purged: {} };
+let unsubscribeAuth = null;
+let unsubscribeFirestore = [];
+let unsubscribeEvents = null;
+let unsubscribeRegistrations = null;
+let unsubscribeRtdb = null;
+let rtdbRef = null;
+let derivedRefreshInterval = null;
+let subscriptionVersion = 0;
+let firestoreReady = new Set();
+let sourceErrors = new Map();
+let eventDocuments = new Map();
+let registrationDocuments = new Map();
+let firestoreNotifications = new Map();
+let rtdbNotifications = new Map();
+let detailEventLoads = new Set();
+
+function debug(...args) {
+  if (DEBUG) console.debug("[Student Notifications]", ...args);
 }
 
 function escapeHTML(value) {
@@ -57,937 +74,904 @@ function escapeHTML(value) {
   })[character]);
 }
 
-function notificationMillis(value) {
+function toMillis(value) {
   if (value && typeof value.toMillis === "function") return value.toMillis();
   if (value && typeof value.toDate === "function") return value.toDate().getTime();
   if (value && typeof value.seconds === "number") return value.seconds * 1000;
-  if (typeof value === "number") return value;
-  const parsed = value ? new Date(value).getTime() : 0;
-  return Number.isFinite(parsed) ? parsed : 0;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const dateOnly = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (dateOnly) {
+      return new Date(
+        Number(dateOnly[1]),
+        Number(dateOnly[2]) - 1,
+        Number(dateOnly[3]),
+      ).getTime();
+    }
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
 }
 
-function normalizeNotification(snapshot) {
-  const data = snapshot.data();
-  const createdAt = notificationMillis(
-    data.createdAt ?? data.at ?? data.timestamp,
-  );
-  const deletedAt = notificationMillis(data.deletedAt);
-  const statusLabels = {
-    cancelled: "Cancelled",
-    canceled: "Cancelled",
-    event_cancelled: "Cancelled",
-    unpublished: "Unpublished",
-    event_unpublished: "Unpublished",
-    updated: "Updated",
-    event_updated: "Updated",
-    deleted: "Removed",
-    event_deleted: "Removed",
-  };
+function formatRelativeTime(timestamp) {
+  if (!timestamp) return "";
+  const date = new Date(timestamp);
+  if (!Number.isFinite(date.getTime())) return "";
+  const difference = Math.max(0, Date.now() - timestamp);
+  if (difference < 60000) return "Just now";
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
+  if (difference < 60 * 60000) return `${Math.floor(difference / 60000)} minutes ago`;
+  if (difference < ONE_DAY) return `${Math.floor(difference / 3600000)} hours ago`;
+  if (difference < 7 * ONE_DAY) return `${Math.floor(difference / ONE_DAY)} days ago`;
+  const days = Math.floor(difference / ONE_DAY);
+  if (days < 30) return `${Math.floor(days / 7)} weeks ago`;
+  return `${Math.floor(days / 30)} months ago`;
+}
+
+function notificationDate(timestamp) {
+  const date = new Date(timestamp);
+  return Number.isFinite(date.getTime())
+    ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(date)
+    : "";
+}
+
+function notificationWeekStart(date) {
+  const start = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  start.setDate(start.getDate() - start.getDay());
+  return start;
+}
+
+function notificationGroup(item) {
+  const date = new Date(item.createdAtMillis);
+  const now = new Date();
+  if (date.toDateString() === now.toDateString()) return "Today";
+  if (date >= notificationWeekStart(now)) return "This week";
+  return "Earlier";
+}
+
+function readState(uid) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(`${STORAGE_PREFIX}${uid}`) || "{}");
+    const savedRead = parsed?.read && typeof parsed.read === "object" ? parsed.read : {};
+    const savedDeleted = parsed?.deleted && typeof parsed.deleted === "object"
+      ? parsed.deleted
+      : {};
+    const savedRestored = parsed?.restored && typeof parsed.restored === "object"
+      ? parsed.restored
+      : {};
+    const cutoff = Date.now() - TRASH_LIFETIME;
+    const deleted = Object.fromEntries(
+      Object.entries(savedDeleted).filter(([, value]) =>
+        toMillis(value?.deletedAt ?? value) >= cutoff,
+      ),
+    );
+    const savedPurged = parsed?.purged && typeof parsed.purged === "object"
+      ? parsed.purged
+      : {};
+    state = { read: savedRead, deleted, restored: savedRestored, purged: savedPurged };
+    if (Object.keys(deleted).length !== Object.keys(savedDeleted).length) saveState();
+  } catch (error) {
+    debug("Could not read notification state:", error);
+    state = { read: {}, deleted: {}, restored: {}, purged: {} };
+  }
+}
+
+async function emptyTrash() {
+  const items = notificationItems.filter((item) => item.deletedAt);
+  const ids = new Set(items.map((item) => item.id));
+  pendingNotificationWrites = new Set([...pendingNotificationWrites, ...ids]);
+  renderNotifications();
+  const results = await Promise.all(items.map(async (item) => {
+    try {
+      if (item.source === "firestore") await deleteDoc(doc(db, "notifications", item.id));
+      if (item.source === "rtdb") {
+        await removeRtdbValue(databaseRef(rtdb, `notifications/${currentUid}/${item.id}`));
+      }
+      state.purged[item.id] = true;
+      delete state.deleted[item.id];
+      delete state.restored[item.id];
+      delete state.read[item.id];
+      return true;
+    } catch (error) {
+      console.error("[Student Notifications] Could not permanently delete notification:", error);
+      return false;
+    } finally {
+      pendingNotificationWrites.delete(item.id);
+    }
+  }));
+  saveState();
+  if (results.some((result) => !result)) {
+    notificationError = "Some deleted notifications could not be removed. Please try again.";
+  }
+  renderNotifications();
+}
+
+function saveState() {
+  if (!currentUid) return;
+  try {
+    localStorage.setItem(`${STORAGE_PREFIX}${currentUid}`, JSON.stringify(state));
+  } catch (error) {
+    debug("Could not save notification state:", error);
+  }
+}
+
+function normalizedType(value, data = {}) {
+  const type = `${value || ""} ${data.title || ""} ${data.status || ""} ${data.action || ""}`
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
+  if (type.includes("publish") || type.includes("newevent")) return "published";
+  if (type.includes("register") || type.includes("participat")) return "registered";
+  if (type.includes("reminder") || type.includes("upcoming")) return "reminder";
+  if (type.includes("cancel")) return "cancelled";
+  if (type.includes("resched")) return "rescheduled";
+  if (type.includes("approv")) return "approved";
+  if (type.includes("reject") || type.includes("denied")) return "rejected";
+  return "default";
+}
+
+function normalizeItem(id, data, source) {
+  const createdAt = toMillis(data.createdAt ?? data.createdAtMillis);
+  const readOverride = Object.prototype.hasOwnProperty.call(state.read, id)
+    ? state.read[id]
+    : undefined;
   return {
     ...data,
-    id: snapshot.id,
+    id: String(id),
+    eventId: String(data.eventId || ""),
     title: String(data.title || data.eventTitle || data.eventName || "Notification"),
     message: String(data.message || data.body || ""),
-    type: String(data.type || "event").toLowerCase(),
-    eventId: String(data.eventId || ""),
-    statusLabel: String(
-      data.statusLabel || statusLabels[String(data.status || "").toLowerCase()] || "",
-    ),
+    type: normalizedType(data.type, data),
     createdAtMillis: createdAt,
-    time: createdAt
-      ? new Date(createdAt).toLocaleString("en-PH", {
-          timeZone: "Asia/Manila",
-          dateStyle: "medium",
-          timeStyle: "short",
-        })
-      : "Just now",
-    read: data.read === true || data.isRead === true,
-    deletedAt,
+    read: readOverride === undefined
+      ? data.read === true || data.isRead === true
+      : readOverride === true,
+    source,
+    deletedAt: toMillis(state.deleted[id]?.deletedAt ?? state.deleted[id]),
   };
 }
 
-function notificationReference(id) {
-  return doc(db, "notifications", id);
+function eventStatus(event) {
+  return String(event?.status || event?.publicationStatus || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
 }
 
-function getRecipientIds(user, profile = {}) {
-  const ids = new Set([
-    user?.uid,
-    profile.studentId,
-    profile.studentNumber,
-    profile.studentNo,
-  ]
-    .filter(Boolean)
-    .map((value) => String(value).trim()));
-  try {
-    const cached = JSON.parse(
-      localStorage.getItem("recovibeCurrentUser") || "null",
-    );
+function eventTitle(event) {
+  return String(event?.title || event?.name || event?.eventName || "Untitled event");
+}
+
+function eventStartMillis(event) {
+  const rawStart = event.startAt ?? event.start_at;
+  if (typeof rawStart === "string" && /^\d{4}-\d{2}-\d{2}$/.test(rawStart)) {
+    return Date.parse(`${rawStart}T00:00:00+08:00`) || 0;
+  }
+  if (typeof rawStart === "string" && /^\d{4}-\d{2}-\d{2}[T ]\d{1,2}:\d{2}/.test(rawStart)) {
+    if (!/(?:Z|[+-]\d{2}:?\d{2})$/i.test(rawStart)) {
+      return Date.parse(`${rawStart.replace(" ", "T")}+08:00`) || 0;
+    }
+  }
+  const direct = toMillis(rawStart);
+  if (direct) return direct;
+  const fullDateTime = String(event.startDateTime || event.start_date_time || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}[T ]\d{1,2}:\d{2}/.test(fullDateTime)) {
+    return Date.parse(
+      `${fullDateTime.replace(" ", "T")}${/(?:Z|[+-]\d{2}:?\d{2})$/i.test(fullDateTime) ? "" : "+08:00"}`,
+    ) || 0;
+  }
+  const dateValue = event.dateISO || event.date || event.startDate || "";
+  const date = String(dateValue).slice(0, 10);
+  const time = String(event.startTime || event.schedule?.startTime || event.time || "")
+    .split(/\s*[-–—]\s*/)[0]
+    .trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return 0;
+  const match = /^(\d{1,2}):(\d{2})(?:\s*(AM|PM))?$/i.exec(time);
+  if (!match) return Date.parse(`${date}T00:00:00+08:00`) || 0;
+  let hour = Number(match[1]);
+  if (match[3]) {
+    hour %= 12;
+    if (match[3].toUpperCase() === "PM") hour += 12;
+  }
+  return Date.parse(`${date}T${String(hour).padStart(2, "0")}:${match[2]}:00+08:00`) || 0;
+}
+
+function manilaDate(timestamp) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Manila",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(timestamp));
+}
+
+function deterministicId(type, eventId, timestamp) {
+  return `${type}-${eventId}-${timestamp}`;
+}
+
+function derivedItems() {
+  const now = Date.now();
+  const derived = [];
+  eventDocuments.forEach((event, eventId) => {
+    const status = eventStatus(event);
+    const published =
+      status === "published" || event.published === true || event.isPublished === true;
+    const publishedAt = toMillis(event.publishedAt) ||
+      toMillis(event.updatedAt) ||
+      toMillis(event.createdAt);
     if (
-      cached?.uid === user?.uid ||
-      (cached?.email &&
-        String(cached.email).toLowerCase() === String(user?.email || "").toLowerCase())
+      published &&
+      publishedAt &&
+      publishedAt <= now &&
+      now - publishedAt <= TWO_WEEKS &&
+      isEventVisibleToStudent({ ...event, id: eventId }, studentProfile)
     ) {
-      [cached.studentId, cached.studentNumber, cached.studentNo]
-        .filter(Boolean)
-        .forEach((id) => ids.add(String(id).trim()));
-    }
-  } catch (error) {
-    console.warn("[Student Notifications] Could not read cached recipient IDs:", error);
-  }
-  return [...ids];
-}
-
-function readLocalNotifications(ids) {
-  try {
-    const stored = JSON.parse(
-      localStorage.getItem(LOCAL_NOTIFICATIONS_KEY) || "[]",
-    );
-    if (!Array.isArray(stored)) return [];
-    return stored
-        .filter((item) =>
-          NOTIFICATION_RECIPIENT_FIELDS.some((field) =>
-            ids.includes(String(item[field] || "")),
-          ),
-        )
-      .map((item, index) => {
-        const data = {
-          ...item,
-          id: String(item.id || `local-${index}`),
-        };
-        const createdAt = notificationMillis(
-          data.createdAt ?? data.at ?? data.timestamp,
-        );
-        const normalized = normalizeNotification({
-          id: data.id,
-          data: () => data,
-        });
-        return { ...normalized, createdAtMillis: createdAt, localOnly: true };
-      });
-  } catch (error) {
-    console.warn("[Student Notifications] Could not read local notifications:", error);
-    return [];
-  }
-}
-
-function subscribeToNotifications(uid, ids = [uid]) {
-  notificationUnsubscribes.forEach((unsubscribe) => unsubscribe());
-  notificationUnsubscribes = [];
-  const subscriptionVersion = ++notificationSubscriptionVersion;
-  recipientIds = [...new Set([uid, ...ids].filter(Boolean).map(String))];
-  const firestoreDocuments = new Map();
-  const realtimeDocuments = new Map();
-  let firestoreSnapshotReceived = false;
-  let firestoreError = null;
-  const generationUid = currentUid;
-  notificationsLoading = true;
-  notificationLoadError = "";
-  renderNotifications();
-
-  function renderSnapshotResults() {
-    if (
-      currentUid !== generationUid ||
-      subscriptionVersion !== notificationSubscriptionVersion
-    ) return;
-    const firestoreItems = [...firestoreDocuments.values()];
-    const realtimeItems = [...realtimeDocuments.values()];
-    const raw = [...firestoreItems, ...realtimeItems];
-    let matched = raw
-      .filter(({ data }) =>
-        NOTIFICATION_RECIPIENT_FIELDS.some((field) =>
-          recipientIds.includes(String(data[field] || "")),
-        ),
-      )
-      .map(({ data, id }) => normalizeNotification({ id, data: () => data }));
-    const cloudCount = firestoreItems.length;
-    let localFallbackCount = 0;
-    if (firestoreSnapshotReceived && cloudCount === 0) {
-      const localNotifications = readLocalNotifications(recipientIds);
-      localFallbackCount = localNotifications.length;
-      matched = [...matched, ...localNotifications];
-    }
-    matched.sort((left, right) => right.createdAtMillis - left.createdAtMillis);
-    const active = matched.filter((item) => !item.deletedAt);
-    const deleted = matched.filter((item) => Boolean(item.deletedAt));
-    notifications = active;
-    deletedNotifications = deleted;
-
-    // TEMP-DEBUG: Keep until the notification recipient and filtering issue is resolved.
-    console.debug("[Student Notifications] recipient IDs used:", recipientIds);
-    console.debug("[Student Notifications] document counts:", {
-      rawFirestore: cloudCount,
-      rawRealtimeDatabase: realtimeItems.length,
-      localFallback: localFallbackCount,
-      recipientMatch: matched.length,
-      activeAfterDeletedAtFilter: active.length,
-      deleted: deleted.length,
-      afterUiFilters: active.filter((item) => {
-        const search = document.getElementById("notificationSearch").value.trim().toLowerCase();
-        const matchesFilter = activeFilter === "all" ||
-          (activeFilter === "read" ? item.read : !item.read);
-        return matchesFilter &&
-          (!search || `${item.title} ${item.message}`.toLowerCase().includes(search));
-      }).length,
-    });
-    console.table(raw.map(({ id, data }) => ({
-      id,
-      recipientUid: data.recipientUid || "",
-      type: data.type || "",
-      deleted: Boolean(data.deletedAt || data.deleted || data.isDeleted),
-      createdAt: data.createdAt || data.at || data.timestamp || null,
-    })));
-
-    notificationsLoading = !firestoreSnapshotReceived;
-    notificationLoadError = firestoreError
-      ? firestoreError.code === "permission-denied"
-        ? "You do not have permission to read notifications."
-        : "Notifications could not be loaded. Please retry."
-      : "";
-    if (firestoreSnapshotReceived) {
-      logNotificationStep("query-success", {
-        uid: generationUid,
-        projectId: auth.app.options.projectId,
-        count: cloudCount + realtimeItems.length,
-        firestoreCount: cloudCount,
-        realtimeDatabaseCount: realtimeItems.length,
-        localFallbackCount,
+      const title = eventTitle(event);
+      derived.push({
+        id: deterministicId("published", eventId, publishedAt),
+        eventId,
+        type: "published",
+        title: `New event: ${title}`,
+        message: String(event.description || event.summary || "A new event is available."),
+        createdAtMillis: publishedAt,
+        read: false,
+        source: "derived",
       });
     }
-    renderNotifications();
-  }
-
-  logNotificationStep("query-start", {
-    collection: "notifications",
-    recipientField: "recipientUid",
-    recipientUid: uid,
-    projectId: auth.app.options.projectId,
   });
-  const firestoreUnsubscribe = onSnapshot(
-    query(
-      collection(db, "notifications"),
-      where("recipientUid", "==", uid),
-    ),
-    (snapshot) => {
-      if (
-        currentUid !== generationUid ||
-        subscriptionVersion !== notificationSubscriptionVersion
-      ) return;
-      firestoreSnapshotReceived = true;
-      firestoreError = null;
-      firestoreDocuments.clear();
-      snapshot.docs.forEach((item) => {
-        firestoreDocuments.set(item.id, { id: item.id, data: item.data() });
-      });
-      renderSnapshotResults();
-    },
-    (error) => {
-      if (
-        currentUid !== generationUid ||
-        subscriptionVersion !== notificationSubscriptionVersion
-      ) return;
-      firestoreSnapshotReceived = true;
-      firestoreError = error;
-      console.error("[Student Notifications] query-error", {
-        uid,
-        code: error?.code || "",
-        message: error?.message || String(error),
-      });
-      renderSnapshotResults();
-    },
-  );
-  notificationUnsubscribes.push(firestoreUnsubscribe);
 
-  if (rtdb && currentUid) {
-    const legacyNotificationsRef = databaseRef(
-      rtdb,
-      `notifications/${currentUid}`,
-    );
-    const unsubscribe = onValue(
-      legacyNotificationsRef,
-      (snapshot) => {
-        if (
-          currentUid !== generationUid ||
-          subscriptionVersion !== notificationSubscriptionVersion
-        ) return;
-        realtimeDocuments.clear();
-        const values = snapshot.val() || {};
-        Object.entries(values).forEach(([id, data]) => {
-          if (!data || typeof data !== "object") return;
-          realtimeDocuments.set(`rtdb:${id}`, {
-            id: `rtdb:${id}`,
-            data: {
-              ...data,
-              recipientUid: currentUid,
-              rtdbOnly: true,
-              rtdbId: id,
-            },
-            source: "rtdb",
-            sourceId: id,
-          });
-        });
-        if (firestoreSnapshotReceived) renderSnapshotResults();
-      },
-      (error) => {
-        console.error("[Student Notifications] Realtime Database query error:", {
-          uid: currentUid,
-          code: error?.code || "",
-          message: error?.message || String(error),
-        });
-      },
-    );
-    notificationUnsubscribes.push(unsubscribe);
-  }
-}
-
-function writeLocalNotificationChanges(item, changes) {
-  try {
-    const stored = JSON.parse(
-      localStorage.getItem(LOCAL_NOTIFICATIONS_KEY) || "[]",
-    );
-    if (!Array.isArray(stored)) return false;
-    const index = stored.findIndex((notification, itemIndex) =>
-      String(notification.id || `local-${itemIndex}`) === item.id &&
-      NOTIFICATION_RECIPIENT_FIELDS.some((field) =>
-        recipientIds.includes(String(notification[field] || "")),
-      ),
-    );
-    if (index < 0) return false;
-    const serializableChanges = Object.fromEntries(
-      Object.entries(changes).map(([key, value]) => [
-        key,
-        value && typeof value === "object" ? Date.now() : value,
-      ]),
-    );
-    stored[index] = { ...stored[index], ...serializableChanges };
-    localStorage.setItem(LOCAL_NOTIFICATIONS_KEY, JSON.stringify(stored));
-    const updated = normalizeNotification({
-      id: item.id,
-      data: () => stored[index],
+  registrationDocuments.forEach((registration, eventId) => {
+    const registrationStatus = String(registration.status || registration.registrationStatus || "registered")
+      .trim()
+      .toLowerCase()
+      .replace(/[\s_-]+/g, "");
+    if (
+      ["cancelled", "canceled", "withdrawn", "unregistered"].includes(registrationStatus) ||
+      registration.cancelledAt
+    ) return;
+    const event = eventDocuments.get(eventId);
+    if (!event) return;
+    const title = eventTitle(event);
+    const registeredAt = toMillis(registration.registeredAt);
+    derived.push({
+      id: deterministicId("registered", eventId, registeredAt),
+      eventId,
+      type: "registered",
+      title: `You're registered for ${title}`,
+      message: "Your registration is confirmed.",
+      createdAtMillis: registeredAt,
+      read: false,
+      source: "derived",
+      target: "participation",
     });
-    notifications = notifications.filter((notification) => notification.id !== item.id);
-    deletedNotifications = deletedNotifications.filter(
-      (notification) => notification.id !== item.id,
-    );
-    if (updated.deletedAt) deletedNotifications.push({ ...updated, localOnly: true });
-    else notifications.push({ ...updated, localOnly: true });
-    notifications.sort((left, right) => right.createdAtMillis - left.createdAtMillis);
-    deletedNotifications.sort((left, right) => right.createdAtMillis - left.createdAtMillis);
-    renderNotifications();
-    return true;
-  } catch (error) {
-    console.error("[Student Notifications] Could not update local notification:", error);
-    return false;
-  }
-}
-
-async function updateNotification(id, changes) {
-  const localItem = [...notifications, ...deletedNotifications]
-    .find((item) => item.id === id && item.localOnly);
-  if (localItem) {
-    writeLocalNotificationChanges(localItem, changes);
-    return;
-  }
-  const realtimeItem = [...notifications, ...deletedNotifications]
-    .find((item) => item.id === id && item.rtdbOnly);
-  if (realtimeItem) {
-    try {
-      const updates = Object.fromEntries(
-        Object.entries(changes).map(([key, value]) => [
-          key,
-          value && typeof value === "object" ? Date.now() : value,
-        ]),
-      );
-      await updateDatabase(
-        databaseRef(rtdb, `notifications/${currentUid}/${realtimeItem.rtdbId}`),
-        updates,
-      );
-    } catch (error) {
-      console.error("[Student Notifications] Could not update Realtime Database notification:", error);
+    const startAt = eventStartMillis(event);
+    if (startAt > now && startAt - now <= ONE_DAY) {
+      const tomorrow = new Date(now + ONE_DAY);
+      const isTomorrow = manilaDate(startAt) === manilaDate(tomorrow.getTime());
+      const hours = Math.max(1, Math.ceil((startAt - now) / (60 * 60 * 1000)));
+      derived.push({
+        id: deterministicId("reminder", eventId, startAt),
+        eventId,
+        type: "reminder",
+        title: isTomorrow ? `${title} starts tomorrow` : `${title} starts in ${hours} ${hours === 1 ? "hour" : "hours"}`,
+        message: "Your registered event is coming up.",
+        createdAtMillis: now,
+        read: false,
+        source: "derived",
+        target: "participation",
+      });
     }
-    return;
-  }
-  try {
-    await updateDoc(notificationReference(id), changes);
-  } catch (error) {
-    console.error("[Student Notifications] Could not update notification:", error);
-  }
-}
-
-function deleteLocalNotification(item) {
-  try {
-    const stored = JSON.parse(
-      localStorage.getItem(LOCAL_NOTIFICATIONS_KEY) || "[]",
-    );
-    if (!Array.isArray(stored)) return;
-    const filtered = stored.filter((notification, index) =>
-      String(notification.id || `local-${index}`) !== item.id ||
-      !NOTIFICATION_RECIPIENT_FIELDS.some((field) =>
-        recipientIds.includes(String(notification[field] || "")),
-      ),
-    );
-    localStorage.setItem(LOCAL_NOTIFICATIONS_KEY, JSON.stringify(filtered));
-    deletedNotifications = deletedNotifications.filter(
-      (notification) => notification.id !== item.id,
-    );
-    notifications = notifications.filter(
-      (notification) => notification.id !== item.id,
-    );
-    renderNotifications();
-  } catch (error) {
-    console.error("[Student Notifications] Could not delete local notification:", error);
-  }
-}
-
-async function permanentlyDeleteNotification(item) {
-  try {
-    if (item.localOnly) {
-      deleteLocalNotification(item);
-    } else if (item.rtdbOnly) {
-      await removeDatabase(
-        databaseRef(rtdb, `notifications/${currentUid}/${item.rtdbId}`),
-      );
-    } else {
-      await deleteDoc(notificationReference(item.id));
+    const status = eventStatus(event);
+    if (["cancelled", "canceled"].includes(status) || status === "rescheduled") {
+      const updatedAt = toMillis(event.updatedAt);
+      if (!updatedAt) return;
+      const type = status === "rescheduled" ? "rescheduled" : "cancelled";
+      derived.push({
+        id: deterministicId(type, eventId, updatedAt),
+        eventId,
+        type,
+        title: status === "rescheduled" ? `${title} was rescheduled` : `${title} was cancelled`,
+        message: status === "rescheduled"
+          ? "The event schedule has changed."
+          : "The organizer cancelled this event.",
+        createdAtMillis: updatedAt,
+        read: false,
+        source: "derived",
+        target: "participation",
+      });
     }
-  } catch (error) {
-    console.error("[Student Notifications] Could not permanently delete notification:", error);
-  }
+  });
+  return derived;
 }
 
-function renderDeletedNotifications() {
-  const list = document.getElementById("deletedNotificationList");
-  list.innerHTML = notificationsLoading
-    ? '<div class="empty-notifications">Loading notifications...</div>'
-    : notificationLoadError
-      ? `<div class="empty-notifications">${escapeHTML(notificationLoadError)}</div>`
-      : deletedNotifications.length
-    ? deletedNotifications
-        .map(
-          (item) => `
-    <article class="notification-card deleted-notification-card type-${escapeHTML(item.type)}" data-deleted-notification-id="${escapeHTML(item.id)}">
-      <h3 class="notification-title">${escapeHTML(item.title)}</h3>
-      <p class="notification-message">${escapeHTML(item.message)}</p>
-      <div class="notification-meta">${escapeHTML(item.statusLabel || "Recently Deleted")} · ${escapeHTML(item.time)}</div>
-      <div class="deleted-notification-actions">
-        <button type="button" data-deleted-action="restore">Restore</button>
-        <button type="button" data-deleted-action="delete-permanently">Delete Permanently</button>
-      </div>
-    </article>`,
-        )
-        .join("")
-    : '<div class="empty-notifications">Trash bin is empty.</div>';
+function mergedItems() {
+  const merged = new Map();
+  firestoreNotifications.forEach((item, id) => merged.set(id, normalizeItem(id, item, "firestore")));
+  rtdbNotifications.forEach((item, id) => {
+    if (!merged.has(id)) merged.set(id, normalizeItem(id, item, "rtdb"));
+  });
+  derivedItems().forEach((item) => {
+    if (!merged.has(item.id)) {
+      merged.set(item.id, normalizeItem(item.id, item, "derived"));
+    }
+  });
+  Object.entries(state.restored).forEach(([id, item]) => {
+    if (!merged.has(id)) merged.set(id, normalizeItem(id, item, item.source || "derived"));
+  });
+  Object.entries(state.deleted).forEach(([id, value]) => {
+    if (!merged.has(id) && value?.item) {
+      merged.set(id, normalizeItem(id, value.item, value.item.source || "derived"));
+    }
+  });
+  return [...merged.values()]
+    .filter((item) => !state.purged?.[item.id])
+    .sort((a, b) => b.createdAtMillis - a.createdAtMillis);
+}
+
+function updateBadge() {
+  const badge = document.getElementById("navNotifBadge");
+  if (!badge) return;
+  const unreadCount = notificationItems.filter((item) => !item.read && !item.deletedAt).length;
+  badge.textContent = unreadCount > 9 ? "9+" : unreadCount ? String(unreadCount) : "";
+  badge.hidden = unreadCount === 0;
+}
+
+function renderSkeleton() {
+  return `<div class="notification-skeleton" aria-hidden="true">${
+    Array.from({ length: 5 }, () => '<div class="skeleton-row"><i></i><span><b></b><small></small></span></div>').join("")
+  }</div>`;
+}
+
+function iconForType(type) {
+  const icons = {
+    published: '<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="13" rx="1.5"/><path d="M3 8h14M7 2.5v3M13 2.5v3"/></svg>',
+    registered: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 4 4 8-8"/></svg>',
+    reminder: "◷",
+    cancelled: "×",
+    rescheduled: "↻",
+    approved: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 4 4 8-8"/></svg>',
+    rejected: "!",
+    default: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M8 20a2 2 0 0 0 4 0"/></svg>',
+  };
+  return icons[type] || icons.default;
+}
+
+function renderRow(item, inTrash = false) {
+  const relativeTime = formatRelativeTime(item.createdAtMillis);
+  const date = notificationDate(item.createdAtMillis);
+  const typeLabel = {
+    published: "New event",
+    registered: "Registered",
+    reminder: "Reminder",
+    cancelled: "Cancelled",
+    rescheduled: "Rescheduled",
+    approved: "Approved",
+    rejected: "Rejected",
+  }[item.type] || item.tag || "";
+  const controls = inTrash
+    ? `<button type="button" data-action="restore" data-id="${escapeHTML(item.id)}" ${pendingNotificationWrites.has(item.id) ? "disabled" : ""}>Restore</button><button type="button" data-action="delete-forever" data-id="${escapeHTML(item.id)}" ${pendingNotificationWrites.has(item.id) ? "disabled" : ""}>Delete forever</button><small>Removed in ${Math.max(0, Math.ceil((item.deletedAt + TRASH_LIFETIME - Date.now()) / ONE_DAY))} days</small>`
+    : `<button class="notification-read-toggle" type="button" data-action="${item.read ? "unread" : "read"}" data-id="${escapeHTML(item.id)}" aria-label="Mark as ${item.read ? "unread" : "read"}" title="Mark as ${item.read ? "unread" : "read"}" ${pendingNotificationWrites.has(item.id) ? "disabled" : ""}><span aria-hidden="true"></span></button><button class="notification-trash-toggle" type="button" data-action="delete" data-id="${escapeHTML(item.id)}" aria-label="Move to Recently Deleted" title="Move to Recently Deleted" ${pendingNotificationWrites.has(item.id) ? "disabled" : ""}><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h12M8 6V4.5h4V6m-6.5 0 .7 10h7.6l.7-10M8.5 9v4m3-4v4" /></svg></button>`;
+  return `<li class="notification-card-item"><article class="notification-row${item.read ? "" : " is-unread"}" data-notification-id="${escapeHTML(item.id)}" tabindex="0" aria-label="${escapeHTML(item.title)}, ${item.read ? "read" : "unread"}">
+    <span class="notification-icon type-${escapeHTML(item.type)}" aria-hidden="true">${iconForType(item.type)}</span>
+    <span class="notification-copy"><strong class="notification-title">${escapeHTML(item.title)}</strong><span class="notification-message">${escapeHTML(item.message)}</span>
+      <span class="notification-meta">${typeLabel ? `<span class="notification-tag">${escapeHTML(typeLabel)}</span>` : ""}${date ? `<time>${escapeHTML(date)}</time>` : ""}${relativeTime ? `<span>${escapeHTML(relativeTime)}</span>` : ""}</span>
+      ${inTrash ? `<span class="notification-trash-actions">${controls}</span>` : ""}
+    </span>
+    ${inTrash ? "" : `<span class="notification-card-actions">${controls}</span>`}
+  </article></li>`;
 }
 
 function renderNotifications() {
-  const query = document
-    .getElementById("notificationSearch")
-    .value.trim()
-    .toLowerCase();
-  const visible = notifications.filter((item) => {
-    const filterMatch =
-      activeFilter === "all" ||
-      (activeFilter === "read" ? item.read : !item.read);
-    const textMatch =
-      !query || `${item.title} ${item.message}`.toLowerCase().includes(query);
-    return filterMatch && textMatch;
-  });
-  const list = document.getElementById("notificationList");
-  list.innerHTML = notificationsLoading
-    ? '<div class="empty-notifications">Loading notifications...</div>'
-    : notificationLoadError
-      ? `<div class="empty-notifications">${escapeHTML(notificationLoadError)}</div>`
-      : visible.length
-    ? visible
-        .map(
-          (item) => `
-    <article class="notification-card type-${escapeHTML(item.type)} ${item.read ? "is-read" : ""}" id="notification-card-${escapeHTML(item.id)}" data-notification-id="${escapeHTML(item.id)}" tabindex="0" aria-label="${escapeHTML(item.title)}, ${item.read ? "read" : "unread"}">
-      <div class="notification-actions">
-        <button class="notification-menu-toggle" type="button" aria-label="More actions for ${escapeHTML(item.title)}" aria-expanded="false">
-          <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><circle cx="4" cy="10" r="1.5"/><circle cx="10" cy="10" r="1.5"/><circle cx="16" cy="10" r="1.5"/></svg>
-        </button>
-        <div class="notification-menu" hidden>
-          <button type="button" data-notification-action="read">Read</button>
-          <button type="button" data-notification-action="unread">Unread</button>
-          <button type="button" data-notification-action="delete">Delete</button>
-        </div>
-      </div>
-      <h3 class="notification-title" id="notification-title-${escapeHTML(item.id)}" data-notification-field="title">${escapeHTML(item.title)}</h3>
-      <p class="notification-message" id="notification-message-${escapeHTML(item.id)}" data-notification-field="message">${escapeHTML(item.message)}</p>
-      <div class="notification-meta" id="notification-time-${escapeHTML(item.id)}" data-notification-field="time"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 3.5a4.5 4.5 0 0 0-4.5 4.5v2.4c0 .5-.2 1-.5 1.4L4 13h12l-1-1.2c-.3-.4-.5-.9-.5-1.4V8A4.5 4.5 0 0 0 10 3.5Z" stroke="currentColor" stroke-width="1.3"/><path d="M8.3 16a1.7 1.7 0 0 0 3.4 0" stroke="currentColor" stroke-width="1.3"/></svg>${item.statusLabel ? `${escapeHTML(item.statusLabel)} · ` : ""}${escapeHTML(item.time)}</div>
-    </article>`,
-        )
-        .join("")
-    : `<div class="empty-notifications">${
-        notifications.length
-          ? "No notifications match your filters."
-          : "No notifications yet."
-      }</div>`;
-  const unread = notifications.filter((item) => !item.read).length;
-  document.getElementById("navNotifBadge").textContent = unread;
-  document.getElementById("navNotifBadge").hidden = unread === 0;
-  renderDeletedNotifications();
-}
-
-async function markAllRead() {
-  const unread = notifications.filter((item) => !item.read);
-  for (const item of unread.filter((notification) => notification.localOnly)) {
-    await updateNotification(item.id, {
-      read: true,
-      readAt: Date.now(),
-    });
-  }
-  for (const item of unread.filter((notification) => notification.rtdbOnly)) {
-    await updateNotification(item.id, {
-      read: true,
-      readAt: Date.now(),
-    });
-  }
-  const cloudUnread = unread.filter((item) => !item.localOnly && !item.rtdbOnly);
-  for (let index = 0; index < cloudUnread.length; index += 450) {
-    const batch = writeBatch(db);
-    cloudUnread.slice(index, index + 450).forEach((item) => {
-      batch.update(notificationReference(item.id), {
-        read: true,
-        readAt: serverTimestamp(),
-      });
-    });
-    try {
-      await batch.commit();
-    } catch (error) {
-      console.error("[Student Notifications] Could not mark notifications as read:", error);
-      return;
-    }
-  }
-}
-
-async function deleteAllNotifications() {
-  if (!deletedNotifications.length) return;
-  if (!window.confirm("Permanently delete all recently deleted notifications?"))
-    return;
-  const nonFirestoreItems = deletedNotifications.filter(
-    (item) => item.localOnly || item.rtdbOnly,
+  if (!notificationRoot) return;
+  notificationItems = mergedItems();
+  updateBadge();
+  const activeItems = notificationItems.filter((item) => !item.deletedAt);
+  const trashItems = notificationItems.filter((item) => item.deletedAt && Date.now() - item.deletedAt <= TRASH_LIFETIME);
+  const unreadCount = activeItems.filter((item) => !item.read).length;
+  const search = searchQuery.trim().toLowerCase();
+  const visible = (showingTrash ? trashItems : activeItems).filter((item) =>
+    (!search || `${item.title} ${item.message}`.toLowerCase().includes(search)) &&
+    (showingTrash || activeFilter === "all" ||
+      (activeFilter === "unread" ? !item.read : item.read)),
   );
-  if (nonFirestoreItems.length) {
-    for (const item of nonFirestoreItems.filter((notification) => notification.rtdbOnly)) {
-      await permanentlyDeleteNotification(item);
-    }
+  const groups = ["Today", "This week", "Earlier"].map((name) => [
+    name,
+    visible.filter((item) => notificationGroup(item) === name),
+  ]);
+  const emptyTitle = showingTrash
+    ? "Recently Deleted is empty"
+    : activeFilter === "unread"
+      ? "No unread notifications"
+      : activeFilter === "read"
+        ? "You have no notifications"
+        : "You have no notifications";
+  const emptyMessage = showingTrash
+    ? "Notifications you delete will wait here for 30 days before they are removed."
+    : activeFilter === "unread"
+      ? "Everything has been read. Nice work."
+      : "New notifications will show up here.";
+  let content = "";
+  if (notificationsLoading && !notificationItems.length) {
+    content = renderSkeleton();
+  } else if (notificationError && !notificationItems.length) {
+    content = `<div class="notification-state" role="alert"><strong>Notifications couldn’t be loaded.</strong><p>${escapeHTML(notificationError)}</p><button type="button" class="notification-retry">Retry</button></div>`;
+  } else if (!visible.length) {
+    content = `<div class="notification-state"><span class="notification-state-icon" aria-hidden="true">${iconForType("default")}</span><strong>${emptyTitle}</strong><p>${emptyMessage}</p>${notificationError ? `<button type="button" class="notification-retry">Try again</button>` : ""}</div>`;
+  } else {
+    content = groups.filter(([, items]) => items.length).map(([name, items]) =>
+      `<section class="notification-group"><h2>${name.toUpperCase()}</h2><ul class="notification-list">${items.map((item) => renderRow(item, showingTrash)).join("")}</ul></section>`,
+    ).join("");
+  }
+  notificationRoot.innerHTML = `<section class="student-notifications" aria-labelledby="studentNotificationsTitle">
+    <header class="notifications-header">
+      <div><h1 id="studentNotificationsTitle">Notifications</h1>${notificationError ? `<p class="notification-source-warning">${escapeHTML(notificationError)} <button type="button" class="notification-retry-inline">Retry</button></p>` : ""}</div>
+    </header>
+    <div class="notification-toolbar">
+      <div class="notification-toolbar-left">
+        <nav class="notification-tabs" aria-label="Notification filter">
+          <button type="button" data-filter="all" aria-pressed="${!showingTrash && activeFilter !== "unread"}" class="${!showingTrash && activeFilter !== "unread" ? "is-active" : ""}">All</button>
+          <button type="button" data-filter="unread" aria-pressed="${!showingTrash && activeFilter === "unread"}" class="${!showingTrash && activeFilter === "unread" ? "is-active" : ""}">Unread <span>${unreadCount}</span></button>
+        </nav>
+        <label class="notification-read-filter">Show <select data-read-filter aria-label="Filter read notifications">${activeFilter === "read" ? '<option value="all">All</option><option value="read" selected>Read</option>' : '<option value="all" selected>All</option><option value="read">Read</option>'}</select></label>
+      </div>
+      <div class="notification-toolbar-actions">
+        ${showingTrash ? `<button type="button" class="notification-empty-trash" ${trashItems.length ? "" : "disabled"}>Empty trash</button>` : `<button type="button" class="mark-all-read" ${unreadCount ? "" : "disabled"}>Mark all as read</button>`}
+        <button type="button" class="notification-trash-button${showingTrash ? " is-active" : ""}" data-view-trash aria-label="${showingTrash ? "Return to notifications" : "Open Recently Deleted"}" title="${showingTrash ? "Return to notifications" : "Recently Deleted"}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h12M8 6V4.5h4V6m-6.5 0 .7 10h7.6l.7-10M8.5 9v4m3-4v4" /></svg></button>
+      </div>
+    </div>
+    ${showingTrash ? '<p class="notification-trash-info"><span aria-hidden="true">i</span> Deleted notifications stay here for 30 days, then they are removed for good.</p>' : ""}
+    ${searchQuery ? "" : ""}
+    <label class="notification-search"><span class="visually-hidden">Search notifications</span><input type="search" data-search value="${escapeHTML(searchQuery)}" placeholder="Search notifications" aria-label="Search notifications"></label>
+    <div class="notification-feed" aria-live="polite">${content}</div>
+    <div class="notification-toast" role="status" aria-live="polite">${undoDelete ? 'Moved to Recently Deleted <button type="button" data-action="undo-delete">Undo</button>' : escapeHTML(statusMessage)}</div>
+  </section>`;
+  const searchInput = notificationRoot.querySelector("[data-search]");
+  searchInput.addEventListener("input", (event) => {
+    searchQuery = event.target.value;
+    const position = event.target.selectionStart;
+    renderNotifications();
+    const updatedSearch = notificationRoot.querySelector("[data-search]");
+    updatedSearch.focus();
+    updatedSearch.setSelectionRange(position, position);
+  });
+}
+
+async function persistRead(item, read) {
+  const previousRead = state.read[item.id];
+  state.read[item.id] = Boolean(read);
+  saveState();
+  if (item.source === "firestore" || item.source === "rtdb") {
+    pendingNotificationWrites.add(item.id);
+    renderNotifications();
     try {
-      const localIds = new Set(
-        nonFirestoreItems.filter((item) => item.localOnly).map((item) => item.id),
-      );
-      const stored = JSON.parse(
-        localStorage.getItem(LOCAL_NOTIFICATIONS_KEY) || "[]",
-      );
-      if (Array.isArray(stored)) {
-        localStorage.setItem(
-          LOCAL_NOTIFICATIONS_KEY,
-          JSON.stringify(stored.filter((notification, index) =>
-            !localIds.has(String(notification.id || `local-${index}`)) ||
-            !NOTIFICATION_RECIPIENT_FIELDS.some((field) =>
-              recipientIds.includes(String(notification[field] || "")),
-            ),
-          )),
+      if (item.source === "firestore") await markFirestoreRead(item.id, read);
+      else {
+        await updateRtdbValue(
+          databaseRef(rtdb, `notifications/${currentUid}/${item.id}`),
+          { read: Boolean(read) },
         );
       }
-      deletedNotifications = deletedNotifications.filter(
-        (item) => !item.localOnly && !item.rtdbOnly,
-      );
+    } catch (error) {
+      if (previousRead === undefined) delete state.read[item.id];
+      else state.read[item.id] = previousRead;
+      notificationError = "Could not update this notification. Please try again.";
+      console.error("[Student Notifications] Could not update notification read state:", error);
+      return false;
+    } finally {
+      pendingNotificationWrites.delete(item.id);
+      saveState();
+    }
+  }
+  renderNotifications();
+  return true;
+}
+
+async function markFirestoreRead(id, read = true) {
+  await updateDoc(doc(db, "notifications", id), { read });
+}
+
+async function deleteForever(item) {
+  if (!window.confirm("Permanently delete this notification? This cannot be undone.")) return;
+  pendingNotificationWrites.add(item.id);
+  renderNotifications();
+  try {
+    if (item.source === "firestore") await deleteDoc(doc(db, "notifications", item.id));
+    if (item.source === "rtdb") {
+      await removeRtdbValue(databaseRef(rtdb, `notifications/${currentUid}/${item.id}`));
+    }
+    state.purged[item.id] = true;
+    delete state.deleted[item.id];
+    delete state.restored[item.id];
+    delete state.read[item.id];
+    saveState();
+  } catch (error) {
+    notificationError = "Could not permanently delete this notification. Please try again.";
+    console.error("[Student Notifications] Could not permanently delete notification:", error);
+  } finally {
+    pendingNotificationWrites.delete(item.id);
+    renderNotifications();
+  }
+}
+
+function handleItemAction(action, id) {
+  const item = notificationItems.find((candidate) => candidate.id === id);
+  if (!item) return;
+  if (action === "read" || action === "unread") {
+    void persistRead(item, action === "read");
+  } else if (action === "delete") {
+    delete state.restored[id];
+    state.deleted[id] = {
+      deletedAt: Date.now(),
+      item: {
+        id: item.id,
+        eventId: item.eventId,
+        type: item.type,
+        title: item.title,
+        message: item.message,
+        createdAt: item.createdAtMillis,
+        read: item.read,
+        source: item.source,
+        target: item.target || "",
+      },
+    };
+    saveState();
+    undoDelete = id;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      undoDelete = null;
       renderNotifications();
-    } catch (error) {
-      console.error("[Student Notifications] Could not permanently delete local notifications:", error);
-    }
+    }, 6000);
+    renderNotifications();
+  } else if (action === "restore") {
+    const savedItem = state.deleted[id]?.item;
+    if (savedItem) state.restored[id] = savedItem;
+    delete state.deleted[id];
+    saveState();
+    renderNotifications();
+  } else if (action === "delete-forever") {
+    void deleteForever(item);
   }
-  for (const item of deletedNotifications.filter((notification) => !notification.localOnly)) {
-    try {
-      await deleteDoc(notificationReference(item.id));
-    } catch (error) {
-      console.error("[Student Notifications] Could not permanently delete notification:", error);
+}
+
+function openItem(item) {
+  if (!item) return;
+  if (!item.read) persistRead(item, true);
+  if (!item.eventId) return;
+  const target = item.target === "participation" || item.type === "registered" || item.type === "reminder"
+    ? "Student-Participation.html"
+    : "Events.html";
+  window.location.assign(`${target}?eventId=${encodeURIComponent(item.eventId)}`);
+}
+
+function bindPageInteractions() {
+  notificationRoot?.addEventListener("click", (event) => {
+    const target = event.target;
+    const filterButton = target.closest("[data-filter]");
+    if (filterButton) {
+      activeFilter = filterButton.dataset.filter;
+      renderNotifications();
+      return;
     }
+    if (target.closest("[data-view-trash]")) {
+      showingTrash = !showingTrash;
+      renderNotifications();
+      return;
+    }
+    if (target.closest(".notification-empty-trash")) {
+      const count = notificationItems.filter((item) => item.deletedAt).length;
+      if (!count || !window.confirm(`Permanently delete all ${count} notifications? This cannot be undone.`)) return;
+      void emptyTrash();
+      return;
+    }
+    if (target.closest(".mark-all-read")) {
+      const unread = notificationItems.filter((item) => !item.read && !item.deletedAt);
+      if (unread.length) {
+        void Promise.all(unread.map((item) => persistRead(item, true))).then((results) => {
+          statusMessage = results.every(Boolean)
+            ? "All notifications marked as read."
+            : "Some notifications could not be updated.";
+          renderNotifications();
+          window.setTimeout(() => {
+            statusMessage = "";
+            renderNotifications();
+          }, 3000);
+        });
+      }
+      return;
+    }
+    if (target.closest("[data-action='undo-delete']")) {
+      event.stopPropagation();
+      if (undoDelete && state.deleted[undoDelete]) {
+        state.restored[undoDelete] = state.deleted[undoDelete].item;
+        delete state.deleted[undoDelete];
+        saveState();
+      }
+      undoDelete = null;
+      clearTimeout(toastTimer);
+      renderNotifications();
+      return;
+    }
+    if (target.closest(".notification-retry")) {
+      restartSubscriptions();
+      return;
+    }
+    if (target.closest(".notification-retry-inline")) {
+      restartSubscriptions();
+      return;
+    }
+    const menuToggle = target.closest(".notification-menu-toggle");
+    if (menuToggle) {
+      const row = menuToggle.closest(".notification-row");
+      const menu = row.querySelector(".notification-menu");
+      const open = !menu.hidden;
+      notificationRoot.querySelectorAll(".notification-menu").forEach((entry) => {
+        entry.hidden = true;
+      });
+      notificationRoot.querySelectorAll(".notification-menu-toggle").forEach((button) => {
+        button.setAttribute("aria-expanded", "false");
+      });
+      menu.hidden = open;
+      menuToggle.setAttribute("aria-expanded", String(!open));
+      event.stopPropagation();
+      return;
+    }
+    const action = target.closest("[data-action]");
+    if (action) {
+      event.stopPropagation();
+      handleItemAction(action.dataset.action, action.dataset.id);
+      return;
+    }
+    const row = target.closest("[data-notification-id]");
+    if (row && !showingTrash)
+      openItem(notificationItems.find((item) => item.id === row.dataset.notificationId));
+  });
+  notificationRoot?.addEventListener("keydown", (event) => {
+    if ((event.key === "Enter" || event.key === " ") && event.target.matches(".notification-row")) {
+      event.preventDefault();
+      openItem(notificationItems.find((item) => item.id === event.target.dataset.notificationId));
+    }
+  });
+  notificationRoot?.addEventListener("change", (event) => {
+    if (!event.target.matches("[data-read-filter]")) return;
+    activeFilter = event.target.value === "read" ? "read" : "all";
+    renderNotifications();
+  });
+}
+
+function stopSubscriptions() {
+  unsubscribeFirestore.forEach((unsubscribe) => unsubscribe());
+  unsubscribeFirestore = [];
+  unsubscribeEvents?.();
+  unsubscribeEvents = null;
+  unsubscribeRegistrations?.();
+  unsubscribeRegistrations = null;
+  unsubscribeRtdb?.();
+  unsubscribeRtdb = null;
+  if (derivedRefreshInterval) {
+    clearInterval(derivedRefreshInterval);
+    derivedRefreshInterval = null;
+  }
+  rtdbRef = null;
+  firestoreReady = new Set();
+  sourceErrors.clear();
+  eventDocuments.clear();
+  registrationDocuments.clear();
+  firestoreNotifications.clear();
+  rtdbNotifications.clear();
+  detailEventLoads.clear();
+}
+
+function syncItems(version) {
+  if (version !== subscriptionVersion) return;
+  notificationItems = mergedItems();
+  const everyFirestoreQuerySettled = firestoreReady.size === 2;
+  notificationsLoading = !everyFirestoreQuerySettled && !eventDocuments.size && !registrationDocuments.size;
+  notificationError = [...sourceErrors.values()].join(" ");
+  renderNotifications();
+}
+
+function subscribeToFirestoreNotifications(uid, version) {
+  const queryResults = new Map([["userId", new Map()], ["recipientUid", new Map()]]);
+  const queryFields = ["userId", "recipientUid"];
+  queryFields.forEach((field) => {
+    const unsubscribe = onSnapshot(
+      query(collection(db, "notifications"), where(field, "==", uid)),
+      (snapshot) => {
+        if (version !== subscriptionVersion || currentUid !== uid) return;
+        const values = queryResults.get(field);
+        values.clear();
+        snapshot.docs.forEach((item) => values.set(item.id, item.data()));
+        firestoreNotifications.clear();
+        queryResults.forEach((items) => items.forEach((data, id) => firestoreNotifications.set(id, data)));
+        firestoreReady.add(field);
+        sourceErrors.delete(`notification-${field}`);
+        syncItems(version);
+      },
+      (error) => {
+        if (version !== subscriptionVersion || currentUid !== uid) return;
+        firestoreReady.add(field);
+        sourceErrors.set(
+          `notification-${field}`,
+          error?.code === "permission-denied"
+            ? `The ${field} notification source is unavailable.`
+            : "A notification source could not be loaded.",
+        );
+        debug(`Firestore notification query (${field}) failed:`, error);
+        syncItems(version);
+      },
+    );
+    unsubscribeFirestore.push(unsubscribe);
+  });
+}
+
+function loadMissingRegistrationEvents(version) {
+  registrationDocuments.forEach((registration, eventId) => {
+    if (
+      eventDocuments.has(eventId) ||
+      detailEventLoads.has(eventId) ||
+      version !== subscriptionVersion
+    ) return;
+    detailEventLoads.add(eventId);
+    getDoc(doc(db, "events", eventId)).then((snapshot) => {
+      if (version !== subscriptionVersion || !snapshot.exists()) return;
+      eventDocuments.set(eventId, snapshot.data());
+      syncItems(version);
+    }).catch((error) => {
+      debug("Could not join registration to event:", eventId, error);
+    });
+  });
+}
+
+function subscribeToDerivedSources(uid, version) {
+  unsubscribeEvents = onSnapshot(
+    collection(db, "events"),
+    (snapshot) => {
+      if (version !== subscriptionVersion || currentUid !== uid) return;
+      eventDocuments = new Map(snapshot.docs.map((item) => [item.id, item.data()]));
+      sourceErrors.delete("published-events");
+      syncItems(version);
+    },
+    (error) => {
+      if (version !== subscriptionVersion) return;
+      debug("Published event listener failed:", error);
+      sourceErrors.set("published-events", "Published event notifications are temporarily unavailable.");
+      syncItems(version);
+    },
+  );
+  unsubscribeRegistrations = onSnapshot(
+    query(collectionGroup(db, "registrations"), where("uid", "==", uid)),
+    (snapshot) => {
+      if (version !== subscriptionVersion || currentUid !== uid) return;
+      registrationDocuments.clear();
+      snapshot.docs.forEach((item) => {
+        const eventId = item.ref.parent.parent?.id;
+        if (eventId) registrationDocuments.set(eventId, item.data());
+      });
+      sourceErrors.delete("registrations");
+      loadMissingRegistrationEvents(version);
+      syncItems(version);
+    },
+    (error) => {
+      if (version !== subscriptionVersion) return;
+      debug("Student registration listener failed:", error);
+      sourceErrors.set("registrations", "Registration-based notifications are temporarily unavailable.");
+      syncItems(version);
+    },
+  );
+}
+
+function subscribeToRtdb(uid, version) {
+  if (!isRtdbConfigured || !rtdb) return;
+  try {
+    rtdbRef = databaseRef(rtdb, `notifications/${uid}`);
+    unsubscribeRtdb = onValue(
+      rtdbRef,
+      (snapshot) => {
+        if (version !== subscriptionVersion || currentUid !== uid) return;
+        rtdbNotifications.clear();
+        Object.entries(snapshot.val() || {}).forEach(([id, data]) => {
+          if (data && typeof data === "object") rtdbNotifications.set(id, data);
+        });
+        syncItems(version);
+      },
+      (error) => {
+        debug("Realtime Database notification listener failed:", error);
+      },
+    );
+  } catch (error) {
+    debug("Could not subscribe to Realtime Database notifications:", error);
+    rtdbRef = null;
+    unsubscribeRtdb = null;
   }
 }
 
-function updateNotificationPanelControls(showingDeletedNotifications) {
-  const toggle = document.getElementById("showDeletedNotifications");
-  const label = document.getElementById("showDeletedNotificationsLabel");
-  const icon = document.getElementById("showDeletedNotificationsIcon");
-  const action = document.getElementById("markAllRead");
-  toggle.setAttribute("aria-pressed", String(showingDeletedNotifications));
-  label.textContent = showingDeletedNotifications
-    ? "All Notifications"
-    : "Recently Deleted";
-  action.textContent = showingDeletedNotifications
-    ? "Delete All"
-    : "Mark All As Read";
-  icon.innerHTML = showingDeletedNotifications
-    ? '<path d="M3.5 5.5h13M5 5.5v10h10v-10M7.5 3.5h5l1 2h-7l1-2M8 8v5m4-5v5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>'
-    : '<path d="M4 6h12M8 6V4.5h4V6m-6.5 0 .7 10h7.6l.7-10M8.5 9v4m3-4v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>';
+function startSubscriptions(uid) {
+  stopSubscriptions();
+  const version = ++subscriptionVersion;
+  notificationsLoading = true;
+  notificationError = "";
+  renderNotifications();
+  if (!db) {
+    notificationsLoading = false;
+    notificationError = "Notifications are unavailable because Firebase is not configured.";
+    renderNotifications();
+    return;
+  }
+  subscribeToFirestoreNotifications(uid, version);
+  subscribeToDerivedSources(uid, version);
+  subscribeToRtdb(uid, version);
+  derivedRefreshInterval = setInterval(() => syncItems(version), 60000);
 }
 
-function swapNotificationPanels() {
-  const panels = document.getElementById("notificationPanels");
-  const allPanel = document.getElementById("allNotificationsPanel");
-  const deletedPanel = document.getElementById("deletedNotificationsPanel");
-  const firstPanel = panels.querySelector(":scope > .notifications-panel");
-  const showingDeletedNotifications =
-    firstPanel.id !== "deletedNotificationsPanel";
-  if (showingDeletedNotifications) panels.insertBefore(deletedPanel, allPanel);
-  else panels.insertBefore(allPanel, deletedPanel);
-  updateNotificationPanelControls(showingDeletedNotifications);
+function restartSubscriptions() {
+  if (currentUid) startSubscriptions(currentUid);
 }
 
-document.addEventListener("DOMContentLoaded", () => {
+async function initializeStudent(user) {
+  if (!user?.uid) return;
+  currentUid = user.uid;
+  readState(currentUid);
+  try {
+    studentProfile = await loadStudentProfile(user);
+    renderStudentSidebar(studentProfile);
+  } catch (error) {
+    debug("Could not load student profile for event visibility:", error);
+    studentProfile = {};
+  }
+  if (auth?.currentUser?.uid !== user.uid) return;
+  startSubscriptions(currentUid);
+}
+
+function initializePage() {
+  if (!notificationRoot) return;
+  notificationRoot.innerHTML = "";
   document.querySelectorAll(".nav-item").forEach((item) => {
     const label = item.querySelector(".nav-label");
     if (label) item.title = label.textContent.trim();
   });
-  const todayDate = document.getElementById("todayDate");
-  if (todayDate) {
-    todayDate.textContent = new Date().toLocaleDateString("en-US", {
-      year: "numeric",
-      month: "long",
-      day: "numeric",
-    });
-  }
   try {
     localStorage.removeItem("sidebarCollapsed");
-    const sidebar = document.getElementById("sidebar");
-    if (sidebar) sidebar.classList.remove("is-collapsed");
-  } catch {}
-  document
-    .querySelector(".nav-item.logout")
-    .addEventListener("click", () =>
-      clearCachedStudentProfile(),
-    );
-  document
-    .getElementById("notificationSearch")
-    .addEventListener("input", renderNotifications);
-  document.getElementById("markAllRead").addEventListener("click", () => {
-    const firstPanel = document
-      .getElementById("notificationPanels")
-      .querySelector(":scope > .notifications-panel");
-    const showingDeletedNotifications =
-      firstPanel.id === "deletedNotificationsPanel";
-    if (showingDeletedNotifications) deleteAllNotifications();
-    else markAllRead();
-  });
-  document
-    .getElementById("showDeletedNotifications")
-    .addEventListener("click", () => {
-      swapNotificationPanels();
-    });
-  window.enhanceDropdownSelects?.("#notificationFilter");
-  document
-    .getElementById("notificationFilter")
-    .addEventListener("change", (event) => {
-      activeFilter = event.target.value;
-      renderNotifications();
-    });
-  document
-    .getElementById("notificationList")
-    .addEventListener("click", (event) => {
-      const card = event.target.closest("[data-notification-id]");
-      if (!card) return;
-      const item = notifications.find(
-        (notification) => notification.id === card.dataset.notificationId,
-      );
-      const menuToggle = event.target.closest(".notification-menu-toggle");
-      const menuAction = event.target.closest("[data-notification-action]");
-      if (menuToggle) {
-        const menu = card.querySelector(".notification-menu");
-        const isOpen = !menu.hidden;
-        document.querySelectorAll(".notification-menu").forEach((itemMenu) => {
-          itemMenu.hidden = true;
-        });
-        document
-          .querySelectorAll(".notification-menu-toggle")
-          .forEach((toggle) => toggle.setAttribute("aria-expanded", "false"));
-        menu.hidden = isOpen;
-        menuToggle.setAttribute("aria-expanded", String(!isOpen));
-        return;
-      }
-      if (menuAction) {
-        event.stopPropagation();
-        if (!item) return;
-        if (menuAction.dataset.notificationAction === "delete") {
-          document
-            .querySelectorAll(".notification-menu")
-            .forEach((itemMenu) => {
-              itemMenu.hidden = true;
-            });
-          openDeleteConfirmation(item.id);
-          return;
-        } else {
-          item.read = menuAction.dataset.notificationAction === "read";
-          updateNotification(item.id, {
-            read: item.read,
-            readAt: item.read ? serverTimestamp() : null,
-          });
-        }
-        renderNotifications();
-        return;
-      }
-      if (item) {
-        item.read = true;
-        updateNotification(item.id, {
-          read: true,
-          readAt: serverTimestamp(),
-        });
-        renderNotifications();
-        openNotificationDetails(item);
-      }
-    });
-  document
-    .getElementById("deletedNotificationList")
-    .addEventListener("click", (event) => {
-      const action = event.target.closest("[data-deleted-action]");
-      const card = event.target.closest("[data-deleted-notification-id]");
-      if (!action || !card) return;
-      const item = deletedNotifications.find(
-        (notification) =>
-          notification.id === card.dataset.deletedNotificationId,
-      );
-      if (!item) return;
-      if (action.dataset.deletedAction === "restore") {
-        updateNotification(item.id, { deletedAt: null });
-      } else {
-        permanentlyDeleteNotification(item);
-      }
-    });
-  document
-    .getElementById("notificationList")
-    .addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
-      if (event.target.closest(".notification-menu")) return;
-      const card = event.target.closest("[data-notification-id]");
-      if (!card) return;
-      event.preventDefault();
-      const item = notifications.find(
-        (notification) => notification.id === card.dataset.notificationId,
-      );
-      if (item) {
-        item.read = true;
-        updateNotification(item.id, {
-          read: true,
-          readAt: serverTimestamp(),
-        });
-        renderNotifications();
-        openNotificationDetails(item);
-      }
-    });
-  document
-    .getElementById("notificationModalClose")
-    .addEventListener("click", closeNotificationDetails);
-  document
-    .getElementById("notificationModalOverlay")
-    .addEventListener("click", (event) => {
-      if (event.target.id === "notificationModalOverlay")
-        closeNotificationDetails();
-    });
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") closeNotificationDetails();
-  });
-  document
-    .getElementById("notificationViewEvent")
-    .addEventListener("click", () => {
-      const eventId = document.getElementById("notificationViewEvent").dataset
-        .eventId;
-      const event = (window.RECOVIBE_EVENTS || []).find(
-        (item) => String(item.id || item.eventId) === String(eventId),
-      );
-      if (!event) return;
-      const notificationId = document.querySelector(
-        "#notificationModalOverlay .notification-modal",
-      ).dataset.notificationId;
-      closeNotificationDetails();
-      document.getElementById(`notification-card-${notificationId}`)?.focus();
-      window.RecovibeStudentEventDetails?.open(event);
-    });
-  document
-    .getElementById("confirmDeleteNotification")
-    .addEventListener("click", deletePendingNotification);
-  document
-    .getElementById("deleteConfirmClose")
-    .addEventListener("click", closeDeleteConfirmation);
-  document
-    .getElementById("cancelDeleteNotification")
-    .addEventListener("click", closeDeleteConfirmation);
-  document
-    .getElementById("deleteConfirmOverlay")
-    .addEventListener("click", (event) => {
-      if (event.target.id === "deleteConfirmOverlay") closeDeleteConfirmation();
-    });
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") closeDeleteConfirmation();
-  });
-  updateNotificationPanelControls(false);
+    document.getElementById("sidebar")?.classList.remove("is-collapsed");
+  } catch (error) {
+    debug("Could not initialize sidebar state:", error);
+  }
+  document.querySelector(".nav-item.logout")?.addEventListener("click", clearCachedStudentProfile);
+  bindPageInteractions();
   renderNotifications();
-  if (!auth || !db) {
+  if (!auth) {
     notificationsLoading = false;
-    notificationLoadError = "Notifications are unavailable because Firebase is not configured.";
+    notificationError = "Sign in to view your notifications.";
     renderNotifications();
     return;
   }
-  logNotificationStep("auth-wait-start");
-  authReady
-    .then(() => {
-      onAuthStateChanged(
-        auth,
-        async (user) => {
-          notificationUnsubscribes.forEach((unsubscribe) => unsubscribe());
-          notificationUnsubscribes = [];
-          notificationSubscriptionVersion += 1;
-          if (currentUid && currentUid !== (user?.uid || "")) {
-            renderStudentSidebar({});
-            notifications = [];
-            deletedNotifications = [];
-            renderNotifications();
-          }
-          currentUid = user?.uid || "";
-          logNotificationStep("auth-wait-success", {
-            authenticated: Boolean(user),
-            uid: currentUid,
-            appName: auth.app.name,
-            projectId: auth.app.options.projectId,
-          });
-          if (!user) {
-            clearCachedStudentProfile();
-            notifications = [];
-            deletedNotifications = [];
-            recipientIds = [];
-            notificationsLoading = false;
-            notificationLoadError = "Sign in to view your notifications.";
-            renderStudentSidebar({});
-            renderNotifications();
-            return;
-          }
-          notificationsLoading = true;
-          notificationLoadError = "";
-          renderNotifications();
-          logNotificationStep("profile-fetch-start", {
-            uid: user.uid,
-            projectId: auth.app.options.projectId,
-          });
-          try {
-            const profile = await loadStudentProfile(user);
-            if (currentUid !== user.uid) return;
-            renderStudentSidebar(profile);
-            const ids = getRecipientIds(user, profile);
-            subscribeToNotifications(user.uid, ids);
-            logNotificationStep("profile-fetch-success", {
-              uid: user.uid,
-              projectId: auth.app.options.projectId,
-              found: true,
-              recipientIds,
-            });
-          } catch (error) {
-            console.error("[Student Notifications] profile-fetch-error", {
-              uid: user.uid,
-              projectId: auth.app.options.projectId,
-              code: error?.code || "",
-              message: error?.message || String(error),
-            });
-            if (currentUid === user.uid) {
-              subscribeToNotifications(user.uid, [user.uid]);
-              renderStudentSidebar({});
-            }
-          }
-        },
-        (error) => {
-          notificationsLoading = false;
-          notificationLoadError = "Your sign-in could not be verified.";
-          console.error("[Student Notifications] auth-wait-error", error);
-          renderNotifications();
-        },
-      );
-    })
-    .catch((error) => {
-      notificationsLoading = false;
-      notificationLoadError = "Firebase authentication could not be initialized.";
-      console.error("[Student Notifications] auth initialization failed:", error);
-      renderNotifications();
+  authReady.then(() => {
+    unsubscribeAuth = onAuthStateChanged(auth, (user) => {
+      stopSubscriptions();
+      if (!user) {
+        currentUid = "";
+        notificationItems = [];
+        notificationsLoading = false;
+        notificationError = "Sign in to view your notifications.";
+        renderNotifications();
+        return;
+      }
+      initializeStudent(user);
     });
-});
-
-function openNotificationDetails(item) {
-  const eventItem = (window.RECOVIBE_EVENTS || []).find(
-    (event) => String(event.id || event.eventId) === String(item.eventId),
-  );
-  const modal = document.querySelector(
-    "#notificationModalOverlay .notification-modal",
-  );
-  modal.id = `notification-details-${item.id}`;
-  modal.dataset.notificationId = item.id;
-  const field = (name) =>
-    modal.querySelector(`[data-notification-field="${name}"]`);
-  field("title").id = `notification-detail-title-${item.id}`;
-  field("from").id = `notification-detail-from-${item.id}`;
-  field("time").id = `notification-detail-time-${item.id}`;
-  field("message").id = `notification-detail-message-${item.id}`;
-  field("title").textContent = item.title;
-  field("from").textContent = item.from ? `From ${item.from}` : "";
-  field("time").textContent = item.time;
-  field("message").textContent = item.message;
-  modal.setAttribute("aria-labelledby", `notification-detail-title-${item.id}`);
-  const reason = document.getElementById("notificationModalReason");
-  reason.textContent = item.reason ? `Reason: ${item.reason}` : "";
-  reason.hidden = !item.reason;
-  const eventDetails = document.getElementById("notificationModalEvent");
-  const viewEvent = document.getElementById("notificationViewEvent");
-  if (eventItem) {
-    document.getElementById("notificationEventLocation").textContent =
-      eventItem.location;
-    document.getElementById("notificationEventTime").textContent =
-      eventItem.time;
-    document.getElementById("notificationEventRoom").textContent =
-      eventItem.room;
-    let savedSlots = {};
-    try {
-      savedSlots = JSON.parse(
-        localStorage.getItem("recovibeEventSlots") || "{}",
-      );
-    } catch (error) {
-      savedSlots = {};
-    }
-    const slotsOpen =
-      savedSlots[String(eventItem.id || eventItem.eventId)] ??
-      eventItem.slotsOpen ??
-      eventItem.slots ??
-      0;
-    document.getElementById("notificationEventSlots").textContent =
-      eventItem.capacityMode === "N/A"
-        ? "No capacity limit"
-        : `${slotsOpen} of ${eventItem.maxSlots ?? eventItem.capacity ?? slotsOpen} slots open`;
-    eventDetails.hidden = false;
-    viewEvent.hidden = false;
-    viewEvent.dataset.eventId = eventItem.id;
-  } else {
-    eventDetails.hidden = true;
-    viewEvent.hidden = true;
-  }
-  document.getElementById("notificationModalOverlay").hidden = false;
-}
-
-function closeNotificationDetails() {
-  document.getElementById("notificationModalOverlay").hidden = true;
-}
-
-function openDeleteConfirmation(id) {
-  pendingDeleteId = id;
-  document.getElementById("deleteConfirmOverlay").hidden = false;
-}
-
-function closeDeleteConfirmation() {
-  pendingDeleteId = null;
-  document.getElementById("deleteConfirmOverlay").hidden = true;
-}
-
-function deletePendingNotification() {
-  const item = notifications.find(
-    (notification) => notification.id === pendingDeleteId,
-  );
-  if (!item) return closeDeleteConfirmation();
-  updateNotification(item.id, {
-    deletedAt: serverTimestamp(),
+  }).catch((error) => {
+    debug("Could not initialize authenticated notifications:", error);
+    notificationsLoading = false;
+    notificationError = "Notifications could not be initialized. Please retry.";
+    renderNotifications();
   });
-  closeDeleteConfirmation();
+  window.addEventListener("pagehide", () => {
+    stopSubscriptions();
+    unsubscribeAuth?.();
+    unsubscribeAuth = null;
+  }, { once: true });
 }
+
+initializePage();

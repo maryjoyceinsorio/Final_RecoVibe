@@ -639,6 +639,7 @@ loadCachedOrganizations();
     clientRequestId: null,
     dirty: false,
     selectedCategories: [],
+    facultyInCharge: null,
     participatingFaculty: [],
     participantDocs: [],
     legacyParticipantDocs: [],
@@ -1004,6 +1005,36 @@ loadCachedOrganizations();
   // 8. Load Faculty Pool from Database (Firestore adminUser / users & RTDB)
   let dbFacultyPool = [];
   let isFacultyDbInitialized = false;
+  let facultyLoadState = "loading";
+  let facultyLoadError = "";
+
+  function normalizeFacultySearchText(value) {
+    return String(value || "")
+      .normalize("NFD")
+      .replace(/\p{Diacritic}/gu, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+  }
+
+  function isEligibleFaculty(data) {
+    const status = String(data.status || data.accountStatus || "").toLowerCase();
+    return data.active !== false &&
+      data.isActive !== false &&
+    data.eligible !== false &&
+    data.isEligible !== false &&
+      data.enabled !== false &&
+      data.isEnabled !== false &&
+      data.disabled !== true &&
+      data.isDisabled !== true &&
+      !["inactive", "disabled", "suspended"].includes(status);
+  }
+
+  function notifyFacultyPoolUpdated() {
+    updateAllReadinessChecks();
+    const input = document.getElementById("facultyInChargeSearchInput");
+    if (input) input.dispatchEvent(new Event("faculty-pool-updated"));
+  }
 
   function loadFacultyPool() {
     if (!isFacultyDbInitialized) {
@@ -1026,32 +1057,41 @@ loadCachedOrganizations();
           snapshot.docs.forEach((docSnap) => {
             const data = docSnap.data() || {};
             const role = String(data.role || data.userRole || "").toLowerCase();
-            if (role.includes("teach") || role.includes("facult") || role.includes("prof") || role.includes("instructor") || role.includes("adviser")) {
-              const familyFirstName = [data.lastName, data.firstName].filter(Boolean).join(" ");
-              const name = data.fullName || familyFirstName || data.name || data.displayName;
+            if (isEligibleFaculty(data) && (role.includes("teach") || role.includes("facult") || role.includes("prof") || role.includes("instructor") || role.includes("adviser"))) {
+              const fullName = [data.firstName, data.middleName, data.lastName].filter(Boolean).join(" ");
+              const name = data.fullName || fullName || data.name || data.displayName;
               if (name && typeof name === "string" && name.trim()) {
                 const cleanName = name.trim();
                 loaded.push({
                   id: docSnap.id,
                   name: cleanName,
+                  searchableName: fullName,
                   email: data.email || `${cleanName.toLowerCase().replace(/\s+/g, ".")}@pup.edu.ph`,
-                  department: data.department || "Faculty",
+                  department: data.department || "",
+                  facultyId: data.facultyId || data.employeeId || data.accountNumber || data.idNumber || "",
                 });
               }
             }
           });
 
+          const currentDocumentIds = new Set(snapshot.docs.map((docSnap) => docSnap.id));
           const mergedMap = new Map(
-            dbFacultyPool.map((faculty) => [faculty.name.toLowerCase(), faculty]),
+            dbFacultyPool
+              .filter((faculty) => !currentDocumentIds.has(faculty.id))
+              .map((faculty) => [faculty.name.toLowerCase(), faculty]),
           );
           loaded.forEach((faculty) => mergedMap.set(faculty.name.toLowerCase(), faculty));
           dbFacultyPool = Array.from(mergedMap.values());
+          facultyLoadState = "ready";
+          facultyLoadError = "";
+          notifyFacultyPoolUpdated();
         }, (err) => {
           console.warn("[CreateEvent] adminUser listener failed, trying getDocs fallback:", err);
           fetchDatabaseFacultyOnce();
         });
       } catch (err) {
         console.warn("[CreateEvent] Failed to listen to adminUser:", err);
+        facultyLoadState = "loading";
         fetchDatabaseFacultyOnce();
       }
 
@@ -1105,19 +1145,27 @@ loadCachedOrganizations();
   }
 
       fetchDatabaseFacultyOnce();
+    } else {
+      facultyLoadState = "error";
+      facultyLoadError = "Faculty list is unavailable because the database is not configured.";
     }
   }
 
   async function fetchDatabaseFacultyOnce() {
-    if (!isFirebaseConfigured || !db) return;
+    if (!isFirebaseConfigured || !db) {
+      facultyLoadState = "error";
+      facultyLoadError = "Faculty list is unavailable because the database is not configured.";
+      notifyFacultyPoolUpdated();
+      return;
+    }
     try {
       const usersSnap = await getDocs(collection(db, "users"));
       usersSnap.forEach((docSnap) => {
         const data = docSnap.data() || {};
         const role = String(data.role || data.userRole || "").toLowerCase();
-        if (role.includes("teach") || role.includes("facult") || role.includes("prof") || role.includes("instructor")) {
-          const familyFirstName = [data.lastName, data.firstName].filter(Boolean).join(" ");
-          const name = data.fullName || familyFirstName || data.name || data.displayName;
+        if (isEligibleFaculty(data) && (role.includes("teach") || role.includes("facult") || role.includes("prof") || role.includes("instructor") || role.includes("adviser"))) {
+          const fullName = [data.firstName, data.middleName, data.lastName].filter(Boolean).join(" ");
+          const name = data.fullName || fullName || data.name || data.displayName;
           if (name && typeof name === "string" && name.trim()) {
             const cleanName = name.trim();
             const exists = dbFacultyPool.some((f) => f.name.toLowerCase() === cleanName.toLowerCase());
@@ -1125,14 +1173,24 @@ loadCachedOrganizations();
               dbFacultyPool.push({
                 id: docSnap.id,
                 name: cleanName,
+                searchableName: fullName,
                 email: data.email || `${cleanName.toLowerCase().replace(/\s+/g, ".")}@pup.edu.ph`,
-                department: data.department || "Faculty",
+                department: data.department || "",
+                facultyId: data.facultyId || data.employeeId || data.accountNumber || data.idNumber || "",
               });
             }
           }
         }
       });
-    } catch (e) {}
+      facultyLoadState = "ready";
+      facultyLoadError = "";
+      notifyFacultyPoolUpdated();
+    } catch (error) {
+      console.error("[CreateEvent] Could not load faculty accounts:", error);
+      facultyLoadState = dbFacultyPool.length ? "ready" : "error";
+      facultyLoadError = dbFacultyPool.length ? "" : "Faculty list could not be loaded. Please try again.";
+      notifyFacultyPoolUpdated();
+    }
   }
 
   // 9. Render Unauthorized Message
@@ -2235,7 +2293,7 @@ loadCachedOrganizations();
                   <p class="ce-error" id="error-dailySchedule" hidden></p>
                 </div>
 
-                <!-- Time Start: Default 8:00 AM, min 8:00 AM (for Same time each day) -->
+                <!-- Time Start: Default 8:00 AM, allowed from 4:00 AM to before 9:00 PM -->
                 <div class="ce-field ${state.highlightedFields.has("timeStart") ? "is-copied-highlight" : ""}" id="wrap-timeStart">
                   <label for="timeStart">Time Start <span class="ce-req">*</span></label>
                   <div class="ce-timepicker-wrap" id="picker-wrap-timeStart">
@@ -2244,8 +2302,8 @@ loadCachedOrganizations();
                            name="timeStart"
                            class="ce-timepicker-input"
                            value="08:00 AM"
-                           min="08:00"
-                           max="20:00"
+                           min="04:00"
+                           max="21:00"
                            readonly
                            required
                            aria-describedby="error-timeStart"
@@ -2268,7 +2326,7 @@ loadCachedOrganizations();
                   <p class="ce-error" id="error-timeStart" hidden></p>
                 </div>
 
-                <!-- Time End: Default 8:00 PM, max 8:00 PM (for Same time each day) -->
+                <!-- Time End: Default 8:00 PM, allowed from after Time Start through 9:00 PM -->
                 <div class="ce-field ${state.highlightedFields.has("timeEnd") ? "is-copied-highlight" : ""}" id="wrap-timeEnd">
                   <label for="timeEnd">Time End <span class="ce-req">*</span></label>
                   <div class="ce-timepicker-wrap" id="picker-wrap-timeEnd">
@@ -2277,8 +2335,8 @@ loadCachedOrganizations();
                            name="timeEnd"
                            class="ce-timepicker-input"
                            value="08:00 PM"
-                           min="08:00"
-                           max="20:00"
+                           min="04:00"
+                           max="21:00"
                            readonly
                            required
                            aria-describedby="error-timeEnd"
@@ -2623,6 +2681,27 @@ loadCachedOrganizations();
                             placeholder="• Bring valid school ID&#10;• Attire: Business casual&#10;• Install required software"></textarea>
                 </div>
 
+                ${isOrganizerPage ? `
+                <div class="ce-field ce-field--full" id="wrap-facultyInCharge">
+                  <label for="facultyInChargeSearchInput">Faculty In Charge <span class="ce-req">*</span></label>
+                  <div class="ce-chips-container ce-faculty-in-charge-container" id="facultyInChargeContainer">
+                    <div class="ce-chip" id="facultyInChargeChip" hidden></div>
+                    <input type="text"
+                           id="facultyInChargeSearchInput"
+                           class="ce-chip-input"
+                           placeholder="Type to search faculty..."
+                           autocomplete="off"
+                           aria-controls="facultyInChargeSuggestions"
+                           aria-autocomplete="list"
+                           aria-expanded="false">
+                    <div class="ce-chip-suggestions ce-faculty-in-charge-suggestions" id="facultyInChargeSuggestions" role="listbox" hidden></div>
+                  </div>
+                  <p class="ce-hint">The faculty member responsible for this event.</p>
+                  <p class="ce-inline-hint" id="facultyInChargeDuplicateHint" hidden></p>
+                  <p class="ce-error" id="error-facultyInCharge" hidden></p>
+                </div>
+                ` : ""}
+
                 <!-- Participating Faculty Members (Optional) with No Numbers in Names -->
                 <div class="ce-field ce-field--full" id="wrap-facultyChips">
                   <label for="facultySearchInput">Participating Faculty Members <small>(Optional)</small></label>
@@ -2636,6 +2715,7 @@ loadCachedOrganizations();
                     <div class="ce-chip-suggestions" id="facultySuggestions" hidden></div>
                   </div>
                   <p class="ce-inline-hint" id="facultyNoNumbersHint" style="color: #b3261e; font-size: 12px; margin-top: 4px;" hidden></p>
+                  <p class="ce-inline-hint" id="facultyDuplicateHint" hidden></p>
                   <small class="ce-hint">Participating faculty members who will attend or facilitate (optional).</small>
                   <p class="ce-error" id="error-facultyChips" hidden></p>
                 </div>
@@ -2677,12 +2757,14 @@ loadCachedOrganizations();
                       <input type="tel"
                              id="contactPhone"
                              name="contactPhone"
-                             placeholder="09XXXXXXXXX"
-                             value=""
+                             value="09"
                              maxlength="11"
                              inputmode="numeric"
-                             autocomplete="off"
-                             aria-describedby="error-contactPhone">
+                             autocomplete="tel"
+                             aria-describedby="contactPhoneHelp error-contactPhone"
+                             aria-label="Contact Number (Optional); the 09 prefix is fixed"
+                             aria-description="The 09 prefix is fixed and cannot be removed.">
+                      <p class="ce-field-hint" id="contactPhoneHelp">Optional. Format: 09XXXXXXXXX.</p>
                       <p class="ce-error" id="error-contactPhone" hidden></p>
                     </div>
                   </div>
@@ -2765,6 +2847,18 @@ loadCachedOrganizations();
                 <span class="ce-preview-text is-muted" id="previewVenue">Venue not set</span>
               </div>
 
+              ${isOrganizerPage ? `
+              <div class="ce-preview-detail">
+                <svg class="ce-preview-icon" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                  <circle cx="9" cy="7" r="4"/>
+                  <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+                  <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                </svg>
+                <span class="ce-preview-text is-muted" id="previewFacultyInCharge">Faculty in charge not set</span>
+              </div>
+              ` : ""}
+
               <div class="ce-preview-detail">
                 <svg class="ce-preview-icon" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
@@ -2802,7 +2896,7 @@ loadCachedOrganizations();
           <div class="ce-checks-card">
             <div class="ce-checks-header">
               <h2 class="ce-checks-title">Event Readiness</h2>
-              <span class="ce-checks-badge" id="checksBadge" aria-live="polite">0 of 8 Ready</span>
+              <span class="ce-checks-badge" id="checksBadge" aria-live="polite">0 of ${isOrganizerPage ? 9 : 8} Ready</span>
             </div>
             <div class="ce-checks-progress-track" aria-hidden="true">
               <div class="ce-checks-progress-bar" id="checksProgressBar"></div>
@@ -2849,6 +2943,13 @@ loadCachedOrganizations();
                 <span class="ce-check-status-sr sr-only">Not yet: </span>
                 <span class="ce-check-label">Admin proposal documents link</span>
               </li>
+              ${isOrganizerPage ? `
+              <li class="ce-check-item is-failed" id="check-facultyInCharge">
+                <span class="ce-check-icon" aria-hidden="true">✕</span>
+                <span class="ce-check-status-sr sr-only">Not yet: </span>
+                <span class="ce-check-label">Faculty in charge selected</span>
+              </li>
+              ` : ""}
             </ul>
           </div>
         </aside>
@@ -2961,6 +3062,12 @@ loadCachedOrganizations();
     } else {
       state.participatingFaculty = [];
     }
+    const savedFacultyInCharge = ev.facultyInCharge || ev.faculty_in_charge || null;
+    state.facultyInCharge = savedFacultyInCharge && typeof savedFacultyInCharge === "object"
+      ? { ...savedFacultyInCharge }
+      : savedFacultyInCharge
+        ? { id: String(savedFacultyInCharge), name: String(savedFacultyInCharge) }
+        : null;
 
     state.adminDocsLink = getAdminDocsLink(ev);
     state.adminDocumentLinks = getAdminDocumentLinks(ev);
@@ -3123,8 +3230,16 @@ loadCachedOrganizations();
         form.contactEmail.value = ev.contactPerson?.email || ev.contactEmail || "";
       }
       if (form.contactPhone) {
-        const ph = ev.contactPerson?.phone || ev.contactPhone || "";
-        form.contactPhone.value = ph.startsWith("09") ? ph.slice(0, 11) : "09";
+        const ph = String(ev.contactPerson?.phone || ev.contactPhone || "");
+        const digits = ph.replace(/\D/g, "");
+        let suffix = digits;
+        if (digits.startsWith("09")) suffix = digits.slice(2);
+        else if (digits.startsWith("63")) {
+          suffix = digits.slice(2);
+          if (suffix.startsWith("9")) suffix = suffix.slice(1);
+        } else if (digits.startsWith("0")) suffix = digits.slice(1);
+        else if (digits.startsWith("9") && digits.length >= 10) suffix = digits.slice(1);
+        form.contactPhone.value = `09${suffix.slice(0, 9)}`;
       }
 
       checkVenueCapacityHint();
@@ -3463,6 +3578,10 @@ loadCachedOrganizations();
       }
     });
 
+    ["timeStart", "timeEnd"].forEach((id) => {
+      document.getElementById(id)?.addEventListener("blur", () => updateAllReadinessChecks());
+    });
+
     // Date Auto-Follow for Registration Start & End
     const dateInput = document.getElementById("eventDate");
     const regStartInput = document.getElementById("registrationStart");
@@ -3524,6 +3643,7 @@ loadCachedOrganizations();
     setupCategoryDropdown();
     handleDailyScheduleToggle();
     setupFacultyChipsInput();
+    setupFacultyInChargeInput();
     setupCustomTimepickers();
     setupContactPhoneInput();
     setupBulletTextarea("keyDetails");
@@ -3566,6 +3686,13 @@ loadCachedOrganizations();
       btnSaveDraft.addEventListener("click", () => {
         const form = document.getElementById("createEventMainForm");
         const nameVal = form?.eventName?.value.trim() || "";
+        form?.timeStart?.dispatchEvent(new Event("blur"));
+        form?.timeEnd?.dispatchEvent(new Event("blur"));
+        document.querySelectorAll("#dailyScheduleList .ce-daily-start-input, #dailyScheduleList .ce-daily-end-input").forEach((input) => {
+          input.dispatchEvent(new Event("blur"));
+        });
+        form?.contactPhone?.dispatchEvent(new Event("blur"));
+        updateAllReadinessChecks();
         if (!nameVal) {
           showToast("Please enter an event name before saving draft.");
           form?.eventName?.focus();
@@ -3758,7 +3885,10 @@ loadCachedOrganizations();
   }
 
   // 16. Custom 3-Column Scrollable Timepicker (Hour, Minute, AM/PM) & Daily Schedule
-  const PICKER_HOURS = ["12", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11"];
+  const PICKER_HOURS = [
+    "12",
+    ...Array.from({ length: 11 }, (_, index) => String(index + 1).padStart(2, "0")),
+  ];
   const PICKER_MINUTES = [];
   for (let i = 0; i < 60; i++) {
     PICKER_MINUTES.push(String(i).padStart(2, "0"));
@@ -3779,9 +3909,7 @@ loadCachedOrganizations();
     const periodCol = dropdown.querySelector('[data-col="period"]');
     if (!hourCol || !minCol || !periodCol) return;
 
-    hourCol.innerHTML = PICKER_HOURS.map((h) => `<div class="ce-timepicker-item" data-value="${h}" role="button" tabindex="0">${h}</div>`).join("");
-    minCol.innerHTML = PICKER_MINUTES.map((m) => `<div class="ce-timepicker-item" data-value="${m}" role="button" tabindex="0">${m}</div>`).join("");
-    periodCol.innerHTML = PICKER_PERIODS.map((p) => `<div class="ce-timepicker-item" data-value="${p}" role="button" tabindex="0">${p}</div>`).join("");
+    const isStartTime = /start/i.test(fieldId);
 
     function parseCurrent() {
       const val = (input.value || "").trim();
@@ -3795,6 +3923,20 @@ loadCachedOrganizations();
       }
       return fallbackPeriod === "PM" ? { h: "08", m: "00", p: "PM" } : { h: "08", m: "00", p: "AM" };
     }
+
+    function renderPickerOptions() {
+      const current = parseCurrent();
+      const allowedHours = PICKER_HOURS.filter((hour) => {
+        const minutes = parseTimeInMinutes(`${hour}:00 ${current.p}`);
+        return minutes !== null && minutes >= 240 && (isStartTime ? minutes < 1260 : minutes <= 1260);
+      });
+      hourCol.innerHTML = allowedHours.map((h) => `<div class="ce-timepicker-item" data-value="${h}" role="button" tabindex="0">${h}</div>`).join("");
+      const allowedMinutes = current.p === "PM" && current.h === "09" ? ["00"] : PICKER_MINUTES;
+      minCol.innerHTML = allowedMinutes.map((m) => `<div class="ce-timepicker-item" data-value="${m}" role="button" tabindex="0">${m}</div>`).join("");
+      periodCol.innerHTML = PICKER_PERIODS.map((p) => `<div class="ce-timepicker-item" data-value="${p}" role="button" tabindex="0">${p}</div>`).join("");
+    }
+
+    renderPickerOptions();
 
     function syncActiveClasses(scrollToCenter) {
       const cur = parseCurrent();
@@ -3835,9 +3977,12 @@ loadCachedOrganizations();
     function updateValue(newH, newM, newP) {
       const cur = parseCurrent();
       const h = newH !== undefined ? newH : cur.h;
-      const m = newM !== undefined ? newM : cur.m;
       const p = newP !== undefined ? newP : cur.p;
+      const m = p === "PM" && h === "09" ? "00" : (newM !== undefined ? newM : cur.m);
+      const nextMinutes = parseTimeInMinutes(`${h}:${m} ${p}`);
+      if (nextMinutes === null || nextMinutes < 240 || (isStartTime ? nextMinutes >= 1260 : nextMinutes > 1260)) return;
       input.value = `${h}:${m} ${p}`;
+      renderPickerOptions();
       syncActiveClasses(false);
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
@@ -3968,6 +4113,8 @@ loadCachedOrganizations();
                      name="dailyStart_${idx}"
                      class="ce-timepicker-input ce-daily-start-input"
                      value="${escapeHTML(startVal)}"
+                     min="04:00"
+                     max="21:00"
                      readonly
                      required
                      placeholder="--:-- --"
@@ -3998,6 +4145,8 @@ loadCachedOrganizations();
                      name="dailyEnd_${idx}"
                      class="ce-timepicker-input ce-daily-end-input"
                      value="${escapeHTML(endVal)}"
+                     min="04:00"
+                     max="21:00"
                      readonly
                      required
                      placeholder="--:-- --"
@@ -4035,12 +4184,14 @@ loadCachedOrganizations();
         updateAllReadinessChecks();
         updateLivePreview();
       });
+      if (sInp) sInp.addEventListener("blur", () => updateAllReadinessChecks());
       if (eInp) eInp.addEventListener("input", () => {
         state.dirty = true;
         clearFieldError("dailySchedule");
         updateAllReadinessChecks();
         updateLivePreview();
       });
+      if (eInp) eInp.addEventListener("blur", () => updateAllReadinessChecks());
     });
   }
 
@@ -4110,8 +4261,182 @@ loadCachedOrganizations();
     const input = document.getElementById("contactPhone");
     if (!input) return;
 
+    const error = document.getElementById("error-contactPhone");
+    const wrap = document.getElementById("wrap-contactPhone");
+    let hasShownError = false;
+    let isProgrammaticInput = false;
+    input.value = input.value.startsWith("09") ? input.value.replace(/\D/g, "").slice(0, 11) : "09";
+
+    input.addEventListener("beforeinput", (event) => {
+      const start = input.selectionStart ?? input.value.length;
+      const end = input.selectionEnd ?? start;
+      const inputType = event.inputType || "";
+      const isBackwardDelete = inputType === "deleteContentBackward";
+      const isForwardDelete = inputType === "deleteContentForward";
+
+      if (inputType.startsWith("delete")) {
+        if (start === end && ((isBackwardDelete && start <= 2) || (isForwardDelete && start <= 2))) {
+          event.preventDefault();
+          input.setSelectionRange(2, 2);
+          return;
+        }
+        if (start !== end) {
+          event.preventDefault();
+          const value = input.value.startsWith("09") ? input.value : "09";
+          const left = value.slice(2, Math.max(2, start));
+          const right = value.slice(Math.max(2, end));
+          input.value = `09${left}${right}`.slice(0, 11);
+          const caret = 2 + left.length;
+          input.setSelectionRange(caret, caret);
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        return;
+      }
+
+      if (!inputType.startsWith("insert") || event.data == null) return;
+      event.preventDefault();
+      let digits = String(event.data).replace(/\D/g, "");
+      if (inputType === "insertFromPaste" || inputType === "insertFromDrop" || inputType === "insertReplacementText") {
+        if (digits.startsWith("09")) digits = digits.slice(2);
+        else if (digits.startsWith("63")) {
+          digits = digits.slice(2);
+          if (digits.startsWith("9")) digits = digits.slice(1);
+        }
+        else if (digits.startsWith("0")) digits = digits.slice(1);
+        else if (digits.startsWith("9") && digits.length >= 10) digits = digits.slice(1);
+      }
+      const value = input.value.startsWith("09") ? input.value : "09";
+      const left = value.slice(2, Math.max(2, start));
+      const right = value.slice(Math.max(2, end));
+      const inserted = digits.slice(0, Math.max(0, 9 - left.length - right.length));
+      input.value = `09${left}${inserted}${right}`.slice(0, 11);
+      const caret = 2 + left.length + inserted.length;
+      input.setSelectionRange(caret, caret);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
     input.addEventListener("input", () => {
-      input.value = input.value.replace(/\D/g, "").slice(0, 11);
+      if (isProgrammaticInput) return;
+      const digits = input.value.replace(/\D/g, "");
+      let suffix = digits;
+      if (digits.startsWith("09")) suffix = digits.slice(2);
+      else if (digits.startsWith("63")) {
+        suffix = digits.slice(2);
+        if (suffix.startsWith("9")) suffix = suffix.slice(1);
+      }
+      else if (digits.startsWith("0")) suffix = digits.slice(1);
+      else if (digits.startsWith("9") && digits.length >= 10) suffix = digits.slice(1);
+      const normalized = `09${suffix.slice(0, 9)}`;
+      if (normalized !== input.value) {
+        const caret = Math.max(2, Math.min(normalized.length, input.selectionStart ?? normalized.length));
+        input.value = normalized;
+        input.setSelectionRange(caret, caret);
+        isProgrammaticInput = true;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        isProgrammaticInput = false;
+      }
+      if (hasShownError) {
+        const invalid = input.value !== "09" && !/^09\d{9}$/.test(input.value);
+        if (error) {
+          error.textContent = invalid ? "Contact number must be 11 digits starting with 09 (e.g. 09171234567)." : "";
+          error.hidden = !invalid;
+        }
+        if (wrap) wrap.classList.toggle("has-error", invalid);
+        if (invalid) input.setAttribute("aria-invalid", "true");
+        else input.removeAttribute("aria-invalid");
+      }
+    });
+
+    input.addEventListener("blur", () => {
+      hasShownError = true;
+      const invalid = input.value !== "09" && !/^09\d{9}$/.test(input.value);
+      if (error) {
+        error.textContent = invalid ? "Contact number must be 11 digits starting with 09 (e.g. 09171234567)." : "";
+        error.hidden = !invalid;
+      }
+      if (wrap) wrap.classList.toggle("has-error", invalid);
+      if (invalid) input.setAttribute("aria-invalid", "true");
+      else input.removeAttribute("aria-invalid");
+    });
+
+    input.addEventListener("paste", (event) => {
+      event.preventDefault();
+      let digits = (event.clipboardData?.getData("text") || "").replace(/\D/g, "");
+      if (digits.startsWith("09")) digits = digits.slice(2);
+      else if (digits.startsWith("63")) {
+        digits = digits.slice(2);
+        if (digits.startsWith("9")) digits = digits.slice(1);
+      }
+      else if (digits.startsWith("0")) digits = digits.slice(1);
+      else if (digits.startsWith("9") && digits.length >= 10) digits = digits.slice(1);
+      const start = input.selectionStart ?? input.value.length;
+      const end = input.selectionEnd ?? start;
+      const value = input.value.startsWith("09") ? input.value : "09";
+      const left = value.slice(2, Math.max(2, start));
+      const right = value.slice(Math.max(2, end));
+      const inserted = digits.slice(0, Math.max(0, 9 - left.length - right.length));
+      input.value = `09${left}${inserted}${right}`.slice(0, 11);
+      const caret = 2 + left.length + inserted.length;
+      input.setSelectionRange(caret, caret);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    input.addEventListener("drop", (event) => {
+      event.preventDefault();
+      let digits = (event.dataTransfer?.getData("text") || "").replace(/\D/g, "");
+      if (digits.startsWith("09")) digits = digits.slice(2);
+      else if (digits.startsWith("63")) {
+        digits = digits.slice(2);
+        if (digits.startsWith("9")) digits = digits.slice(1);
+      }
+      else if (digits.startsWith("0")) digits = digits.slice(1);
+      else if (digits.startsWith("9") && digits.length >= 10) digits = digits.slice(1);
+      const start = input.selectionStart ?? input.value.length;
+      const end = input.selectionEnd ?? start;
+      const value = input.value.startsWith("09") ? input.value : "09";
+      const left = value.slice(2, Math.max(2, start));
+      const right = value.slice(Math.max(2, end));
+      const inserted = digits.slice(0, Math.max(0, 9 - left.length - right.length));
+      input.value = `09${left}${inserted}${right}`.slice(0, 11);
+      const caret = 2 + left.length + inserted.length;
+      input.setSelectionRange(caret, caret);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    input.addEventListener("cut", (event) => {
+      event.preventDefault();
+      const start = input.selectionStart ?? input.value.length;
+      const end = input.selectionEnd ?? start;
+      const value = input.value.startsWith("09") ? input.value : "09";
+      const left = value.slice(2, Math.max(2, start));
+      const right = value.slice(Math.max(2, end));
+      input.value = `09${left}${right}`.slice(0, 11);
+      const caret = 2 + left.length;
+      input.setSelectionRange(caret, caret);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    input.addEventListener("keydown", (event) => {
+      const start = input.selectionStart ?? 0;
+      const end = input.selectionEnd ?? start;
+      if (event.key === "Home") {
+        event.preventDefault();
+        input.setSelectionRange(2, 2);
+      } else if (event.key.startsWith("Arrow") && start === end && start < 2) {
+        event.preventDefault();
+        input.setSelectionRange(2, 2);
+      } else if (event.key === "ArrowLeft" && start === end && start <= 2) {
+        event.preventDefault();
+        input.setSelectionRange(2, 2);
+      }
+    });
+
+    ["focus", "click", "keyup", "mouseup", "select"].forEach((eventName) => {
+      input.addEventListener(eventName, () => {
+        const start = input.selectionStart ?? 2;
+        const end = input.selectionEnd ?? start;
+        if (start < 2) input.setSelectionRange(2, Math.max(2, end));
+      });
     });
   }
 
@@ -4805,21 +5130,263 @@ loadCachedOrganizations();
     renderFacultyChipsList();
   }
 
+  function isSameFaculty(first, second) {
+    if (!first || !second) return false;
+    const firstId = String(first.id || "").trim();
+    const secondId = String(second.id || "").trim();
+    const firstName = normalizeFacultySearchText(first.name);
+    const secondName = normalizeFacultySearchText(second.name);
+    return (firstId && secondId && firstId === secondId) ||
+      Boolean(firstName && secondName && firstName === secondName);
+  }
+
+  function isFacultyInChargeSelected() {
+    const selected = state.facultyInCharge;
+    if (!isOrganizerPage || !selected?.id || !selected?.name) return !isOrganizerPage;
+    const registered = loadFacultyPool().some((faculty) => isSameFaculty(faculty, selected));
+    const duplicate = state.participatingFaculty.some((faculty) => isSameFaculty(faculty, selected));
+    return registered && !duplicate;
+  }
+
+  function setupFacultyInChargeInput() {
+    if (!isOrganizerPage) return;
+    const input = document.getElementById("facultyInChargeSearchInput");
+    const suggestions = document.getElementById("facultyInChargeSuggestions");
+    const chip = document.getElementById("facultyInChargeChip");
+    const duplicateHint = document.getElementById("facultyInChargeDuplicateHint");
+    if (!input || !suggestions || !chip) return;
+
+    let activeSuggestionIndex = -1;
+    let debounceTimer;
+
+    function setDuplicateHint(message) {
+      if (!duplicateHint) return;
+      duplicateHint.textContent = message;
+      duplicateHint.hidden = !message;
+    }
+
+    function closeSuggestions() {
+      suggestions.hidden = true;
+      suggestions.classList.remove("is-open");
+      input.setAttribute("aria-expanded", "false");
+      activeSuggestionIndex = -1;
+    }
+
+    function renderSelectedFaculty() {
+      const selected = state.facultyInCharge;
+      chip.hidden = !selected;
+      chip.innerHTML = selected
+        ? `<span class="ce-chip-label">${escapeHTML(selected.name)}</span><button type="button" class="ce-chip-remove" id="removeFacultyInCharge" aria-label="Remove ${escapeHTML(selected.name)}">✕</button>`
+        : "";
+      const removeButton = chip.querySelector("#removeFacultyInCharge");
+      removeButton?.addEventListener("click", () => {
+        state.facultyInCharge = null;
+        input.value = "";
+        input.focus();
+        state.dirty = true;
+        setDuplicateHint("");
+        clearFieldError("facultyInCharge");
+        renderSelectedFaculty();
+        updateAllReadinessChecks();
+        updateLivePreview();
+      });
+    }
+
+    function chooseFaculty(faculty) {
+      if (state.participatingFaculty.some((selected) => isSameFaculty(selected, faculty))) {
+        setDuplicateHint("This faculty member is already listed as a participating faculty member.");
+        closeSuggestions();
+        return;
+      }
+      state.facultyInCharge = {
+        id: faculty.id,
+        name: faculty.name,
+        department: faculty.department || "",
+        facultyId: faculty.facultyId || "",
+      };
+      input.value = "";
+      setDuplicateHint("");
+      state.dirty = true;
+      clearFieldError("facultyInCharge");
+      renderSelectedFaculty();
+      closeSuggestions();
+      updateAllReadinessChecks();
+      updateLivePreview();
+    }
+
+    function renderSuggestions(queryText) {
+      const query = normalizeFacultySearchText(queryText);
+      const allFaculty = loadFacultyPool();
+      if (facultyLoadState === "loading") {
+        suggestions.innerHTML = '<div class="ce-chip-suggestion-empty" role="status">Loading faculty...</div>';
+        suggestions.hidden = false;
+        suggestions.classList.add("is-open");
+        input.setAttribute("aria-expanded", "true");
+        return;
+      }
+      if (facultyLoadState === "error") {
+        suggestions.innerHTML = `<div class="ce-chip-suggestion-empty" role="alert">${escapeHTML(facultyLoadError || "Faculty list could not be loaded. Please try again.")}</div>`;
+        suggestions.hidden = false;
+        suggestions.classList.add("is-open");
+        input.setAttribute("aria-expanded", "true");
+        return;
+      }
+
+      const matches = allFaculty.filter((faculty) => {
+        if (state.participatingFaculty.some((selected) => isSameFaculty(selected, faculty))) return false;
+        const searchableText = normalizeFacultySearchText([
+          faculty.name,
+          faculty.searchableName,
+          faculty.facultyId,
+          faculty.id,
+          faculty.department,
+        ].filter(Boolean).join(" "));
+        return !query || searchableText.includes(query);
+      }).slice(0, 8);
+      const duplicateMatch = query && allFaculty.some((faculty) =>
+        state.participatingFaculty.some((selected) => isSameFaculty(selected, faculty)) &&
+        normalizeFacultySearchText([faculty.name, faculty.searchableName, faculty.facultyId, faculty.id, faculty.department].filter(Boolean).join(" ")).includes(query),
+      );
+
+      activeSuggestionIndex = -1;
+      if (!matches.length) {
+        setDuplicateHint(duplicateMatch
+          ? "This faculty member is already listed as a participating faculty member."
+          : "");
+        suggestions.innerHTML = '<div class="ce-chip-suggestion-empty" role="status">No faculty found</div>';
+        suggestions.hidden = false;
+        suggestions.classList.add("is-open");
+        input.setAttribute("aria-expanded", "true");
+        return;
+      }
+
+      setDuplicateHint(duplicateMatch
+        ? "This faculty member is already listed as a participating faculty member."
+        : "");
+      suggestions.innerHTML = matches.map((faculty, index) => {
+        const secondary = [faculty.department, faculty.facultyId || faculty.id].filter(Boolean).join(" • ");
+        return `<div class="ce-chip-suggestion-item" role="option" aria-selected="false" data-item-idx="${index}" data-faculty-id="${escapeHTML(faculty.id)}">
+          <strong>${escapeHTML(faculty.name)}</strong>
+          ${secondary ? `<small>${escapeHTML(secondary)}</small>` : ""}
+        </div>`;
+      }).join("");
+      suggestions.hidden = false;
+      suggestions.classList.add("is-open");
+      input.setAttribute("aria-expanded", "true");
+      suggestions.querySelectorAll(".ce-chip-suggestion-item").forEach((item, index) => {
+        item.addEventListener("mousedown", (event) => event.preventDefault());
+        item.addEventListener("click", () => chooseFaculty(matches[index]));
+      });
+    }
+
+    function scheduleSuggestions() {
+      window.clearTimeout(debounceTimer);
+      debounceTimer = window.setTimeout(() => renderSuggestions(input.value), 200);
+    }
+
+    input.addEventListener("focus", () => renderSuggestions(input.value));
+    input.addEventListener("input", () => {
+      state.facultyInCharge = null;
+      renderSelectedFaculty();
+      setDuplicateHint("");
+      clearFieldError("facultyInCharge");
+      state.dirty = true;
+      activeSuggestionIndex = -1;
+      scheduleSuggestions();
+      updateAllReadinessChecks();
+      updateLivePreview();
+    });
+    input.addEventListener("faculty-pool-updated", () => {
+      if (state.facultyInCharge) {
+        const match = loadFacultyPool().find((faculty) => isSameFaculty(faculty, state.facultyInCharge));
+        if (match) {
+          state.facultyInCharge = { ...match };
+          updateLivePreview();
+        }
+        renderSelectedFaculty();
+      }
+      if (!suggestions.hidden) renderSuggestions(input.value);
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !suggestions.hidden) {
+        event.preventDefault();
+        window.clearTimeout(debounceTimer);
+        const selectedIndex = activeSuggestionIndex;
+        renderSuggestions(input.value);
+        const currentItems = [...suggestions.querySelectorAll(".ce-chip-suggestion-item")];
+        if (currentItems.length) {
+          const index = selectedIndex < 0 ? 0 : selectedIndex;
+          chooseFaculty(matchesFromVisibleItems(currentItems)[index]);
+        }
+        return;
+      }
+      const items = [...suggestions.querySelectorAll(".ce-chip-suggestion-item")];
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        if (!items.length) return;
+        activeSuggestionIndex = event.key === "ArrowDown"
+          ? (activeSuggestionIndex + 1) % items.length
+          : (activeSuggestionIndex - 1 + items.length) % items.length;
+        items.forEach((item, index) => {
+          const active = index === activeSuggestionIndex;
+          item.classList.toggle("is-active", active);
+          item.setAttribute("aria-selected", String(active));
+        });
+        items[activeSuggestionIndex].scrollIntoView({ block: "nearest" });
+      } else if (event.key === "Escape") {
+        closeSuggestions();
+      }
+    });
+    document.addEventListener("click", (event) => {
+      if (!input.contains(event.target) && !suggestions.contains(event.target)) closeSuggestions();
+    });
+
+    function matchesFromVisibleItems(items) {
+      return items.map((item) => allFacultyById(item.dataset.facultyId)).filter(Boolean);
+    }
+
+    function allFacultyById(id) {
+      return loadFacultyPool().find((faculty) => String(faculty.id) === String(id));
+    }
+
+    renderSelectedFaculty();
+    loadFacultyPool();
+    updateAllReadinessChecks();
+  }
+
   function addFacultyChip(facultyObj) {
     if (!facultyObj || !facultyObj.name) return;
+    if (state.facultyInCharge && isSameFaculty(state.facultyInCharge, facultyObj)) {
+      const duplicateHint = document.getElementById("facultyDuplicateHint");
+      if (duplicateHint) {
+        duplicateHint.textContent = "This faculty member is already selected as Faculty In Charge.";
+        duplicateHint.hidden = false;
+      }
+      return;
+    }
     if (state.participatingFaculty.some((f) => f.name.toLowerCase() === facultyObj.name.toLowerCase())) {
       return;
     }
     state.participatingFaculty.push(facultyObj);
     state.dirty = true;
+    const duplicateHint = document.getElementById("facultyDuplicateHint");
+    if (duplicateHint) duplicateHint.hidden = true;
     renderFacultyChipsList();
+    const inChargeInput = document.getElementById("facultyInChargeSearchInput");
+    if (inChargeInput) inChargeInput.dispatchEvent(new Event("faculty-pool-updated"));
+    updateAllReadinessChecks();
     updateLivePreview();
   }
 
   function removeFacultyChip(index) {
     state.participatingFaculty.splice(index, 1);
     state.dirty = true;
+    const duplicateHint = document.getElementById("facultyDuplicateHint");
+    if (duplicateHint) duplicateHint.hidden = true;
     renderFacultyChipsList();
+    const inChargeInput = document.getElementById("facultyInChargeSearchInput");
+    if (inChargeInput) inChargeInput.dispatchEvent(new Event("faculty-pool-updated"));
+    updateAllReadinessChecks();
     updateLivePreview();
   }
 
@@ -5933,6 +6500,14 @@ loadCachedOrganizations();
       venueEl.classList.toggle("is-muted", !v);
     }
 
+    const facultyInChargeEl = document.getElementById("previewFacultyInCharge");
+    if (facultyInChargeEl) {
+      facultyInChargeEl.textContent = state.facultyInCharge?.name
+        ? `Faculty in charge: ${state.facultyInCharge.name}`
+        : "Faculty in charge not set";
+      facultyInChargeEl.classList.toggle("is-muted", !state.facultyInCharge?.name);
+    }
+
     // Capacity
     const capEl = document.getElementById("previewCapacity");
     if (capEl) {
@@ -6000,6 +6575,7 @@ loadCachedOrganizations();
     let hour = parseInt(match[1], 10);
     const min = parseInt(match[2], 10);
     const period = (match[3] || "AM").toUpperCase();
+    if (hour < 1 || hour > 12 || min < 0 || min > 59) return null;
     if (period === "PM" && hour < 12) hour += 12;
     if (period === "AM" && hour === 12) hour = 0;
     return hour * 60 + min;
@@ -6056,8 +6632,9 @@ loadCachedOrganizations();
   }
 
   function updateAllReadinessChecks() {
+    const readinessTotal = isOrganizerPage ? 9 : 8;
     const form = document.getElementById("createEventMainForm");
-    if (!form) return { readyCount: 0, total: 8, isReady: false, remainingCount: 8, failingChecks: [] };
+    if (!form) return { readyCount: 0, total: readinessTotal, isReady: false, remainingCount: readinessTotal, failingChecks: [] };
 
     let readyCount = 0;
     const failingChecks = [];
@@ -6091,17 +6668,18 @@ loadCachedOrganizations();
       });
     }
 
-    // 3. Time End is after Time Start & within 8 AM - 8 PM (or per-day schedule valid)
+    // 3. Time End is after Time Start & within 4 AM - 9 PM (or per-day schedule valid)
     const isDifferentDaily = form.dailySchedule?.value === "Different time by day";
     const dateVal = form.eventDate?.value || "";
     const currentMins = getManilaCurrentMinutes();
     let timesPass = false;
-    let timesErrMsg = "Time End must be after Time Start (8 AM - 8 PM)";
+    let timesErrMsg = "Time End must be after Time Start (4 AM - 9 PM)";
 
     if (isDifferentDaily) {
       const rows = document.querySelectorAll("#dailyScheduleList .ce-daily-schedule-row");
       if (rows.length > 0) {
         let allRowsValid = true;
+        let dailyError = "";
         rows.forEach((row) => {
           const rowDate = row.dataset.date;
           const sInp = row.querySelector(".ce-daily-start-input")?.value;
@@ -6109,13 +6687,19 @@ loadCachedOrganizations();
           const sMins = parseTimeInMinutes(sInp);
           const eMins = parseTimeInMinutes(eInp);
           const passedRow = rowDate === manilaInfo.todayStr ? (sMins !== null && sMins > currentMins) : true;
-          const limitsPass = sMins !== null && eMins !== null && sMins >= 480 && eMins <= 1200;
+          const limitsPass = sMins !== null && eMins !== null && sMins >= 240 && sMins <= 1260 && eMins >= 240 && eMins <= 1260;
           if (!limitsPass || eMins <= sMins || !passedRow) {
             allRowsValid = false;
+            if (!dailyError) {
+              if (sMins === null || eMins === null) dailyError = "Start and End times are required for all dates.";
+              else if (sMins < 240 || sMins > 1260 || eMins < 240 || eMins > 1260) dailyError = "Time must be between 4:00 AM and 9:00 PM.";
+              else if (eMins <= sMins) dailyError = "Daily end time must be after start time.";
+              else if (!passedRow) dailyError = "Start time for today has already passed.";
+            }
           }
         });
         timesPass = allRowsValid;
-        if (!timesPass) timesErrMsg = "Please ensure all daily start/end times are between 8:00 AM and 8:00 PM with End after Start.";
+        if (!timesPass) timesErrMsg = dailyError || "Please configure valid daily schedule dates and times.";
       } else {
         timesErrMsg = "Please configure valid daily schedule dates and times.";
       }
@@ -6123,23 +6707,57 @@ loadCachedOrganizations();
       const tStart = parseTimeInMinutes(form.timeStart?.value);
       const tEnd = parseTimeInMinutes(form.timeEnd?.value);
       const passedCheck = dateVal === manilaInfo.todayStr ? (tStart !== null && tStart > currentMins) : true;
-      const timeLimitsPass = tStart !== null && tEnd !== null && tStart >= 480 && tEnd <= 1200;
+      const timeLimitsPass = tStart !== null && tEnd !== null && tStart >= 240 && tStart <= 1260 && tEnd >= 240 && tEnd <= 1260;
       timesPass = timeLimitsPass && tEnd > tStart && passedCheck;
       if (!timesPass) {
         if (tStart === null || tEnd === null) timesErrMsg = "Time Start and Time End are required.";
-        else if (tStart < 480) timesErrMsg = "Time Start cannot be earlier than 8:00 AM.";
-        else if (tEnd > 1200) timesErrMsg = "Time End cannot be later than 8:00 PM.";
+        else if (tStart < 240 || tStart > 1260 || tEnd < 240 || tEnd > 1260) timesErrMsg = "Time must be between 4:00 AM and 9:00 PM.";
         else if (tEnd <= tStart) timesErrMsg = "Time End must be strictly after Time Start.";
         else if (!passedCheck) timesErrMsg = "Start time for today has already passed.";
       }
+
+      [
+        ["timeStart", tStart === null ? "Time start is required." : tStart < 240 || tStart > 1260 ? "Time must be between 4:00 AM and 9:00 PM." : !passedCheck ? "Start time for today has already passed." : ""],
+        ["timeEnd", tEnd === null ? "Time end is required." : tEnd < 240 || tEnd > 1260 ? "Time must be between 4:00 AM and 9:00 PM." : tStart !== null && tEnd <= tStart ? "Time End must be strictly after Time Start." : ""],
+      ].forEach(([id, message]) => {
+        const error = document.getElementById(`error-${id}`);
+        const wrap = document.getElementById(`wrap-${id}`);
+        const input = document.getElementById(id);
+        if (message) {
+          if (error) {
+            error.textContent = message;
+            error.hidden = false;
+          }
+          wrap?.classList.add("has-error");
+          input?.setAttribute("aria-invalid", "true");
+          input?.classList.add("has-error");
+        } else {
+          clearFieldError(id);
+        }
+      });
+    }
+
+    if (isDifferentDaily) {
+      const dailyError = timesPass ? "" : timesErrMsg;
+      const error = document.getElementById("error-dailySchedule");
+      const wrap = document.getElementById("wrap-dailySchedule");
+      if (dailyError) {
+        if (error) {
+          error.textContent = dailyError;
+          error.hidden = false;
+        }
+        wrap?.classList.add("has-error");
+      } else {
+        clearFieldError("dailySchedule");
+      }
+    } else {
+      clearFieldError("dailySchedule");
     }
 
     setCheckStatus(
       "check-times",
       timesPass,
-      timesPass
-        ? (isDifferentDaily ? "Daily schedule times valid" : "Time End is after Time Start")
-        : "Time End must be after Time Start (8 AM - 8 PM)"
+      "Time End must be after Time Start (4 AM - 9 PM)"
     );
     if (timesPass) {
       readyCount++;
@@ -6284,36 +6902,50 @@ loadCachedOrganizations();
       });
     }
 
+    if (isOrganizerPage) {
+      const facultyInChargePass = isFacultyInChargeSelected();
+      setCheckStatus("check-facultyInCharge", facultyInChargePass, "Faculty in charge selected");
+      if (facultyInChargePass) {
+        readyCount++;
+      } else {
+        failingChecks.push({
+          id: "facultyInCharge",
+          label: "Faculty in charge selected",
+          message: "Select a faculty in charge.",
+        });
+      }
+    }
+
     // Summary Badge & Progress Bar in Side Panel & Bottom Bar
     const badge = document.getElementById("checksBadge");
     if (badge) {
-      badge.textContent = `${readyCount} of 8 Ready`;
-      badge.classList.toggle("is-complete", readyCount === 8);
+      badge.textContent = `${readyCount} of ${readinessTotal} Ready`;
+      badge.classList.toggle("is-complete", readyCount === readinessTotal);
     }
 
     const bar = document.getElementById("checksProgressBar");
     if (bar) {
-      const pct = Math.round((readyCount / 8) * 100);
+      const pct = Math.round((readyCount / readinessTotal) * 100);
       bar.style.width = `${pct}%`;
-      bar.classList.toggle("is-complete", readyCount === 8);
+      bar.classList.toggle("is-complete", readyCount === readinessTotal);
     }
 
     const bText = document.getElementById("bottomStatusText");
     if (bText) {
-      if (readyCount === 8) {
-        bText.textContent = "All 8 readiness checks passed. Ready for submission!";
+      if (readyCount === readinessTotal) {
+        bText.textContent = `All ${readinessTotal} readiness checks passed. Ready for submission!`;
         bText.style.color = "#15803d";
       } else {
-        bText.textContent = `${8 - readyCount} check${8 - readyCount === 1 ? "" : "s"} remaining before submitting.`;
+        bText.textContent = `${readinessTotal - readyCount} check${readinessTotal - readyCount === 1 ? "" : "s"} remaining before submitting.`;
         bText.style.color = "#b91c1c";
       }
     }
 
     return {
       readyCount,
-      total: 8,
-      isReady: readyCount === 8,
-      remainingCount: 8 - readyCount,
+      total: readinessTotal,
+      isReady: readyCount === readinessTotal,
+      remainingCount: readinessTotal - readyCount,
       failingChecks,
     };
   }
@@ -6355,6 +6987,7 @@ loadCachedOrganizations();
         else if (id === "participantDocs") inputEl = document.getElementById("participantDocsLinks");
         else if (id === "targetDepartments") inputEl = document.querySelector(".ce-target-department");
         else if (id === "facultyChips") inputEl = document.getElementById("facultySearchInput");
+        else if (id === "facultyInCharge") inputEl = document.getElementById("facultyInChargeSearchInput");
       }
       if (errEl) {
         errEl.textContent = msg;
@@ -6426,10 +7059,8 @@ loadCachedOrganizations();
           const eMins = parseTimeInMinutes(eInp);
           if (sMins === null || eMins === null) {
             dailyError = dailyError || "Start and End times are required for all dates.";
-          } else if (sMins < 480) {
-            dailyError = dailyError || "Daily start times cannot be earlier than 8:00 AM.";
-          } else if (eMins > 1200) {
-            dailyError = dailyError || "Daily end times cannot be later than 8:00 PM.";
+          } else if (sMins < 240 || sMins > 1260 || eMins < 240 || eMins > 1260) {
+            dailyError = dailyError || "Time must be between 4:00 AM and 9:00 PM.";
           } else if (eMins <= sMins) {
             dailyError = dailyError || "Daily end time must be after start time.";
           } else if (rowDate === manilaInfo.todayStr && sMins <= getManilaCurrentMinutes()) {
@@ -6446,16 +7077,16 @@ loadCachedOrganizations();
 
       if (tStart === null) {
         markError("timeStart", "Time start is required.");
-      } else if (tStart < 480) {
-        markError("timeStart", "Time Start cannot be earlier than 8:00 AM.");
+      } else if (tStart < 240 || tStart > 1260) {
+        markError("timeStart", "Time must be between 4:00 AM and 9:00 PM.");
       } else if (dateVal === manilaInfo.todayStr && tStart <= getManilaCurrentMinutes()) {
         markError("timeStart", "Start time has already passed");
       }
 
       if (tEnd === null) {
         markError("timeEnd", "Time end is required.");
-      } else if (tEnd > 1200) {
-        markError("timeEnd", "Time End cannot be later than 8:00 PM.");
+      } else if (tEnd < 240 || tEnd > 1260) {
+        markError("timeEnd", "Time must be between 4:00 AM and 9:00 PM.");
       } else if (tStart !== null && tEnd <= tStart) {
         markError("timeEnd", "Time End must be strictly after Time Start.");
       }
@@ -6588,10 +7219,8 @@ loadCachedOrganizations();
 
     // 12. Optional Contact Phone
     const phoneVal = (form.contactPhone?.value || "").trim();
-    if (phoneVal) {
-      if (!/^09\d{9}$/.test(phoneVal)) {
-        markError("contactPhone", "Enter exactly 11 digits starting with 09.");
-      }
+    if (phoneVal && phoneVal !== "09" && !/^09\d{9}$/.test(phoneVal)) {
+      markError("contactPhone", "Contact number must be 11 digits starting with 09 (e.g. 09171234567).");
     }
 
     // 13. Admin and participant Google Drive documents
@@ -6608,6 +7237,20 @@ loadCachedOrganizations();
     }
 
     const registeredFaculty = loadFacultyPool();
+    if (isOrganizerPage) {
+      if (!state.facultyInCharge?.id || !state.facultyInCharge?.name) {
+        markError("facultyInCharge", "Select a faculty in charge.");
+      } else if (!isFacultyInChargeSelected()) {
+        const duplicate = state.participatingFaculty.some((faculty) => isSameFaculty(faculty, state.facultyInCharge));
+        markError(
+          "facultyInCharge",
+          duplicate
+            ? "Faculty in charge cannot also be a participating faculty member."
+            : "Select a faculty in charge from the registered faculty list.",
+        );
+      }
+    }
+
     const unregisteredFaculty = state.participatingFaculty.some((selected) =>
       !registeredFaculty.some((faculty) =>
         (selected.id && faculty.id === selected.id) ||
@@ -6721,6 +7364,7 @@ loadCachedOrganizations();
       else if (id === "approvers") inputEl = document.getElementById("approverList");
       else if (id === "targetDepartments") inputEl = document.querySelector(".ce-target-department");
       else if (id === "facultyChips") inputEl = document.getElementById("facultySearchInput");
+      else if (id === "facultyInCharge") inputEl = document.getElementById("facultyInChargeSearchInput");
     }
     if (errEl) {
       errEl.textContent = "";
@@ -6757,7 +7401,8 @@ loadCachedOrganizations();
     const maxCapacity = capacityValue ? Number(capacityValue) : null;
     const outsideGuests = Boolean(form?.outsideGuests?.checked);
 
-    const cleanPhone = (form?.contactPhone?.value || "").trim();
+    const rawPhone = (form?.contactPhone?.value || "").trim();
+    const cleanPhone = rawPhone === "09" ? "" : rawPhone;
 
     // Clean bulleted lists for Key Details and Requirements
     const cleanKeyDetails = form?.keyDetails?.value
@@ -6838,6 +7483,13 @@ loadCachedOrganizations();
       keyDetails: cleanKeyDetails,
       objectives: cleanKeyDetails,
       requirements: cleanRequirements,
+      ...(isOrganizerPage
+        ? {
+            facultyInCharge: state.facultyInCharge
+              ? { ...state.facultyInCharge }
+              : null,
+          }
+        : {}),
       participatingFaculty: [...state.participatingFaculty],
       contactPerson: {
         name: form?.contactName?.value.trim() || "",
@@ -6932,6 +7584,12 @@ loadCachedOrganizations();
       state.mode = "new";
       state.selectedCategories = Array.isArray(target.categories) ? [...target.categories] : [];
       state.participatingFaculty = Array.isArray(target.participatingFaculty) ? [...target.participatingFaculty] : [];
+      const savedFacultyInCharge = target.facultyInCharge || target.faculty_in_charge || null;
+      state.facultyInCharge = savedFacultyInCharge && typeof savedFacultyInCharge === "object"
+        ? { ...savedFacultyInCharge }
+        : savedFacultyInCharge
+          ? { id: String(savedFacultyInCharge), name: String(savedFacultyInCharge) }
+          : null;
       const savedParticipantDocuments = Array.isArray(target.participantDocuments)
         ? target.participantDocuments
         : Array.isArray(target.attachments)
@@ -7069,8 +7727,16 @@ loadCachedOrganizations();
         if (form.contactName) form.contactName.value = target.contactPerson?.name || target.contactName || "";
         if (form.contactEmail) form.contactEmail.value = target.contactPerson?.email || target.contactEmail || "";
         if (form.contactPhone) {
-          const ph = target.contactPerson?.phone || target.contactPhone || "";
-          form.contactPhone.value = ph.startsWith("09") ? ph.slice(0, 11) : "09";
+          const ph = String(target.contactPerson?.phone || target.contactPhone || "");
+          const digits = ph.replace(/\D/g, "");
+          let suffix = digits;
+          if (digits.startsWith("09")) suffix = digits.slice(2);
+          else if (digits.startsWith("63")) {
+            suffix = digits.slice(2);
+            if (suffix.startsWith("9")) suffix = suffix.slice(1);
+          } else if (digits.startsWith("0")) suffix = digits.slice(1);
+          else if (digits.startsWith("9") && digits.length >= 10) suffix = digits.slice(1);
+          form.contactPhone.value = `09${suffix.slice(0, 9)}`;
         }
 
         checkVenueCapacityHint();

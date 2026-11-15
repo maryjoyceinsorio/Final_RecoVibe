@@ -21,11 +21,13 @@ import {
   isFirebaseConfigured,
   isRtdbConfigured,
 } from "./firebaseConfig.js";
-import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {
+  onAuthStateChanged,
+  signOut,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
   collection,
   doc,
-  getDoc,
   onSnapshot,
   query,
   runTransaction,
@@ -41,6 +43,11 @@ import {
 import { httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
 import { fetchMonthHolidays } from "../holidayService.js";
 import { isEventVisibleToStudent } from "./eventAudience.js";
+import {
+  clearCachedStudentProfile,
+  loadStudentProfile,
+  renderStudentSidebar,
+} from "./studentIdentity.js";
 
 /* ---------------------------------------------------------
    STATE
@@ -50,11 +57,11 @@ let serverTimeOffset = 0;
 let permanentQrToken = "";
 
 const studentProfile = {
-  firstName: "Student",
+  firstName: "",
   middleName: "",
   lastName: "",
-  fullName: "Student",
-  studentNo: "2025-00790-BN-1",
+  fullName: "",
+  studentNo: "",
   organization: "",
   department: "",
   departmentCode: "",
@@ -90,6 +97,7 @@ let unsubscribeFirestoreEvents = null;
 let retryEventFetch = null;
 let eventFetchLoading = true;
 let eventFetchError = null;
+let eventFetchTimeout = null;
 let registeredEventIds = new Set();
 const firestoreRegistrationListeners = new Map();
 let firestoreRegistrationListenerUid = null;
@@ -97,6 +105,7 @@ const attendanceMap = new Map(); // eventId -> { scannedAt, scannedBy, walkIn }
 const attendanceListeners = new Map(); // eventId -> unsub function
 const registrationSyncIds = new Set();
 const pendingRegistrationIds = new Set();
+const eventDetailsDataMap = new Map();
 let openQrEventId = null; // Event ID whose inline QR is displayed
 const openDetailsEventIds = new Set(); // Set of event IDs whose details are open
 
@@ -161,7 +170,6 @@ function getNow() {
 function getGreetingPrefix(now) {
   const hour = new Date(now).getHours();
   if (hour < 12) return "Good Morning";
-  if (hour === 12) return "Good Noon";
   if (hour < 18) return "Good Afternoon";
   return "Good Evening";
 }
@@ -178,10 +186,6 @@ function formatDate(val) {
   const d = typeof val === "number" ? new Date(val) : new Date(String(val));
   if (isNaN(d.getTime())) return "";
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-}
-
-function formatTimeRange(startMs, endMs) {
-  return `${formatTime(startMs)} – ${formatTime(endMs)}`;
 }
 
 function formatRemainingTime(ms) {
@@ -255,6 +259,91 @@ function renderPublicDocumentLinks(event) {
       ).join("<br>")}</div>
     </div>
   `;
+}
+
+function getEventCategories(event) {
+  const value = event.categories || event.category || event.tag || "";
+  const values = Array.isArray(value) ? value : String(value).split(/[,\n]+/);
+  return values.map((item) => String(item || "").trim()).filter(Boolean);
+}
+
+function normalizeSearchText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function matchesEventSearch(event) {
+  const query = normalizeSearchText(state.query);
+  return !query || normalizeSearchText(event.name).includes(query);
+}
+
+function getDashboardEventDetails(eventId, event) {
+  const capacity = Number(event.capacity) || 0;
+  const registeredCount = Math.max(0, Number(event.registeredCount) || 0);
+  const details = {
+    ...(eventDetailsDataMap.get(eventId) || event),
+    id: eventId,
+    eventId,
+    name: event.name,
+    title: event.name,
+    capacity,
+    maxCapacity: capacity,
+    maxSlots: capacity,
+    registeredCount,
+  };
+  if (capacity > 0) {
+    details.slotsOpen = Math.max(0, capacity - registeredCount);
+    details.availableSlots = details.slotsOpen;
+    details.slots = details.slotsOpen;
+  } else {
+    details.capacityMode = "N/A";
+    details.slotsOpen = undefined;
+    details.availableSlots = undefined;
+    details.slots = undefined;
+  }
+  return details;
+}
+
+function getRegistrationDeadlineAt(event) {
+  const registrationEnd = event.registrationEnd || event.registrationDeadline || "";
+  const deadlineText = String(registrationEnd || "").trim();
+  return registrationEnd instanceof Date
+    ? registrationEnd.getTime()
+    : typeof registrationEnd?.toDate === "function"
+      ? registrationEnd.toDate().getTime()
+      : Number.isFinite(registrationEnd?.seconds)
+        ? registrationEnd.seconds * 1000
+        : typeof registrationEnd === "number"
+          ? registrationEnd
+          : deadlineText
+            ? Date.parse(
+                /^\d{4}-\d{2}-\d{2}$/.test(deadlineText)
+                  ? `${deadlineText}T23:59:59.999+08:00`
+                  : /^\d{4}-\d{2}-\d{2}[T ]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(deadlineText)
+                    ? `${deadlineText.replace(" ", "T")}+08:00`
+                    : deadlineText,
+              )
+            : NaN;
+}
+
+function getRegistrationBlockReason(event, now = getNow(), eventEndMs = event.endMs) {
+  const status = String(event.status || event.publicationStatus || "")
+    .trim()
+    .toLowerCase();
+  const deadlineAt = getRegistrationDeadlineAt(event);
+  if (
+    event.registrationClosed === true ||
+    event.registrationEnabled === false ||
+    status === "closed" ||
+    String(event.registrationStatus || "").trim().toLowerCase() === "closed" ||
+    ["cancelled", "canceled", "completed"].includes(status) ||
+    Number.isFinite(deadlineAt) && now > deadlineAt ||
+    Number.isFinite(eventEndMs) && eventEndMs > 0 && now >= eventEndMs
+  ) {
+    return "Registration Closed";
+  }
+  const capacity = Number(event.capacity ?? event.maxCapacity ?? event.maxSlots ?? 0);
+  const registeredCount = Math.max(0, Number(event.registeredCount) || 0);
+  return capacity > 0 && registeredCount >= capacity ? "Fully Booked" : "";
 }
 
 function highlightMatch(text, query) {
@@ -360,7 +449,47 @@ function calendarEventOccursOn(event, isoDate) {
 }
 
 function normalizeEvent(id, data) {
+  eventDetailsDataMap.set(String(id), data);
   const name = data.name || data.title || data.eventName || "Untitled Event";
+  const categoryValue = data.category || data.categories || data.tag || "Academic & Learning";
+  const categories = (Array.isArray(categoryValue)
+    ? categoryValue
+    : String(categoryValue).split(/[,\n]+/)
+  ).map((category) => String(category || "").trim()).filter(Boolean);
+  const sourceValue = String(data.source || data.eventSource || "").trim().toLowerCase();
+  const source = /\bcsc\b/.test(sourceValue)
+    ? "CSC"
+    : /organization|organizational|ibits|event organizer/.test(sourceValue)
+      ? "Organizational"
+      : /external|admin|other/.test(sourceValue)
+        ? "Others / External"
+        : /pup|campus|cite|teacher|faculty/.test(sourceValue)
+          ? "PUP Official"
+          : data.source || data.eventSource
+            ? "Others / External"
+            : "PUP Official";
+  const organizationValue =
+    data.organizationName ||
+    data.organization ||
+    data.orgName ||
+    data.organizerOrganization ||
+    data.organizationCode ||
+    data.orgCode ||
+    data.organizerName ||
+    data.organizer;
+  let organizationName = typeof organizationValue === "object"
+    ? String(
+        organizationValue?.name ||
+          organizationValue?.organizationName ||
+          organizationValue?.organizationCode ||
+          organizationValue?.code ||
+          "",
+      ).trim()
+    : String(organizationValue || "").trim();
+  if (["event organizer", "not specified", "n/a"].includes(organizationName.toLowerCase())) {
+    organizationName = "";
+  }
+  const registrationEnd = data.registrationEnd || data.registrationDeadline || "";
   const dateISO = calendarDateToISO(
     data.dateISO || data.eventDate || data.event_date || data.date ||
     data.startDate || data.start_date || data.dateStart || data.startDateTime ||
@@ -426,10 +555,19 @@ function normalizeEvent(id, data) {
     title: name,
     venue: data.venue || data.location || "PUP Biñan Campus",
     location: data.venue || data.location || "PUP Biñan Campus",
-    category: data.category || data.categories || data.tag || "Academic & Learning",
+    category: categories.join(", ") || "Academic & Learning",
+    categories,
     tags: data.tags || data.eventTags || [],
     tag: data.tag || "",
-    source: data.source || "PUP Official",
+    source,
+    organizationName,
+    registrationEnd,
+    registrationDeadline: data.registrationDeadline || registrationEnd,
+    registrationDeadlineAt: getRegistrationDeadlineAt(data),
+    registrationClosed:
+      data.registrationClosed === true ||
+      data.registrationEnabled === false ||
+      String(data.registrationStatus || "").trim().toLowerCase() === "closed",
     startAt: data.startAt || new Date(startMs).toISOString(),
     endAt: data.endAt || new Date(endMs).toISOString(),
     startMs: startMs,
@@ -641,85 +779,31 @@ function getEventClassification(ev, now) {
 /* ---------------------------------------------------------
    STORAGE & CACHE
 --------------------------------------------------------- */
-function loadStudentProfileFromStorage() {
-  try {
-    const raw = localStorage.getItem("recovibeCurrentUser") || sessionStorage.getItem("recovibeCurrentUser");
-    if (raw) {
-      const u = JSON.parse(raw);
-      if (u) {
-        studentProfile.firstName = u.firstName || u.name?.split(" ")[0] || "Student";
-        studentProfile.middleName = u.middleName || "";
-        studentProfile.lastName = u.lastName || "";
-        studentProfile.fullName =
-          u.fullName ||
-          u.name ||
-          [u.firstName, u.lastName].filter(Boolean).join(" ") ||
-          "Student";
-        studentProfile.studentNo =
-          u.studentNumber || u.studentNo || u.studentId || "2025-00790-BN-1";
-        studentProfile.organization =
-          u.organization || u.courseOrganization || u.courseOrg ||
-          u.organizationCode || u.organizationName || "";
-        studentProfile.courseOrganization =
-          u.courseOrganization || u.courseOrg || studentProfile.organization;
-        studentProfile.courseOrg = u.courseOrg || studentProfile.organization;
-        studentProfile.StudentOrgs = uniqueProfileValues(
-          u.StudentOrgs,
-          u.studentOrgs,
-          u.organizations,
-          studentProfile.organization,
-        );
-        studentProfile.department = u.department || u.departmentCode || "";
-        studentProfile.departmentCode = u.departmentCode || u.department || "";
-        studentProfile.departments = uniqueProfileValues(
-          u.departments,
-          u.departmentCodes,
-          u.department,
-          u.departmentCode,
-          u.course,
-          u.program,
-        );
-
-        // Infer organization from department or course if blank
-        if (!studentProfile.organization && studentProfile.department) {
-          const dept = String(studentProfile.department).toUpperCase();
-          if (dept.includes("IT") || dept.includes("INFORMATION")) {
-            studentProfile.organization = "IBITS";
-            studentProfile.courseOrganization = "IBITS";
-          } else if (dept.includes("CPE") || dept.includes("COMPUTER")) {
-            studentProfile.organization = "ACES";
-            studentProfile.courseOrganization = "ACES";
-          } else if (dept.includes("IE") || dept.includes("INDUSTRIAL")) {
-            studentProfile.organization = "PIIE";
-            studentProfile.courseOrganization = "PIIE";
-          } else if (dept.includes("HRM") || dept.includes("HRSS")) {
-            studentProfile.organization = "HRSS";
-            studentProfile.courseOrganization = "HRSS";
-          }
-        }
-        if (!studentProfile.StudentOrgs.length && studentProfile.organization) {
-          studentProfile.StudentOrgs = [studentProfile.organization];
-        }
-      }
-    }
-  } catch (e) {
-    console.warn("Could not read student profile:", e);
-  }
-}
-
 function loadStudentPreferences() {
   try {
-    const raw =
-      localStorage.getItem("recovibeUserPreferences") ||
-      localStorage.getItem("recovibeStudentPreferences");
-    if (raw) {
-      const p = JSON.parse(raw);
-      if (Array.isArray(p.categories)) studentPreferences.categories = p.categories;
-      else if (Array.isArray(p)) studentPreferences.categories = p;
-      if (Array.isArray(p.sources)) studentPreferences.sources = p.sources;
-      if (Array.isArray(p.tags)) studentPreferences.tags = p.tags;
-      if (Array.isArray(p.organizations)) studentPreferences.organizations = p.organizations;
-    }
+    const storedUser = JSON.parse(
+      localStorage.getItem("recovibeCurrentUser") ||
+        sessionStorage.getItem("recovibeCurrentUser") ||
+        "{}",
+    );
+    if (!currentUid || storedUser.uid !== currentUid) return;
+    const raw = storedUser.preferences && JSON.stringify(storedUser.preferences)
+      || localStorage.getItem(`recovibePreferences:${currentUid}`);
+    const preferences = raw ? JSON.parse(raw) : {};
+    studentPreferences.categories = Array.isArray(preferences.categories)
+      ? preferences.categories
+      : Array.isArray(preferences)
+        ? preferences
+        : [];
+    studentPreferences.sources = Array.isArray(preferences.sources)
+      ? preferences.sources
+      : [];
+    studentPreferences.tags = Array.isArray(preferences.tags)
+      ? preferences.tags
+      : [];
+    studentPreferences.organizations = Array.isArray(preferences.organizations)
+      ? preferences.organizations
+      : [];
   } catch (e) {
     console.warn("Could not read preferences:", e);
   }
@@ -727,7 +811,8 @@ function loadStudentPreferences() {
 
 function readParticipationsFromStorage() {
   try {
-    const raw = localStorage.getItem("recovibeParticipations");
+    if (!currentUid) return [];
+    const raw = localStorage.getItem(`recovibeParticipations:${currentUid}`);
     if (!raw) return [];
     const list = JSON.parse(raw);
     if (!Array.isArray(list)) return [];
@@ -741,8 +826,9 @@ function readParticipationsFromStorage() {
 
 function saveParticipationsToStorage() {
   try {
+    if (!currentUid) return;
     const arr = Array.from(registeredEventIds);
-    localStorage.setItem("recovibeParticipations", JSON.stringify(arr));
+    localStorage.setItem(`recovibeParticipations:${currentUid}`, JSON.stringify(arr));
   } catch (e) {
     console.warn("Could not save participations:", e);
   }
@@ -790,32 +876,30 @@ async function getQRCodeLib() {
 }
 
 async function getStudentQrToken() {
+  if (!currentUid || auth?.currentUser?.uid !== currentUid) {
+    throw new Error("Sign in to load your attendance QR code.");
+  }
+  const tokenStorageKey = `recovibe_permanent_qr_token:${currentUid}`;
   if (permanentQrToken) return permanentQrToken;
-  const cached = localStorage.getItem("recovibe_permanent_qr_token");
+  const cached = localStorage.getItem(tokenStorageKey);
   if (cached) {
     permanentQrToken = cached;
     return cached;
   }
 
-  if (functions && currentUid && isFirebaseConfigured) {
-    try {
-      const getMyQrTokenCallable = httpsCallable(functions, "getMyQrToken");
-      const res = await getMyQrTokenCallable();
-      if (res?.data?.token) {
-        permanentQrToken = res.data.token;
-        localStorage.setItem("recovibe_permanent_qr_token", permanentQrToken);
-        return permanentQrToken;
-      }
-    } catch (err) {
-      console.warn("getMyQrToken notice:", err);
-    }
+  if (!functions || !isFirebaseConfigured || !navigator.onLine) {
+    throw new Error("Attendance QR code is unavailable. Check your connection and try again.");
   }
-
-  // Fallback permanent token
-  const fallback = `${currentUid || studentProfile.studentNo}.1.fallback_signed_token`;
-  permanentQrToken = fallback;
-  localStorage.setItem("recovibe_permanent_qr_token", fallback);
-  return fallback;
+  const getMyQrTokenCallable = httpsCallable(functions, "getMyQrToken");
+  const res = await getMyQrTokenCallable();
+  const token = String(res?.data?.token || "");
+  if (!token) throw new Error("Attendance QR code could not be loaded. Please try again.");
+  if (auth?.currentUser?.uid !== currentUid) {
+    throw new Error("The signed-in account changed. Please retry.");
+  }
+  permanentQrToken = token;
+  localStorage.setItem(tokenStorageKey, token);
+  return token;
 }
 
 async function renderQrToCanvas(canvas, token) {
@@ -914,16 +998,16 @@ function syncAttendanceListeners(liveEvents) {
 
 // 1. Top Bar Greeting & Date
 function renderGreeting() {
-  const now = getNow();
+  const now = Date.now();
   const greetingEl = document.getElementById("dashboardGreeting");
   const greetingNameEl = document.getElementById("greetingName");
   const todayDateEl = document.getElementById("todayDate");
 
   const prefix = getGreetingPrefix(now);
-  const firstName = studentProfile.firstName || "Student";
+  const firstName = studentProfile.firstName || "";
 
   if (greetingEl) {
-    greetingEl.innerHTML = `${prefix}, <span id="greetingName">${escapeHtml(firstName)}</span>`;
+    greetingEl.innerHTML = `${prefix}${firstName ? `, <span id="greetingName">${escapeHtml(firstName)}</span>` : ""}`;
   } else if (greetingNameEl) {
     greetingNameEl.textContent = firstName;
   }
@@ -942,50 +1026,33 @@ function renderGreeting() {
 function renderRecommended() {
   const container = document.getElementById("recGrid");
   if (!container) return;
+  if (renderEventFetchState(container)) return;
 
   const now = getNow();
-  const normalizePreference = (value) => String(value || "").toLowerCase().trim();
-  const userPreferences = new Set([
-    ...(studentPreferences.categories || []),
-    ...(studentPreferences.sources || []),
-    ...(studentPreferences.tags || []),
-    ...(studentPreferences.organizations || []),
-    studentProfile.organization,
-    studentProfile.courseOrganization,
-    studentProfile.courseOrg,
-  ].map(normalizePreference).filter(Boolean));
+  const normalizePreference = normalizeSearchText;
+  const userCategories = new Set(
+    (studentPreferences.categories || [])
+      .map(normalizePreference)
+      .filter(Boolean),
+  );
   const upcoming = Array.from(rawEventsMap.values())
-    .filter((ev) => getEventClassification(ev, now) === "upcoming")
+    .filter((ev) =>
+      getEventClassification(ev, now) === "upcoming" &&
+      matchesEventSearch(ev),
+    )
     .sort((a, b) => a.startMs - b.startMs);
-  const preferred = upcoming.filter((ev) => {
-    const eventPreferences = [
-      ev.category,
-      ev.organizerName,
-      ev.source,
-      ev.organization,
-      ev.targetOrgs,
-      ev.targetOrganizations,
-      ev.TargetOrgs,
-      ev.studentOrgs,
-      ev.StudentOrgs,
-      ev.tags,
-      ev.tag,
-    ];
-    return eventPreferences.some((value) =>
-      (Array.isArray(value) ? value : [value])
-        .map(normalizePreference)
-        .some((value) => userPreferences.has(value))
-    );
-  });
-  const matched = (preferred.length
-    ? preferred
-    : upcoming.filter((ev) => !registeredEventIds.has(ev.id))
-  ).slice(0, 3);
+  const matched = upcoming
+    .filter((ev) =>
+      getEventCategories(ev).some((category) =>
+        userCategories.has(normalizePreference(category)),
+      ),
+    )
+    .slice(0, 3);
 
   if (matched.length === 0) {
     container.innerHTML = `
       <div class="empty-state" style="width: 100%;">
-        <div class="empty-state-title">No upcoming events at this time.</div>
+        <div class="empty-state-title">${state.query ? `No events match “${escapeHtml(state.query)}”.` : "No upcoming events at this time."}</div>
         <div class="empty-state-sub">Update your <a href="StudentProfile.html#preferencesPanel" style="color: var(--maroon-700); text-decoration: underline;">preferences</a> to get personalized recommendations.</div>
       </div>
     `;
@@ -994,34 +1061,27 @@ function renderRecommended() {
 
   container.innerHTML = matched
     .map((ev) => {
-      const isRegistered = registeredEventIds.has(ev.id);
-      const isLive = getEventClassification(ev, now) === "live";
-
-      let actionBtn = "";
-      if (isRegistered) {
-        actionBtn = `<button type="button" class="btn-cancel-sm btn-cancel-reg" data-event-id="${ev.id}">Cancel registration</button>`;
-      } else {
-        if (ev.capacity > 0 && ev.registeredCount >= ev.capacity) {
-          actionBtn = `<span class="btn-disabled-sm">Full</span>`;
-        } else {
-          const isRegistering = pendingRegistrationIds.has(ev.id);
-          actionBtn = `<button type="button" class="btn-primary-sm btn-register" data-event-id="${ev.id}" ${isRegistering ? "disabled aria-busy=\"true\"" : ""}>${isRegistering ? "Registering..." : "Register"}</button>`;
-        }
-      }
+      const categories = getEventCategories(ev);
+      const primaryCategory = categories[0] || "Academic & Learning";
+      const sourceLabel =
+        ev.source === "Organizational" && ev.organizationName
+          ? `Organized by ${ev.organizationName}`
+          : ev.source || "PUP Official";
 
       return `
         <article class="rec-card" id="rec-card-${ev.id}" data-event-id="${ev.id}">
-          <div style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
-            <span class="rec-tag tag-matches">Matches ${escapeHtml(ev.category)}</span>
-            ${isLive ? '<span class="tag-live"><span class="pulse-dot" aria-hidden="true"></span>Live</span>' : ''}
+          <div class="rec-category-row">
+            <div class="rec-category-pills">
+              <span class="category category-${categoryClass(primaryCategory)}">${escapeHtml(primaryCategory)}</span>
+              ${categories.length > 1 ? `<span class="rec-category-more">+${categories.length - 1}</span>` : ""}
+              <span class="rec-source-pill">${escapeHtml(sourceLabel)}</span>
+            </div>
           </div>
           <h3>${highlightMatch(ev.name, state.query)}</h3>
-          <div class="rec-source">${escapeHtml(ev.organizerName || ev.source || "PUP Biñan Campus")}</div>
           <div class="rec-when">${formatDate(ev.startMs)} · ${formatTime(ev.startMs)}</div>
-          <div class="rec-match">${escapeHtml(ev.venue)}</div>
-          <div style="margin-top:auto; padding-top:8px;">
-            ${actionBtn}
-          </div>
+          <div class="rec-venue">${escapeHtml(ev.venue)}</div>
+          <div class="rec-match">Matches your preferences</div>
+          <button type="button" class="btn-outline btn-toggle-details rec-details-button" data-event-id="${ev.id}">Event Details</button>
         </article>
       `;
     })
@@ -1074,16 +1134,8 @@ function renderHappeningNow() {
   }
 
   // Filter by search query
-  const q = state.query.toLowerCase();
-  const filtered = liveEvents.filter((ev) => {
-    if (!q) return true;
-    return (
-      ev.name.toLowerCase().includes(q) ||
-      ev.venue.toLowerCase().includes(q) ||
-      ev.category.toLowerCase().includes(q) ||
-      ev.description.toLowerCase().includes(q)
-    );
-  });
+  const q = normalizeSearchText(state.query);
+  const filtered = liveEvents.filter(matchesEventSearch);
 
   if (liveEvents.length === 0) {
     const upcoming = allEvents
@@ -1096,7 +1148,7 @@ function renderHappeningNow() {
     }
     container.innerHTML = `
       <div class="empty-state">
-        <div class="empty-state-title">Nothing is happening right now.</div>
+        <div class="empty-state-title">No ongoing events</div>
         <div class="empty-state-sub">${nextMsg}</div>
       </div>
     `;
@@ -1142,8 +1194,9 @@ function renderHappeningNow() {
       } else if (isRegistered) {
         actionHtml = `<button type="button" class="btn-primary-sm btn-toggle-qr" data-event-id="${ev.id}" aria-expanded="${isQrOpen}">${isQrOpen ? "Hide QR" : "Show my QR"}</button>`;
       } else {
-        if (ev.capacity > 0 && ev.registeredCount >= ev.capacity) {
-          actionHtml = `<span class="btn-disabled-sm">Full</span>`;
+        const registrationBlockReason = getRegistrationBlockReason(ev, now);
+        if (registrationBlockReason) {
+          actionHtml = `<button type="button" class="btn-disabled-sm" disabled>${registrationBlockReason}</button>`;
         } else {
           const isRegistering = pendingRegistrationIds.has(ev.id);
           actionHtml = `<button type="button" class="btn-primary-sm btn-register" data-event-id="${ev.id}" ${isRegistering ? "disabled aria-busy=\"true\"" : ""}>${isRegistering ? "Registering..." : "Register"}</button>`;
@@ -1159,7 +1212,7 @@ function renderHappeningNow() {
               <canvas id="inlineQrCanvas_${ev.id}" width="150" height="150" aria-label="Attendance QR Code"></canvas>
             </div>
             <div class="inline-qr-name">${escapeHtml(studentProfile.fullName)}</div>
-            <div class="inline-qr-sub">${escapeHtml(studentProfile.studentNo)} · ${escapeHtml(studentProfile.organization || "PUP Biñan")}</div>
+            <div class="inline-qr-sub">${escapeHtml([studentProfile.studentNo, studentProfile.organization].filter(Boolean).join(" · "))}</div>
             <div class="inline-qr-note">Show this at the entrance.</div>
             <button type="button" class="btn-hide-qr btn-toggle-qr" data-event-id="${ev.id}">Hide QR</button>
           </div>
@@ -1185,17 +1238,23 @@ function renderHappeningNow() {
         `;
       }
 
+      const categories = getEventCategories(ev);
+      const primaryCategory = categories[0] || "Academic & Learning";
       return `
         <article class="event-card event-card--live" id="live-card-${ev.id}" data-event-id="${ev.id}">
           <div class="event-body">
             <div class="event-top-row">
+              <div class="event-card-categories">
+                <span class="category category-${categoryClass(primaryCategory)}">${escapeHtml(primaryCategory)}</span>
+                ${categories.length > 1 ? `<span class="rec-category-more">+${categories.length - 1}</span>` : ""}
+              </div>
               <span class="tag-live"><span class="pulse-dot" aria-hidden="true"></span>Live</span>
               <span class="live-ends-in">${formatRemainingTime(ev.endMs - now)}</span>
               ${isRegistered && !isCheckedIn ? '<span class="tag-registered-small">Registered</span>' : ''}
             </div>
             <h3 class="event-title">${highlightMatch(ev.name, state.query)}</h3>
             <div class="event-meta">
-              <span>${eventMetaIconClock()} ${formatTimeRange(ev.startMs, ev.endMs)}</span>
+              <span>${eventMetaIconClock()} ${formatTime(ev.startMs)}</span>
               <span>${eventMetaIconPin()} ${highlightMatch(ev.venue, state.query)}</span>
             </div>
             <div class="progress-bar-wrap" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="Event progress (${pct}%)">
@@ -1223,7 +1282,13 @@ function renderHappeningNow() {
   if (openQrEventId) {
     const canvas = document.getElementById(`inlineQrCanvas_${openQrEventId}`);
     if (canvas) {
-      getStudentQrToken().then((token) => renderQrToCanvas(canvas, token));
+      getStudentQrToken()
+        .then((token) => renderQrToCanvas(canvas, token))
+        .catch((error) => {
+          console.error("Could not load the Dashboard attendance QR code:", error);
+          const note = document.querySelector(`#inlineQrPanel_${openQrEventId} .inline-qr-note`);
+          if (note) note.textContent = "Attendance QR could not be loaded. Please try again.";
+        });
     }
   }
 }
@@ -1246,16 +1311,8 @@ function renderUpcoming() {
     )
     .sort((a, b) => a.startMs - b.startMs);
 
-  const q = state.query.toLowerCase();
-  const filtered = upcomingEvents.filter((ev) => {
-    if (!q) return true;
-    return (
-      ev.name.toLowerCase().includes(q) ||
-      ev.venue.toLowerCase().includes(q) ||
-      ev.category.toLowerCase().includes(q) ||
-      ev.description.toLowerCase().includes(q)
-    );
-  });
+  const q = normalizeSearchText(state.query);
+  const filtered = upcomingEvents.filter(matchesEventSearch);
 
   if (upcomingEvents.length === 0) {
     container.innerHTML = `
@@ -1283,28 +1340,17 @@ function renderUpcoming() {
       const isDetailsOpen = openDetailsEventIds.has(ev.id);
 
       const evDate = new Date(ev.startMs);
-      const nowDate = new Date(now);
-      const isToday =
-        evDate.getFullYear() === nowDate.getFullYear() &&
-        evDate.getMonth() === nowDate.getMonth() &&
-        evDate.getDate() === nowDate.getDate();
-
-      const timeLabel = isToday
-        ? formatStartsIn(ev.startMs - now)
-        : `${formatDate(ev.startMs)} · ${formatTime(ev.startMs)}`;
 
       const dateParts = {
         month: evDate.toLocaleDateString("en-US", { month: "short" }).toUpperCase(),
         day: evDate.getDate(),
         year: evDate.getFullYear(),
       };
-
       let actionBtn = "";
-      if (isRegistered) {
-        actionBtn = `<button type="button" class="btn-cancel-sm btn-cancel-reg" data-event-id="${ev.id}">Cancel registration</button>`;
-      } else {
-        if (ev.capacity > 0 && ev.registeredCount >= ev.capacity) {
-          actionBtn = `<span class="btn-disabled-sm">Full</span>`;
+      if (!isRegistered) {
+        const registrationBlockReason = getRegistrationBlockReason(ev, now);
+        if (registrationBlockReason) {
+          actionBtn = `<button type="button" class="btn-disabled-sm" disabled>${registrationBlockReason}</button>`;
         } else {
           const isRegistering = pendingRegistrationIds.has(ev.id);
           actionBtn = `<button type="button" class="btn-primary-sm btn-register" data-event-id="${ev.id}" ${isRegistering ? "disabled aria-busy=\"true\"" : ""}>${isRegistering ? "Registering..." : "Register"}</button>`;
@@ -1329,6 +1375,8 @@ function renderUpcoming() {
         `;
       }
 
+      const categories = getEventCategories(ev);
+      const primaryCategory = categories[0] || "Academic & Learning";
       return `
         <article class="event-card" id="upcoming-card-${ev.id}" data-event-id="${ev.id}">
           <div class="event-date">
@@ -1338,16 +1386,19 @@ function renderUpcoming() {
           </div>
           <div class="event-body">
             <div class="event-top-row">
-              <span class="category category-${categoryClass(ev.category)}">${escapeHtml(ev.category)}</span>
+              <div class="event-card-categories">
+                <span class="category category-${categoryClass(primaryCategory)}">${escapeHtml(primaryCategory)}</span>
+                ${categories.length > 1 ? `<span class="rec-category-more">+${categories.length - 1}</span>` : ""}
+              </div>
               ${isRegistered ? '<span class="tag-registered-small">Registered</span>' : ''}
             </div>
             <h3 class="event-title">${highlightMatch(ev.name, state.query)}</h3>
             <div class="event-meta">
-              <span>${eventMetaIconClock()} ${timeLabel}</span>
+              <span>${eventMetaIconClock()} ${formatTime(ev.startMs)}</span>
               <span>${eventMetaIconPin()} ${highlightMatch(ev.venue, state.query)}</span>
             </div>
             <div class="event-foot">
-              <span class="slots">${ev.capacity > 0 ? `${Math.max(0, ev.capacity - ev.registeredCount)} slots open` : "Open registration"}</span>
+              <span class="slots">${ev.capacity > 0 ? `${Math.max(0, ev.capacity - ev.registeredCount)} slots left` : "Open registration"}</span>
               <div class="event-actions">
                 ${actionBtn}
                 <button type="button" class="btn-outline btn-toggle-details" data-event-id="${ev.id}" aria-expanded="${isDetailsOpen}">Details</button>
@@ -1473,6 +1524,20 @@ function renderCalendarDayEvents() {
   const container = document.getElementById("calDayEvents");
   if (!container) return;
   container.innerHTML = "";
+  if (eventFetchError) {
+    container.innerHTML = `
+      <div class="empty-state" role="alert">
+        <div class="empty-state-title">Events could not be loaded.</div>
+        <div class="empty-state-sub">${escapeHtml(eventFetchError)}</div>
+        <button type="button" class="btn-outline btn-retry-event-fetch">Retry</button>
+      </div>
+    `;
+    return;
+  }
+  if (eventFetchLoading && rawEventsMap.size === 0) {
+    container.textContent = "Loading events...";
+    return;
+  }
 
   const now = getNow();
   const selDate = state.calSelectedDate;
@@ -1523,22 +1588,11 @@ function renderCalendarDayEvents() {
         `;
       }
 
-      const isRegistered = registeredEventIds.has(ev.id);
       const classification = getEventClassification(ev, now);
 
       let tagClass = "dot-other";
       if (classification === "live") {
         tagClass = "dot-live";
-      }
-
-      let actionBtn = "";
-      if (classification !== "past") {
-        if (isRegistered) {
-          actionBtn = `<button type="button" class="btn-cancel-sm btn-cancel-reg" data-event-id="${ev.id}" style="padding: 3px 8px; font-size: 11px;">Cancel</button>`;
-        } else {
-          const isRegistering = pendingRegistrationIds.has(ev.id);
-          actionBtn = `<button type="button" class="btn-primary-sm btn-register" data-event-id="${ev.id}" ${isRegistering ? "disabled aria-busy=\"true\"" : ""} style="padding: 3px 8px; font-size: 11px;">${isRegistering ? "Registering..." : "Register"}</button>`;
-        }
       }
 
       return `
@@ -1547,9 +1601,6 @@ function renderCalendarDayEvents() {
           <div class="cal-selected-event-copy" style="flex:1;">
             <strong>${escapeHtml(ev.name)}</strong>
             <small>${formatTime(ev.startMs)} · ${escapeHtml(ev.venue)}</small>
-          </div>
-          <div style="display:flex; align-items:center; gap:4px;">
-            ${actionBtn}
           </div>
         </div>
       `;
@@ -1568,7 +1619,7 @@ function renderCalendarDayEvents() {
   container.innerHTML = `
     <div class="cal-day-events-heading" style="display:flex; justify-content:space-between; align-items:center;">
       <span>${dateLabel}</span>
-      <a href="Events.html?from=${isoStr}&to=${isoStr}" class="cal-open-day-link" style="font-size: 11.5px; font-weight: 600; color: var(--maroon-700); text-decoration: underline;" title="View this day in Events">Open day</a>
+      <a href="Events.html?from=${isoStr}&to=${isoStr}" class="cal-open-day-link" style="font-size: 11.5px; font-weight: 600; color: var(--maroon-700); text-decoration: underline;" title="View this day in Events">View Events</a>
     </div>
     <div class="cal-selected-events">${eventsHtml}</div>
   `;
@@ -1599,10 +1650,23 @@ async function handleRegister(eventId) {
     announce("Sign in is required to register for events.");
     return;
   }
-  if (!isFirebaseConfigured || (!functions && !firestoreEventsMap.has(eventId))) {
+  const uid = String(auth.currentUser.uid || "").trim();
+  if (!uid) {
+    showToast("Your session is not ready. Please try again.");
+    announce("Your session is not ready.");
+    return;
+  }
+  if (!isFirebaseConfigured || (!db && !functions)) {
     showToast("Registration is unavailable right now. Please try again later.");
     announce("Registration is unavailable.");
     return;
+  }
+
+  const registrationBlockReason = getRegistrationBlockReason(ev);
+  if (registrationBlockReason) {
+    showToast(registrationBlockReason);
+    announce(registrationBlockReason);
+    return false;
   }
 
   pendingRegistrationIds.add(eventId);
@@ -1614,9 +1678,9 @@ async function handleRegister(eventId) {
 
   try {
     let registeredCount;
-    if (firestoreEventsMap.has(eventId) && db) {
+    if (db) {
       const eventRef = doc(db, "events", eventId);
-      const registrationRef = doc(db, "events", eventId, "registrations", auth.currentUser.uid);
+      const registrationRef = doc(db, "events", eventId, "registrations", uid);
       registeredCount = await runTransaction(db, async (transaction) => {
         const [eventSnapshot, registrationSnapshot] = await Promise.all([
           transaction.get(eventRef),
@@ -1637,6 +1701,14 @@ async function handleRegister(eventId) {
           eventData.isPublished !== true
         ) {
           throw new Error("Registration is closed because this event is not published.");
+        }
+        const transactionBlockReason = getRegistrationBlockReason(
+          eventData,
+          getNow(),
+          ev.endMs,
+        );
+        if (transactionBlockReason) {
+          throw new Error(transactionBlockReason);
         }
         if (ev.endMs && getNow() >= ev.endMs) {
           throw new Error("Registration is closed because this event has ended.");
@@ -1665,7 +1737,7 @@ async function handleRegister(eventId) {
           updatedAt: now,
         });
         transaction.set(registrationRef, {
-          uid: auth.currentUser.uid,
+          uid,
           status: "registered",
           registeredAt: now,
           at: now,
@@ -1674,7 +1746,7 @@ async function handleRegister(eventId) {
       });
     } else {
       const registerFn = httpsCallable(functions, "registerForEvent");
-      const response = await registerFn({ eventId });
+      const response = await registerFn({ eventId, uid });
       if (response.data?.success !== true) {
         throw new Error("The registration could not be completed. Please try again.");
       }
@@ -1697,15 +1769,21 @@ async function handleRegister(eventId) {
     const errorCode = String(err?.code || "").toLowerCase();
     const errorText = String(err?.message || "").toLowerCase();
     const message =
-      errorCode === "already-registered" ||
+      errorText.includes("registration closed") ||
+      errorText.includes("registration is closed") ||
+      errorText.includes("deadline")
+        ? "Registration Closed"
+        : errorText.includes("fully booked") ||
+            errorText.includes("full")
+          ? "Fully Booked"
+          : errorCode === "already-registered" ||
       errorCode.includes("already-exists") ||
       errorText.includes("already registered")
         ? "You are already registered for this event."
         : errorCode.includes("permission-denied")
           ? "Registration was denied by Firestore security rules. Please contact an administrator."
-          : errorCode.includes("resource-exhausted") ||
-              errorText.includes("full")
-            ? "This event is full."
+          : errorCode.includes("resource-exhausted")
+            ? "Fully Booked"
             : err?.message || "Could not register for this event. Please try again.";
     showToast(message);
     announce(message);
@@ -1890,11 +1968,15 @@ function initDataListeners(authenticatedUser = auth?.currentUser) {
     eventFetchError = "Sign in to load student events.";
     renderHappeningNow();
     renderUpcoming();
+    renderRecommended();
+    renderCalendar();
   }
   if (isFirebaseConfigured && db && authenticatedUser) {
     eventFetchLoading = true;
     eventFetchError = null;
     const handleEventsSnapshot = (snapshot) => {
+      clearTimeout(eventFetchTimeout);
+      eventFetchTimeout = null;
       eventFetchLoading = false;
       eventFetchError = null;
       const publishedEvents = new Map();
@@ -1912,57 +1994,96 @@ function initDataListeners(authenticatedUser = auth?.currentUser) {
       rebuildStudentEvents();
     };
     const listenForEvents = (eventsQuery) => {
+      clearTimeout(eventFetchTimeout);
+      eventFetchTimeout = window.setTimeout(() => {
+        if (!eventFetchLoading) return;
+        unsubscribeFirestoreEvents?.();
+        unsubscribeFirestoreEvents = null;
+        eventFetchLoading = false;
+        eventFetchError = "Events are taking longer than expected. Check your connection and retry.";
+        renderHappeningNow();
+        renderUpcoming();
+        renderRecommended();
+        renderCalendar();
+      }, 8000);
       try {
         unsubscribeFirestoreEvents = onSnapshot(
           eventsQuery,
           handleEventsSnapshot,
           (error) => {
             console.error("Event Fetch Error:", error);
+            clearTimeout(eventFetchTimeout);
+            eventFetchTimeout = null;
             eventFetchLoading = false;
             eventFetchError = error?.code === "permission-denied"
               ? "Your account cannot read published events. Check your sign-in and Firestore access."
               : "Check your connection and try again.";
             renderHappeningNow();
             renderUpcoming();
+            renderRecommended();
+            renderCalendar();
           },
         );
       } catch (error) {
         console.error("Event Fetch Error:", error);
+        clearTimeout(eventFetchTimeout);
+        eventFetchTimeout = null;
         eventFetchLoading = false;
         eventFetchError = error?.code === "permission-denied"
           ? "Your account cannot read published events. Check your sign-in and Firestore access."
           : "Check your connection and try again.";
         renderHappeningNow();
         renderUpcoming();
+        renderRecommended();
+        renderCalendar();
       }
     };
     const publishedEventsQuery = () =>
       query(
         collection(db, "events"),
         where("status", "in", [
+          "approved",
           "published",
           "completed",
           "rescheduled",
-          "cancelled",
-          "canceled",
         ]),
       );
     retryEventFetch = () => {
       unsubscribeFirestoreEvents?.();
+      eventFetchLoading = true;
+      eventFetchError = null;
+      renderHappeningNow();
+      renderUpcoming();
+      renderRecommended();
+      renderCalendar();
       listenForEvents(publishedEventsQuery());
     };
     try {
       listenForEvents(publishedEventsQuery());
     } catch (error) {
       console.error("Event Fetch Error:", error);
+      clearTimeout(eventFetchTimeout);
+      eventFetchTimeout = null;
       eventFetchLoading = false;
       eventFetchError = error?.code === "permission-denied"
         ? "Your account cannot read published events. Check your sign-in and Firestore access."
         : "Check your connection and try again.";
       renderHappeningNow();
       renderUpcoming();
+      renderRecommended();
+      renderCalendar();
     }
-    activeCleanups.push(() => unsubscribeFirestoreEvents?.());
+    activeCleanups.push(() => {
+      clearTimeout(eventFetchTimeout);
+      unsubscribeFirestoreEvents?.();
+    });
+  } else if (authenticatedUser) {
+    eventFetchLoading = false;
+    eventFetchError = "Event services are unavailable. Please retry.";
+    renderHappeningNow();
+    renderUpcoming();
+    renderRecommended();
+    renderCalendar();
   }
 
   // 1. Server time offset
@@ -2080,6 +2201,8 @@ function wireEvents() {
           : "Sign in to load student events.";
         renderHappeningNow();
         renderUpcoming();
+        renderRecommended();
+        renderCalendar();
       }
       return;
     }
@@ -2089,16 +2212,18 @@ function wireEvents() {
     if (regBtn) {
       e.preventDefault();
       const eventId = regBtn.getAttribute("data-event-id");
-      if (eventId) handleRegister(eventId);
-      return;
-    }
-
-    // Cancel Registration
-    const cancelBtn = e.target.closest(".btn-cancel-reg");
-    if (cancelBtn) {
-      e.preventDefault();
-      const eventId = cancelBtn.getAttribute("data-event-id");
-      if (eventId) handleCancelRegistration(eventId);
+      const event = eventId && rawEventsMap.get(eventId);
+      if (event && window.RecovibeStudentEventDetails) {
+        window.RecovibeStudentEventDetails.open(
+          getDashboardEventDetails(eventId, event),
+          {
+          dashboard: true,
+          dashboardRegistrationConfirmation: true,
+          },
+        );
+      } else {
+        showToast("Event details are unavailable. Please try again.");
+      }
       return;
     }
 
@@ -2122,7 +2247,10 @@ function wireEvents() {
       if (eventId) {
         const event = rawEventsMap.get(eventId);
         if (event && window.RecovibeStudentEventDetails) {
-          window.RecovibeStudentEventDetails.open(event);
+          window.RecovibeStudentEventDetails.open(
+            getDashboardEventDetails(eventId, event),
+            { dashboard: true },
+          );
           return;
         }
         if (openDetailsEventIds.has(eventId)) {
@@ -2145,12 +2273,15 @@ function wireEvents() {
   window.addEventListener("storage", (e) => {
     if (
       e.key === "recovibeUserPreferences" ||
-      e.key === "recovibeStudentPreferences"
+      e.key === "recovibeStudentPreferences" ||
+      e.key === "recovibePreferences" ||
+      e.key === "recovibePreferencesUpdated" ||
+      String(e.key || "").startsWith("recovibePreferences:")
     ) {
       loadStudentPreferences();
       renderRecommended();
     }
-    if (e.key === "recovibeParticipations") {
+    if (e.key === `recovibeParticipations:${currentUid}`) {
       registeredEventIds = new Set(readParticipationsFromStorage());
       renderHappeningNow();
       renderUpcoming();
@@ -2169,20 +2300,7 @@ function initSidebar() {
     sidebar.classList.remove("is-collapsed");
   } catch {}
 
-  const userAvatar = document.getElementById("userAvatar");
-  const userName = document.getElementById("userName");
-  const userRole = document.getElementById("userRole");
-
-  if (userAvatar) {
-    const initial = (studentProfile.firstName || "S")[0].toUpperCase();
-    userAvatar.textContent = initial;
-  }
-  if (userName) {
-    userName.textContent = studentProfile.fullName || "Student";
-  }
-  if (userRole) {
-    userRole.textContent = "Student";
-  }
+  renderStudentSidebar(studentProfile);
 }
 
 function initOfflineSupport() {
@@ -2216,12 +2334,10 @@ function setupCleanup() {
    INIT
 --------------------------------------------------------- */
 function init() {
-  loadStudentProfileFromStorage();
-  loadStudentPreferences();
-  registeredEventIds = new Set(readParticipationsFromStorage());
-
   initSidebar();
   renderGreeting();
+  renderRecommended();
+  renderCalendar();
   initOfflineSupport();
   wireEvents();
   setupCleanup();
@@ -2238,89 +2354,117 @@ function init() {
   // Auth state listener
   if (auth) {
     onAuthStateChanged(auth, async (user) => {
-      if (user) {
-        currentUid = user.uid;
-        if (db) {
-          try {
-            const userSnap = await getDoc(doc(db, "users", user.uid));
-            if (userSnap.exists()) {
-              const u = userSnap.data();
-              const organization =
-                u.organization ||
-                u.courseOrganization ||
-                u.courseOrg ||
-                u.organizationCode ||
-                u.organizationName;
-              if (organization) {
-                studentProfile.organization = organization;
-                studentProfile.courseOrganization =
-                  u.courseOrganization || u.courseOrg || organization;
-                studentProfile.courseOrg = u.courseOrg || organization;
-              }
-              studentProfile.StudentOrgs = uniqueProfileValues(
-                u.StudentOrgs,
-                u.studentOrgs,
-                u.organizations,
-                organization,
-              );
-              studentProfile.departments = uniqueProfileValues(
-                u.departments,
-                u.departmentCodes,
-                u.department,
-                u.departmentCode,
-                u.course,
-                u.program,
-              );
-              if (u.department || u.departmentCode) {
-                studentProfile.department = u.department || u.departmentCode || studentProfile.department;
-                studentProfile.departmentCode = u.departmentCode || u.department || studentProfile.departmentCode;
-              }
-
-              if (!studentProfile.organization && studentProfile.department) {
-                const dept = String(studentProfile.department).toUpperCase();
-                if (dept.includes("IT") || dept.includes("INFORMATION")) {
-                  studentProfile.organization = "IBITS";
-                  studentProfile.courseOrganization = "IBITS";
-                } else if (dept.includes("CPE") || dept.includes("COMPUTER")) {
-                  studentProfile.organization = "ACES";
-                  studentProfile.courseOrganization = "ACES";
-                } else if (dept.includes("IE") || dept.includes("INDUSTRIAL")) {
-                  studentProfile.organization = "PIIE";
-                  studentProfile.courseOrganization = "PIIE";
-                } else if (dept.includes("HRM") || dept.includes("HRSS")) {
-                  studentProfile.organization = "HRSS";
-                  studentProfile.courseOrganization = "HRSS";
-                }
-              }
-              if (!studentProfile.StudentOrgs.length && studentProfile.organization) {
-                studentProfile.StudentOrgs = [studentProfile.organization];
-              }
-              if (u.firstName || u.fullName || u.name) {
-                studentProfile.fullName = u.fullName || u.name || [u.firstName, u.lastName].filter(Boolean).join(" ");
-                studentProfile.firstName = u.firstName || studentProfile.fullName.split(" ")[0];
-              }
-              console.log(
-                `[Student Dashboard] Verified student profile from Firestore for UID ${user.uid}: Organization = "${studentProfile.organization}", CourseOrg = "${studentProfile.courseOrganization}", Department = "${studentProfile.department}"`
-              );
-              renderGreeting();
-              initSidebar();
-              rebuildStudentEvents();
-            }
-          } catch (profileErr) {
-            console.warn("[Student Dashboard] Could not fetch Firestore user doc:", profileErr);
-          }
-        }
-        if (user.displayName && studentProfile.fullName === "Student") {
-          studentProfile.fullName = user.displayName;
-          studentProfile.firstName = user.displayName.split(" ")[0];
-          renderGreeting();
-          initSidebar();
-        }
+      if (!user) {
+        currentUid = null;
+        registeredEventIds.clear();
+        rawEventsMap.clear();
+        clearCachedStudentProfile();
+        window.location.replace("StudentLogin.html");
+        return;
       }
-      initDataListeners(user);
+
+      if (currentUid && currentUid !== user.uid) {
+        permanentQrToken = "";
+        registeredEventIds.clear();
+        rawEventsMap.clear();
+        firestoreEventsMap.clear();
+        realtimeEventsMap.clear();
+        Object.keys(studentProfile).forEach((key) => delete studentProfile[key]);
+        renderStudentSidebar({});
+        renderGreeting();
+        renderRecommended();
+        renderCalendar();
+      }
+      currentUid = user.uid;
+      try {
+        const profile = await loadStudentProfile(user);
+        if (auth.currentUser?.uid !== user.uid) return;
+
+        Object.keys(studentProfile).forEach((key) => delete studentProfile[key]);
+        Object.assign(studentProfile, profile);
+        const fullName = String(
+          profile.fullName ||
+            profile.name ||
+            [profile.firstName, profile.middleName, profile.lastName]
+              .filter(Boolean)
+              .join(" "),
+        ).trim();
+        studentProfile.firstName = profile.firstName || fullName.split(/\s+/)[0] || "";
+        studentProfile.fullName = fullName;
+        studentProfile.studentNo =
+          profile.studentNumber || profile.studentNo || profile.studentId || "";
+        studentProfile.organization =
+          profile.organization ||
+          profile.courseOrganization ||
+          profile.courseOrg ||
+          profile.organizationCode ||
+          profile.organizationName ||
+          "";
+        studentProfile.courseOrganization =
+          profile.courseOrganization || profile.courseOrg || studentProfile.organization;
+        studentProfile.courseOrg = profile.courseOrg || studentProfile.organization;
+        studentProfile.StudentOrgs = uniqueProfileValues(
+          profile.StudentOrgs,
+          profile.studentOrgs,
+          profile.organizations,
+          studentProfile.organization,
+        );
+        studentProfile.department = profile.department || profile.departmentCode || "";
+        studentProfile.departmentCode = profile.departmentCode || profile.department || "";
+        studentProfile.departments = uniqueProfileValues(
+          profile.departments,
+          profile.departmentCodes,
+          profile.department,
+          profile.departmentCode,
+          profile.course,
+          profile.program,
+        );
+        studentPreferences.categories = Array.isArray(profile.preferences?.categories)
+          ? profile.preferences.categories
+          : [];
+        studentPreferences.sources = Array.isArray(profile.preferences?.sources)
+          ? profile.preferences.sources
+          : [];
+        studentPreferences.tags = Array.isArray(profile.preferences?.tags)
+          ? profile.preferences.tags
+          : [];
+        studentPreferences.organizations = Array.isArray(profile.preferences?.organizations)
+          ? profile.preferences.organizations
+          : [];
+        registeredEventIds = new Set(readParticipationsFromStorage());
+
+        renderStudentSidebar(profile);
+        renderGreeting();
+        initSidebar();
+        renderRecommended();
+        rebuildStudentEvents();
+        initDataListeners(user);
+      } catch (profileError) {
+        console.error("Could not verify the signed-in student profile:", profileError);
+        if (String(profileError?.message || "").includes("not a student profile")) {
+          clearCachedStudentProfile();
+          await signOut(auth);
+          window.location.replace("StudentLogin.html");
+          return;
+        }
+        eventFetchLoading = false;
+        eventFetchError = "Your student profile could not be verified. Please sign in again.";
+        renderHappeningNow();
+        renderUpcoming();
+        renderRecommended();
+        renderCalendar();
+      }
+    }, (error) => {
+      console.error("Could not verify the signed-in student:", error);
+      eventFetchLoading = false;
+      eventFetchError = "Could not verify sign-in. Please check your connection and retry.";
+      renderHappeningNow();
+      renderUpcoming();
+      renderRecommended();
+      renderCalendar();
     });
   } else {
-    initDataListeners();
+    window.location.replace("StudentLogin.html");
   }
 }
 

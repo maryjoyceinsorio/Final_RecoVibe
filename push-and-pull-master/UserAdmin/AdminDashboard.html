@@ -54,10 +54,10 @@
           </a>
         </nav>
         <footer>
-          <span class="admin-avatar" data-avatar>HA</span>
+          <span class="admin-avatar" data-avatar></span>
           <span class="admin-user">
-            <strong data-name>ADMIN</strong>
-            <small data-role>Head of Academic Programs</small>
+            <strong data-name></strong>
+            <small data-role></small>
           </span>
           <a class="admin-logout" href="AdminLogin.html" aria-label="Logout" title="Logout">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17l5-5-5-5M15 12H3M13 4h6a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6" /></svg>
@@ -65,25 +65,18 @@
         </footer>
       </aside>
       <main class="admin-main">
-        <header class="admin-page-heading">
-          <div>
-            <p class="admin-eyebrow">ADMINISTRATION</p>
-            <h1 id="greeting">Good day</h1>
-          </div>
-          <div class="dashboard-heading-actions">
-            <div class="dashboard-notifications">
-              <button type="button" class="dashboard-notification-toggle" data-notification-toggle aria-label="Notifications" aria-expanded="false" aria-controls="dashboardNotificationMenu">
-                <span aria-hidden="true">♧</span>
-                <span class="admin-badge" data-notification-count hidden></span>
-              </button>
-              <div class="dashboard-notification-menu" id="dashboardNotificationMenu" data-notification-menu hidden>
-                <div class="dashboard-notification-heading"><strong>Notifications</strong><a href="AdminNotification.html">View all</a></div>
-                <p class="dashboard-notification-empty">Loading notifications…</p>
-              </div>
+        <div class="dashboard-heading-actions">
+          <div class="dashboard-notifications">
+            <button type="button" class="dashboard-notification-toggle" data-notification-toggle aria-label="Notifications" title="Notifications" aria-expanded="false" aria-controls="dashboardNotificationMenu">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" /></svg>
+              <span class="admin-badge" data-notification-count hidden></span>
+            </button>
+            <div class="dashboard-notification-menu" id="dashboardNotificationMenu" data-notification-menu hidden>
+              <div class="dashboard-notification-heading"><strong>Notifications</strong><a href="AdminNotification.html">View all</a></div>
+              <p class="dashboard-notification-empty">Loading notifications…</p>
             </div>
-            <p class="admin-today">Today / <strong data-today></strong></p>
           </div>
-        </header>
+        </div>
         <section class="admin-content" id="dashboardRoot" aria-live="polite"></section>
       </main>
     </div>

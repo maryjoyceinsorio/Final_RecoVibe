@@ -50,9 +50,6 @@
     text("sidebar-user-avatar", initial);
     text("heroUserName", fullName);
     text("sidebar-user-name", fullName);
-    text("heroAdminId", accountId);
-    text("heroOfficeName", office);
-    text("heroOfficeBadge", office === "PUP Biñan Campus" ? "OSAS" : office);
     text("viewFirstName", first);
     const middleEl = document.getElementById("viewMiddleName");
     if (middleEl) middleEl.innerHTML = middle ? middle : '<span class="empty-muted">Not set</span>';

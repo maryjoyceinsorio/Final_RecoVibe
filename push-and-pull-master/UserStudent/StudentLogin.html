@@ -37,71 +37,78 @@
             >
             <h2 id="loginHeading">Sign in</h2>
             <p class="sub" id="loginDescription">
-              Use your email address and portal password.
+              Use your student number and portal password.
             </p>
 
             <div class="banner" id="login-banner"></div>
 
-            <div class="field" id="field-id">
-              <label for="student-id">Email</label>
-              <input
-                type="email"
-                id="student-id"
-                placeholder="Enter your email address"
-                autocomplete="email"
-                inputmode="email"
-                autocapitalize="none"
-                spellcheck="false"
-              />
-              <div class="error-msg">Enter a valid email address.</div>
-            </div>
-
-            <div class="field password-field" id="field-pass">
-              <label for="student-pass">Password</label>
-              <input
-                type="password"
-                id="student-pass"
-                placeholder="••••••••"
-                autocomplete="current-password"
-              />
-              <button
-                type="button"
-                class="pass-toggle"
-                id="pass-toggle"
-                aria-label="Show password"
-                aria-pressed="false"
-              >
-                <svg
-                  id="eye-icon"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.8"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                >
-                  <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z" />
-                  <circle cx="12" cy="12" r="3" />
-                </svg>
-              </button>
-              <div class="error-msg">
-                Incorrect password. Try again or reset it.
+            <form id="student-login-form" novalidate>
+              <div class="field" id="field-student-number">
+                <label for="student-number">Student number</label>
+                <input
+                  type="text"
+                  id="student-number"
+                  name="studentNumber"
+                  placeholder="2025-12345-BN-0"
+                  autocomplete="username"
+                  autocapitalize="characters"
+                  spellcheck="false"
+                  maxlength="16"
+                  aria-describedby="student-number-error"
+                />
+                <div class="error-msg" id="student-number-error" role="alert"></div>
               </div>
-            </div>
 
-            <div class="row-between">
-              <label class="remember" for="remember-me">
-                <input type="checkbox" id="remember-me" />
-                <span id="remember-message">Your session will be remembered on this device.</span>
-              </label>
-              <a href="ForgetPassword.html" class="link-btn"
-                >Forgot password?</a
-              >
-            </div>
+              <div class="field password-field" id="field-pass">
+                <label for="student-pass">Password</label>
+                <input
+                  type="password"
+                  id="student-pass"
+                  name="password"
+                  placeholder="••••••••"
+                  autocomplete="current-password"
+                  aria-describedby="password-error"
+                />
+                <button
+                  type="button"
+                  class="pass-toggle"
+                  id="pass-toggle"
+                  aria-label="Show password"
+                  aria-pressed="false"
+                >
+                  <svg
+                    id="eye-icon"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z" />
+                    <circle cx="12" cy="12" r="3" />
+                  </svg>
+                </button>
+                <div class="error-msg" id="password-error" role="alert">
+                  Password is required.
+                </div>
+              </div>
 
-            <button type="button" class="btn-primary" id="login-submit">
-              Sign in
-            </button>
+              <div class="row-between">
+                <label class="remember" for="remember-me">
+                  <input type="checkbox" id="remember-me" />
+                  <span>Remember me</span>
+                  <span id="remember-message" hidden>Your session will be remembered on this device.</span>
+                </label>
+                <a href="ForgetPassword.html" class="link-btn"
+                  >Forgot password?</a
+                >
+              </div>
+
+              <button type="submit" class="btn-primary" id="login-submit">
+                Sign in
+              </button>
+            </form>
 
             <p class="foot-note">
               New here?

@@ -91,38 +91,33 @@
               </div>
             </div>
 
-            <div class="field" id="field-reg-email">
-              <label for="reg-email">Email</label>
-              <input
-                type="email"
-                id="reg-email"
-                placeholder="Enter your email address"
-                required
-                maxlength="254"
-                autocomplete="email"
-                inputmode="email"
-                autocapitalize="none"
-                spellcheck="false"
-                aria-describedby="reg-email-error"
-              />
-              <div class="error-msg" id="reg-email-error" role="alert"></div>
-            </div>
-
-            <div class="field" id="field-reg-student-id">
-              <label for="reg-student-id">Student number</label>
-              <input
-                type="text"
-                id="reg-student-id"
-                placeholder="2023-00123-BN-0"
-                required
-                maxlength="20"
-                autocomplete="username"
-                aria-describedby="reg-student-id-error"
-              />
-              <div class="error-msg" id="reg-student-id-error" role="alert"></div>
-            </div>
-
             <div class="registration-grid">
+              <div class="field" id="field-reg-gender">
+                <label for="reg-gender">Gender</label>
+                <select id="reg-gender" required aria-describedby="reg-gender-error">
+                  <option value="">Select gender</option>
+                  <option value="Male">Male</option>
+                  <option value="Female">Female</option>
+                  <option value="Prefer not to say">Prefer not to say</option>
+                  <option value="Other">Other / custom</option>
+                </select>
+                <div class="error-msg" id="reg-gender-error" role="alert"></div>
+              </div>
+              <div class="field" id="field-reg-student-id">
+                <label for="reg-student-id">Student number</label>
+                <input
+                  type="text"
+                  id="reg-student-id"
+                  placeholder="2025-12345-BN-0"
+                  required
+                  maxlength="16"
+                  autocomplete="username"
+                  autocapitalize="characters"
+                  spellcheck="false"
+                  aria-describedby="reg-student-id-error"
+                />
+                <div class="error-msg" id="reg-student-id-error" role="alert"></div>
+              </div>
               <div class="field" id="field-reg-contact">
                 <label for="reg-contact">Contact number</label>
                 <input
@@ -201,17 +196,23 @@
                 </select>
                 <div class="error-msg" id="reg-course-organization-error" role="alert"></div>
               </div>
-              <div class="field" id="field-reg-gender">
-                <label for="reg-gender">Gender</label>
-                <select id="reg-gender" required aria-describedby="reg-gender-error">
-                  <option value="">Select gender</option>
-                  <option value="Male">Male</option>
-                  <option value="Female">Female</option>
-                  <option value="Prefer not to say">Prefer not to say</option>
-                  <option value="Other">Other / custom</option>
-                </select>
-                <div class="error-msg" id="reg-gender-error" role="alert"></div>
-              </div>
+            </div>
+
+            <div class="field" id="field-reg-email">
+              <label for="reg-email">Email</label>
+              <input
+                type="email"
+                id="reg-email"
+                placeholder="Enter your email address"
+                required
+                maxlength="254"
+                autocomplete="email"
+                inputmode="email"
+                autocapitalize="none"
+                spellcheck="false"
+                aria-describedby="reg-email-error"
+              />
+              <div class="error-msg" id="reg-email-error" role="alert"></div>
             </div>
 
             <div class="field" id="field-reg-pass">

@@ -60,7 +60,7 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
         .filter(Boolean)
         .join(" ") || profile.name || profile.fullName || user.displayName || "Super Admin";
       document.querySelectorAll("#sidebar-user-name").forEach((element) => { element.textContent = fullName; });
-      document.querySelectorAll("#sidebar-user-avatar").forEach((element) => { element.textContent = fullName.charAt(0).toUpperCase() || "S"; });
+      document.querySelectorAll("#sidebar-user-avatar").forEach((element) => { element.textContent = fullName.charAt(0).toUpperCase() || ""; });
       document.querySelectorAll("#sidebar-user-role").forEach((element) => { element.textContent = "Super Admin account"; });
       window.dispatchEvent(
         new CustomEvent("superadmin-profile-authorized", {
@@ -94,7 +94,7 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
         .filter(Boolean)
         .join(" ") || savedProfile.name || savedProfile.fullName || "Super Admin";
       document.querySelectorAll("#sidebar-user-name").forEach((element) => { element.textContent = fullName; });
-      document.querySelectorAll("#sidebar-user-avatar").forEach((element) => { element.textContent = fullName.charAt(0).toUpperCase() || "S"; });
+      document.querySelectorAll("#sidebar-user-avatar").forEach((element) => { element.textContent = fullName.charAt(0).toUpperCase() || ""; });
       document.querySelectorAll("#sidebar-user-role").forEach((element) => { element.textContent = "Super Admin account"; });
     }
   } catch (error) {

@@ -101,6 +101,9 @@ body {
   background: rgba(255, 255, 255, 0.14);
   color: #fff;
 }
+.admin-sidebar nav a.active {
+  font-weight: 700;
+}
 .admin-sidebar nav b,
 .admin-sidebar nav svg {
   display: grid;
@@ -147,16 +150,25 @@ body {
 }
 .admin-user {
   display: grid;
+  flex: 1;
   min-width: 0;
   gap: 2px;
 }
 .admin-user strong {
+  overflow: hidden;
   color: #fff;
   font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .admin-user small {
+  display: -webkit-box;
+  overflow: hidden;
   color: #d9b9bf;
   font-size: 9px;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 .admin-logout {
   margin-left: auto;
@@ -184,40 +196,6 @@ body {
   min-width: 0;
   padding: 30px 38px 54px;
 }
-.admin-page-heading {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 20px;
-  margin-bottom: 22px;
-  padding-bottom: 15px;
-  border-bottom: 1px solid var(--admin-line);
-}
-.admin-page-heading h1 {
-  margin: 0;
-  font:
-    600 28px/1.2 Fraunces,
-    Georgia,
-    serif;
-}
-.admin-eyebrow {
-  margin: 0 0 5px;
-  color: var(--admin-maroon);
-  font:
-    700 10px Inter,
-    sans-serif;
-  letter-spacing: 1.4px;
-}
-.admin-today {
-  margin: 0;
-  color: var(--admin-muted);
-  font-size: 12px;
-  text-align: right;
-}
-.admin-today strong {
-  display: block;
-  color: var(--admin-ink);
-}
 .admin-content {
   max-width: 1400px;
   margin: auto;
@@ -231,6 +209,10 @@ body {
   background: #fff;
   color: var(--admin-muted);
   text-align: center;
+}
+#calendarStatus[hidden],
+.admin-calendar-layout[hidden] {
+  display: none !important;
 }
 .admin-toast {
   position: fixed;
@@ -363,32 +345,6 @@ body {
   font-size: 12px;
   font-weight: 600;
 }
-.admin-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-}
-.dot-official {
-  background: #6b1220;
-}
-.dot-binan {
-  background: #3a76a6;
-}
-.dot-cite {
-  background: #d6ae4a;
-}
-.dot-org {
-  background: #765092;
-}
-.dot-csc {
-  background: #31845b;
-}
-.dot-teacher {
-  background: #c64a52;
-}
-.dot-external {
-  background: #8c8787;
-}
 .admin-calendar-legend {
   display: flex;
   flex-wrap: wrap;
@@ -404,24 +360,6 @@ body {
 .admin-calendar-legend > strong {
   flex-basis: 100%;
   color: var(--admin-ink);
-}
-.admin-legend-dot {
-  display: inline-block;
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-}
-.dot-holiday {
-  background: #d97706;
-}
-.dot-academic {
-  background: #3a76a6;
-}
-.dot-organization {
-  background: #765092;
-}
-.dot-institutional {
-  background: #6b1220;
 }
 .admin-day-overlay {
   position: fixed;
@@ -544,12 +482,6 @@ body {
   }
   .admin-main {
     padding: 19px 14px 36px;
-  }
-  .admin-page-heading {
-    align-items: flex-start;
-  }
-  .admin-page-heading h1 {
-    font-size: 23px;
   }
 }
 
@@ -725,13 +657,6 @@ body {
   margin-top: 0;
   flex-wrap: wrap;
 }
-.admin-dot,
-.admin-legend-dot {
-  width: 10px;
-  height: 10px;
-  flex: 0 0 10px;
-  border-radius: 50%;
-}
 .admin-day-empty {
   margin: 0;
   color: #a89d95;
@@ -879,9 +804,6 @@ body {
   gap: 8px;
   line-height: 1.4;
 }
-.admin-calendar-legend .admin-legend-dot {
-  display: block;
-}
 @media (max-width: 980px) {
   .admin-calendar-layout {
     grid-template-columns: minmax(0, 1fr);
@@ -948,5 +870,194 @@ body {
   }
   .admin-calendar-legend > strong {
     grid-column: auto;
+  }
+}
+
+.admin-calendar-layout {
+  min-height: 660px;
+}
+.admin-day {
+  align-items: stretch;
+  gap: 3px;
+  overflow: hidden;
+  padding: 5px 4px;
+}
+.admin-day > button {
+  align-self: center;
+  flex: 0 0 26px;
+}
+.admin-day-event-list {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.admin-event-bar {
+  display: block;
+  flex: 0 0 auto;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 1.2;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.category-pup-official {
+  background: #8f2536;
+  color: #fff;
+}
+.category-csc {
+  background: #c79a2b;
+  color: #241a17;
+}
+.category-organizational {
+  background: #7c5cc4;
+  color: #fff;
+}
+.category-others-external {
+  background: #64748b;
+  color: #fff;
+}
+.category-holiday {
+  background: #d97706;
+  color: #241a17;
+}
+.admin-event-bar.category-holiday {
+  pointer-events: none;
+}
+.admin-day-more {
+  flex: 0 0 auto;
+  min-height: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--admin-muted);
+  font: 500 10px/1.2 Inter, sans-serif;
+  text-align: left;
+  cursor: pointer;
+}
+.admin-day-more:hover,
+.admin-upcoming-more:hover {
+  color: var(--admin-maroon);
+  text-decoration: underline;
+}
+.admin-day-dots,
+.admin-day-empty,
+.calendar-badge.badge-holiday {
+  display: none;
+}
+.admin-upcoming-panel {
+  flex: 0 0 auto;
+  min-height: 0;
+  overflow: visible;
+}
+.admin-upcoming-item {
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 8px;
+  padding: 4px 0;
+}
+.admin-upcoming-date {
+  min-height: 38px;
+  border-radius: 6px;
+  color: #fff;
+}
+.admin-upcoming-date strong {
+  font-size: 16px;
+}
+.admin-upcoming-date small {
+  margin-top: 2px;
+  font-size: 9px;
+}
+.admin-upcoming-date.category-csc,
+.admin-upcoming-date.category-holiday {
+  color: #241a17;
+}
+.admin-upcoming-copy {
+  gap: 1px;
+}
+.admin-upcoming-copy strong {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  line-clamp: 2;
+  -webkit-line-clamp: 2;
+  font-size: 12px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.admin-upcoming-copy small {
+  margin-top: 0;
+  font-size: 10px;
+  line-height: 1.2;
+}
+.admin-upcoming-more {
+  display: block;
+  min-height: 22px;
+  margin-top: 8px;
+  padding: 3px 0 0;
+  border: 0;
+  background: transparent;
+  color: var(--admin-muted);
+  font: 500 11px/1.3 Inter, sans-serif;
+  cursor: pointer;
+}
+.admin-calendar-legend {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 10px;
+}
+.admin-calendar-legend .admin-legend-item {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.admin-legend-swatch {
+  display: block;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  border-radius: 4px;
+}
+@media (max-width: 650px) {
+  .admin-calendar-layout {
+    min-height: 0;
+  }
+  .admin-calendar {
+    min-height: 610px;
+  }
+  .admin-day {
+    gap: 2px;
+    padding: 3px 2px;
+  }
+  .admin-day > button {
+    flex-basis: 22px;
+    width: 22px;
+    height: 22px;
+    font-size: 11px;
+  }
+  .admin-event-bar {
+    padding: 2px;
+    font-size: 8px;
+  }
+  .admin-day-more {
+    font-size: 8px;
+  }
+  .admin-calendar-legend {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px 8px;
+  }
+  .admin-calendar-legend > strong {
+    grid-column: 1 / -1;
   }
 }

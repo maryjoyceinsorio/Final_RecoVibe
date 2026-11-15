@@ -1,5 +1,8 @@
 import { auth, db, rtdb, functions, isFirebaseConfigured, isRtdbConfigured } from "./firebaseConfig.js";
-import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {
+  onAuthStateChanged,
+  signOut,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
   collectionGroup,
   doc,
@@ -16,6 +19,11 @@ import {
   orderByChild,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 import { httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
+import {
+  clearCachedStudentProfile,
+  loadStudentProfile,
+  renderStudentSidebar,
+} from "./studentIdentity.js";
 
 /* ---------------------------------------------------------
    COMMON SIDEBAR & USER PROFILE INITIALIZATION
@@ -53,20 +61,14 @@ let participationLoading = true;
 let firestoreEventsLoaded = false;
 let publicEventsLoaded = false;
 const pendingInitialRegistrationSnapshots = new Set();
-const registrationLogIds = new Set();
 const loggedUnmatchedRegistrationIds = new Set();
-const isDevelopment = () =>
-  globalThis.process?.env?.NODE_ENV
-    ? globalThis.process.env.NODE_ENV !== "production"
-    : import.meta.env?.DEV === true ||
-      ["localhost", "127.0.0.1", "::1"].includes(globalThis.location?.hostname);
 
 const studentProfile = {
-  firstName: "Student",
+  firstName: "",
   middleName: "",
   lastName: "",
-  fullName: "Student",
-  studentNo: "2025-00790-BN-1",
+  fullName: "",
+  studentNo: "",
   organization: "",
   department: "",
   departmentCode: "",
@@ -84,7 +86,7 @@ const filterState = {
   status: "participating", // "participating" (default), "completed", "absent", "rescheduled", "cancelled"
   from: "", // YYYY-MM-DD
   to: "",   // YYYY-MM-DD
-  quickPreset: "this_month",
+  quickPreset: "all",
 };
 
 const datePickerState = {
@@ -92,6 +94,9 @@ const datePickerState = {
   viewMonth: 0,
   pendingStart: null,
   pendingEnd: null,
+  pendingPreset: "all",
+  hoverDate: "",
+  previousBodyOverflow: null,
 };
 
 let activePublicEventsRef = null;
@@ -222,19 +227,6 @@ function announce(msg) {
 /* ---------------------------------------------------------
    USER PROFILE HYDRATION
 --------------------------------------------------------- */
-function readCachedProfile() {
-  try {
-    return JSON.parse(
-      localStorage.getItem("recovibeCurrentUser") ||
-      sessionStorage.getItem("recovibeCurrentUser") ||
-      "null",
-    ) || {};
-  } catch (error) {
-    console.warn("Could not read the cached student profile:", error);
-    return {};
-  }
-}
-
 function applyStudentProfile(profile, authUser = null) {
   const storedFirstName = String(profile.firstName || "").trim();
   const storedFullName = String(profile.fullName || profile.name || "").trim();
@@ -249,10 +241,9 @@ function applyStudentProfile(profile, authUser = null) {
   const displayName =
     storedFullName ||
     nameFromProfile ||
-    String(authUser?.displayName || "").trim() ||
-    "Student";
+    String(authUser?.displayName || "").trim();
   const firstName =
-    storedFirstName || displayName.split(/\s+/).filter(Boolean)[0] || "Student";
+    storedFirstName || displayName.split(/\s+/).filter(Boolean)[0] || "";
 
   studentProfile.firstName = firstName;
   studentProfile.middleName = String(profile.middleName || "").trim();
@@ -262,7 +253,7 @@ function applyStudentProfile(profile, authUser = null) {
     profile.studentNumber ||
     profile.studentId ||
     profile.username ||
-    "2025-00790-BN-1",
+    "",
   ).trim();
   studentProfile.organization = String(
     profile.organization ||
@@ -279,58 +270,12 @@ function applyStudentProfile(profile, authUser = null) {
   studentProfile.department = String(profile.department || profile.departmentCode || "").trim();
   studentProfile.departmentCode = String(profile.departmentCode || profile.department || "").trim();
 
-  const avatarFallback = [
-    profile.username,
-    profile.studentNumber,
-    profile.studentId,
-    profile.email,
-    authUser?.email,
-  ]
-    .map((value) => String(value || "").trim())
-    .find(Boolean) || "";
-  const avatarLetter =
-    Array.from(firstName || avatarFallback)[0]?.toLocaleUpperCase() || "S";
-  const role =
-    studentProfile.organization && studentProfile.organization.toLowerCase() !== "none"
-      ? studentProfile.organization
-      : "Student";
-
-  document.querySelectorAll(".user-name").forEach((el) => {
-    el.textContent = displayName;
-  });
-  document.querySelectorAll(".user-role").forEach((el) => {
-    el.textContent = role;
-  });
-  document.querySelectorAll(".avatar").forEach((el) => {
-    el.textContent = avatarLetter;
-  });
-  document.querySelectorAll("#userFirstName").forEach((el) => {
-    el.textContent = firstName;
-  });
+  renderStudentSidebar(profile);
 }
 
 async function hydrateUserProfile(authUser) {
-  const cachedProfile = readCachedProfile();
-  let profile = cachedProfile;
-  if (db && authUser?.uid) {
-    try {
-      const profileSnapshot = await getDoc(doc(db, "users", authUser.uid));
-      if (profileSnapshot.exists()) {
-        profile = { ...cachedProfile, ...profileSnapshot.data() };
-        try {
-          localStorage.setItem(
-            "recovibeCurrentUser",
-            JSON.stringify({ ...profile, uid: authUser.uid }),
-          );
-        } catch (error) {
-          console.warn("Could not cache the Firestore student profile:", error);
-        }
-      }
-    } catch (error) {
-      console.error("Could not load the Firestore student profile:", error);
-      profile = cachedProfile;
-    }
-  }
+  const profile = await loadStudentProfile(authUser);
+  if (auth?.currentUser?.uid !== authUser.uid) return;
   applyStudentProfile(profile, authUser);
   profileResolved = true;
 }
@@ -537,15 +482,6 @@ function getParticipationStatus(registration, event, now) {
     status = attended ? "completed" : "absent";
   }
 
-  const logKey = `${eventId}:${registration.uid || currentUid || "student"}`;
-  if (isDevelopment() && !registrationLogIds.has(logKey)) {
-    registrationLogIds.add(logKey);
-    console.log({
-      eventId,
-      title: event?.title || registration.title || "Unmatched registration",
-      status,
-    });
-  }
   return status;
 }
 
@@ -875,7 +811,7 @@ function render() {
   const queryText = filterState.search.trim().toLowerCase();
   const visibleRows = participationRows.filter(({ event, status }) => {
     if (filterState.from && filterState.to) {
-      const startDay = toPhDateStr(event.startAt);
+      const startDay = new Date(event.startAt).toLocaleDateString("en-CA");
       if (!startDay || startDay < filterState.from || startDay > filterState.to) return false;
     }
 
@@ -1153,21 +1089,24 @@ function updateDateRangeButtonLabel() {
   const btn = document.getElementById("dateRangeBtn");
   if (!btn) return;
 
-  if (filterState.from && filterState.to) {
-    if (filterState.quickPreset === "this_month") {
-      btn.textContent = "This month";
-    } else if (filterState.quickPreset === "today") {
-      btn.textContent = "Today";
-    } else if (filterState.quickPreset === "tomorrow") {
-      btn.textContent = "Tomorrow";
-    } else if (filterState.quickPreset === "this_week") {
-      btn.textContent = "This week";
-    } else {
-      btn.textContent = `${formatPhDatePretty(filterState.from)} - ${formatPhDatePretty(filterState.to)}`;
-    }
-  } else {
-    btn.textContent = "All time";
-  }
+  const labels = {
+    today: "Today",
+    tomorrow: "Tomorrow",
+    this_week: "This week",
+    this_weekend: "This weekend",
+    next_week: "Next week",
+    this_month: "This month",
+    next_month: "Next month",
+  };
+  const label = filterState.from
+    ? labels[filterState.quickPreset] ||
+      (filterState.from === filterState.to
+        ? new Date(`${filterState.from}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+        : `${new Date(`${filterState.from}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })} – ${new Date(`${filterState.to}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`)
+    : "All Dates";
+  btn.textContent = label;
+  btn.setAttribute("aria-label", `Date filter: ${label}`);
+  btn.classList.toggle("is-applied", Boolean(filterState.from));
 }
 
 /* ---------------------------------------------------------
@@ -1180,13 +1119,14 @@ function initDateRangePicker() {
   const nextBtn = document.getElementById("calNavNext");
   const clearBtn = document.getElementById("dateRangeClearBtn");
   const cancelBtn = document.getElementById("dateRangeCancelBtn");
+  const closeBtn = document.getElementById("dateRangeCloseBtn");
   const applyBtn = document.getElementById("dateRangeApplyBtn");
   const inputStart = document.getElementById("dateRangeInputStart");
   const inputEnd = document.getElementById("dateRangeInputEnd");
 
   if (!btn || !panel) return;
 
-  const now = new Date(getNow());
+  const now = new Date();
   datePickerState.viewYear = now.getFullYear();
   datePickerState.viewMonth = now.getMonth();
 
@@ -1203,7 +1143,6 @@ function initDateRangePicker() {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !panel.hidden) {
       closeDateRangePanel();
-      btn.focus();
     }
   });
 
@@ -1236,6 +1175,23 @@ function initDateRangePicker() {
       renderDatePickerCalendars();
     });
   }
+  window.addEventListener("resize", positionDateRangePanel);
+  ["calGrid1", "calGrid2"].forEach((gridId) => {
+    const grid = document.getElementById(gridId);
+    if (!grid) return;
+    grid.addEventListener("pointerover", (event) => {
+      const day = event.target.closest(".date-cal-day[data-date]");
+      if (day && datePickerState.pendingStart && !datePickerState.pendingEnd) {
+        previewDateRange(day.dataset.date);
+      }
+    });
+    grid.addEventListener("pointerleave", () => {
+      if (datePickerState.hoverDate) {
+        datePickerState.hoverDate = "";
+        renderDatePickerCalendars();
+      }
+    });
+  });
 
   // Quick range buttons
   document.querySelectorAll(".date-range-quick-btn").forEach((qBtn) => {
@@ -1258,14 +1214,11 @@ function initDateRangePicker() {
       e.stopPropagation();
       datePickerState.pendingStart = null;
       datePickerState.pendingEnd = null;
-      filterState.from = "";
-      filterState.to = "";
-      filterState.quickPreset = "all";
-      updateDateRangeButtonLabel();
-      syncUrlParams();
-      closeDateRangePanel();
-      announce("Date range cleared.");
-      loadParticipationData();
+      datePickerState.pendingPreset = "all";
+      datePickerState.hoverDate = "";
+      syncDateInputsFromPending();
+      renderDatePickerCalendars();
+      validateDatePickerInputs();
     });
   }
 
@@ -1275,14 +1228,32 @@ function initDateRangePicker() {
       closeDateRangePanel();
     });
   }
+  if (closeBtn) {
+    closeBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      closeDateRangePanel();
+    });
+  }
 
   if (applyBtn) {
     applyBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      if (!datePickerState.pendingStart || !datePickerState.pendingEnd) return;
-
       let s = datePickerState.pendingStart;
       let en = datePickerState.pendingEnd;
+      if (!s && en) s = en;
+      if (s && !en) en = s;
+      if (applyBtn.disabled) return;
+      if (!s && !en) {
+        filterState.from = "";
+        filterState.to = "";
+        filterState.quickPreset = "all";
+        updateDateRangeButtonLabel();
+        syncUrlParams();
+        closeDateRangePanel();
+        loadParticipationData();
+        return;
+      }
+      if (!s || !en) return;
       if (s > en) {
         const tmp = s;
         s = en;
@@ -1291,7 +1262,7 @@ function initDateRangePicker() {
 
       filterState.from = s;
       filterState.to = en;
-      filterState.quickPreset = "";
+      filterState.quickPreset = datePickerState.pendingPreset || "";
 
       updateDateRangeButtonLabel();
       syncUrlParams();
@@ -1308,23 +1279,30 @@ function openDateRangePanel() {
   if (!panel || !btn) return;
 
   panel.hidden = false;
+  datePickerState.previousBodyOverflow = document.body.style.overflow;
+  document.body.style.overflow = "hidden";
   btn.setAttribute("aria-expanded", "true");
+  btn.classList.add("is-open");
 
   datePickerState.pendingStart = filterState.from;
   datePickerState.pendingEnd = filterState.to;
+  datePickerState.pendingPreset = filterState.from ? (filterState.quickPreset || "") : "all";
 
   if (filterState.from) {
     const [y, m] = filterState.from.split("-").map(Number);
     datePickerState.viewYear = y;
     datePickerState.viewMonth = m - 1;
   } else {
-    const now = new Date(getNow());
+    const now = new Date();
     datePickerState.viewYear = now.getFullYear();
     datePickerState.viewMonth = now.getMonth();
   }
 
   syncDateInputsFromPending();
   renderDatePickerCalendars();
+  validateDatePickerInputs();
+  positionDateRangePanel();
+  panel.querySelector(".date-range-close")?.focus();
 }
 
 function closeDateRangePanel() {
@@ -1334,11 +1312,52 @@ function closeDateRangePanel() {
 
   panel.hidden = true;
   btn.setAttribute("aria-expanded", "false");
+  btn.classList.remove("is-open");
+  panel.style.left = "";
+  panel.style.top = "";
+  panel.style.position = "";
+  panel.style.width = "";
+  if (datePickerState.previousBodyOverflow !== null) {
+    document.body.style.overflow = datePickerState.previousBodyOverflow;
+    datePickerState.previousBodyOverflow = null;
+  }
+  datePickerState.pendingStart = filterState.from || null;
+  datePickerState.pendingEnd = filterState.to || null;
+  datePickerState.pendingPreset = filterState.from ? (filterState.quickPreset || "") : "all";
+  datePickerState.hoverDate = "";
+  syncDateInputsFromPending();
+  renderDatePickerCalendars();
+  btn.focus();
+}
+
+function positionDateRangePanel() {
+  const btn = document.getElementById("dateRangeBtn");
+  const panel = document.getElementById("dateRangePanel");
+  if (!btn || !panel || panel.hidden) return;
+  if (window.innerWidth <= 768) {
+    panel.style.left = "";
+    panel.style.top = "";
+    panel.style.position = "";
+    panel.style.width = "";
+    return;
+  }
+  const buttonRect = btn.getBoundingClientRect();
+  const width = Math.min(660, window.innerWidth - 32);
+  const left = Math.max(16, Math.min(buttonRect.left, window.innerWidth - width - 16));
+  const estimatedHeight = panel.offsetHeight || 520;
+  const top = buttonRect.bottom + estimatedHeight > window.innerHeight - 16
+    ? Math.max(16, buttonRect.top - estimatedHeight - 8)
+    : buttonRect.bottom + 8;
+  panel.style.position = "fixed";
+  panel.style.width = `${width}px`;
+  panel.style.left = `${left}px`;
+  panel.style.top = `${top}px`;
 }
 
 function applyQuickRange(preset) {
-  const now = new Date(getNow());
-  const todayStr = toPhDateStr(getNow());
+  datePickerState.hoverDate = "";
+  const now = new Date();
+  const todayStr = now.toLocaleDateString("en-CA");
   const [ty, tm, td] = todayStr.split("-").map(Number);
   const curDate = new Date(ty, tm - 1, td);
 
@@ -1346,14 +1365,12 @@ function applyQuickRange(preset) {
   let endStr = "";
 
   if (preset === "all") {
-    filterState.from = "";
-    filterState.to = "";
-    filterState.quickPreset = "all";
-    updateDateRangeButtonLabel();
-    syncUrlParams();
-    closeDateRangePanel();
-    announce("Date range cleared.");
-    loadParticipationData();
+    datePickerState.pendingStart = null;
+    datePickerState.pendingEnd = null;
+    datePickerState.pendingPreset = "all";
+    syncDateInputsFromPending();
+    renderDatePickerCalendars();
+    validateDatePickerInputs();
     return;
   }
 
@@ -1363,32 +1380,32 @@ function applyQuickRange(preset) {
   } else if (preset === "tomorrow") {
     const tom = new Date(curDate);
     tom.setDate(tom.getDate() + 1);
-    startStr = toPhDateStr(tom.getTime());
+    startStr = tom.toLocaleDateString("en-CA");
     endStr = startStr;
   } else if (preset === "this_week") {
     const day = curDate.getDay();
-    const monday = new Date(curDate);
-    monday.setDate(monday.getDate() - (day === 0 ? 6 : day - 1));
-    const sunday = new Date(monday);
-    sunday.setDate(sunday.getDate() + 6);
-    startStr = toPhDateStr(monday.getTime());
-    endStr = toPhDateStr(sunday.getTime());
+    const sunday = new Date(curDate);
+    sunday.setDate(sunday.getDate() - day);
+    const saturday = new Date(sunday);
+    saturday.setDate(saturday.getDate() + 6);
+    startStr = sunday.toLocaleDateString("en-CA");
+    endStr = saturday.toLocaleDateString("en-CA");
   } else if (preset === "this_weekend") {
     const day = curDate.getDay();
     const sat = new Date(curDate);
-    sat.setDate(sat.getDate() + (6 - day));
+    sat.setDate(sat.getDate() + (day === 0 ? -1 : day === 6 ? 0 : 6 - day));
     const sun = new Date(sat);
     sun.setDate(sun.getDate() + 1);
-    startStr = toPhDateStr(sat.getTime());
-    endStr = toPhDateStr(sun.getTime());
+    startStr = day === 0 ? todayStr : sat.toLocaleDateString("en-CA");
+    endStr = day === 0 ? todayStr : sun.toLocaleDateString("en-CA");
   } else if (preset === "next_week") {
     const day = curDate.getDay();
-    const nextMon = new Date(curDate);
-    nextMon.setDate(nextMon.getDate() + (day === 0 ? 1 : 8 - day));
-    const nextSun = new Date(nextMon);
-    nextSun.setDate(nextSun.getDate() + 6);
-    startStr = toPhDateStr(nextMon.getTime());
-    endStr = toPhDateStr(nextSun.getTime());
+    const nextSunday = new Date(curDate);
+    nextSunday.setDate(nextSunday.getDate() + (7 - day));
+    const nextSaturday = new Date(nextSunday);
+    nextSaturday.setDate(nextSaturday.getDate() + 6);
+    startStr = nextSunday.toLocaleDateString("en-CA");
+    endStr = nextSaturday.toLocaleDateString("en-CA");
   } else if (preset === "this_month") {
     startStr = `${ty}-${String(tm).padStart(2, "0")}-01`;
     const lastDay = new Date(ty, tm, 0).getDate();
@@ -1405,15 +1422,17 @@ function applyQuickRange(preset) {
     endStr = `${nextY}-${String(nextM).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
   }
 
-  filterState.from = startStr;
-  filterState.to = endStr;
-  filterState.quickPreset = preset;
-
-  updateDateRangeButtonLabel();
-  syncUrlParams();
-  closeDateRangePanel();
-  announce(`Applied quick range: ${preset}.`);
-  loadParticipationData();
+  datePickerState.pendingStart = startStr || null;
+  datePickerState.pendingEnd = endStr || null;
+  datePickerState.pendingPreset = preset;
+  if (startStr) {
+    const [year, month] = startStr.split("-").map(Number);
+    datePickerState.viewYear = year;
+    datePickerState.viewMonth = month - 1;
+  }
+  syncDateInputsFromPending();
+  renderDatePickerCalendars();
+  validateDatePickerInputs();
 }
 
 function renderDatePickerCalendars() {
@@ -1430,10 +1449,43 @@ function renderDatePickerCalendars() {
   renderSingleMonthCalendar("calTitle1", "calGrid1", y1, m1);
   renderSingleMonthCalendar("calTitle2", "calGrid2", y2, m2);
 
-  // Quick range button highlight
+  const todayStr = new Date().toLocaleDateString("en-CA");
+  const [year, month, day] = todayStr.split("-").map(Number);
+  const today = new Date(year, month - 1, day);
+  const dateString = (date) => date.toLocaleDateString("en-CA");
+  const addDays = (date, amount) => {
+    const result = new Date(date);
+    result.setDate(result.getDate() + amount);
+    return result;
+  };
+  const sunday = addDays(today, -today.getDay());
+  const saturday = addDays(sunday, 6);
+  const nextSunday = addDays(sunday, 7);
+  const nextSaturday = addDays(nextSunday, 6);
+  const weekendStart = addDays(today, today.getDay() === 0 || today.getDay() === 6 ? 0 : 6 - today.getDay());
+  const nextMonthYear = month === 12 ? year + 1 : year;
+  const nextMonth = month === 12 ? 1 : month + 1;
+  const quickRanges = {
+    all: ["", ""],
+    today: [todayStr, todayStr],
+    tomorrow: [dateString(addDays(today, 1)), dateString(addDays(today, 1))],
+    this_week: [dateString(sunday), dateString(saturday)],
+    this_weekend: today.getDay() === 0
+      ? [todayStr, todayStr]
+      : [dateString(weekendStart), dateString(addDays(weekendStart, 1))],
+    next_week: [dateString(nextSunday), dateString(nextSaturday)],
+    this_month: [`${year}-${String(month).padStart(2, "0")}-01`, `${year}-${String(month).padStart(2, "0")}-${String(new Date(year, month, 0).getDate()).padStart(2, "0")}`],
+    next_month: [`${nextMonthYear}-${String(nextMonth).padStart(2, "0")}-01`, `${nextMonthYear}-${String(nextMonth).padStart(2, "0")}-${String(new Date(nextMonthYear, nextMonth, 0).getDate()).padStart(2, "0")}`],
+  };
+
   document.querySelectorAll(".date-range-quick-btn").forEach((btn) => {
     const preset = btn.dataset.preset;
-    btn.classList.toggle("active", filterState.quickPreset === preset);
+    const range = quickRanges[preset];
+    const start = datePickerState.pendingStart || "";
+    const end = datePickerState.pendingEnd || start;
+    const active = Boolean(range && start === range[0] && end === range[1]);
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-pressed", String(active));
   });
 }
 
@@ -1450,10 +1502,12 @@ function renderSingleMonthCalendar(titleId, gridId, year, month) {
 
   const firstDayOfWeek = dateObj.getDay();
   const totalDays = new Date(year, month + 1, 0).getDate();
-  const todayStr = toPhDateStr(getNow());
+  const todayStr = new Date().toLocaleDateString("en-CA");
 
   const start = datePickerState.pendingStart;
-  const end = datePickerState.pendingEnd;
+  const end = datePickerState.pendingEnd || datePickerState.hoverDate;
+  let rangeStart = start;
+  let rangeEnd = end;
 
   let html = "";
   for (let i = 0; i < firstDayOfWeek; i++) {
@@ -1469,24 +1523,22 @@ function renderSingleMonthCalendar(titleId, gridId, year, month) {
     let isStart = start === dateStr;
     let isEnd = end === dateStr;
 
-    if (start && end) {
-      let s = start;
-      let e = end;
-      if (s > e) {
-        const tmp = s;
-        s = e;
-        e = tmp;
+    if (rangeStart && rangeEnd) {
+      if (rangeStart > rangeEnd) {
+        const tmp = rangeStart;
+        rangeStart = rangeEnd;
+        rangeEnd = tmp;
       }
-      if (dateStr === s) isStart = true;
-      if (dateStr === e) isEnd = true;
-      if (dateStr > s && dateStr < e) classes.push("range-between");
+      if (dateStr === rangeStart) isStart = true;
+      if (dateStr === rangeEnd) isEnd = true;
+      if (dateStr > rangeStart && dateStr < rangeEnd) classes.push("range-between");
     }
 
     if (isStart) classes.push("range-start");
     if (isEnd) classes.push("range-end");
 
     html += `
-      <button type="button" class="${classes.join(" ")}" data-date="${dateStr}" aria-label="${dateStr}">
+      <button type="button" class="${classes.join(" ")}" data-date="${dateStr}" aria-label="${new Date(year, month, day).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}" aria-pressed="${isStart || isEnd}" aria-current="${dateStr === todayStr ? "date" : "false"}">
         ${day}
       </button>`;
   }
@@ -1499,10 +1551,42 @@ function renderSingleMonthCalendar(titleId, gridId, year, month) {
       const clicked = dayBtn.dataset.date;
       onCalendarDayClicked(clicked);
     });
+    dayBtn.addEventListener("keydown", (event) => {
+      const offsets = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7 };
+      if (!offsets[event.key]) return;
+      event.preventDefault();
+      const [y, m, d] = dayBtn.dataset.date.split("-").map(Number);
+      const next = new Date(y, m - 1, d + offsets[event.key]);
+      const nextDate = `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, "0")}-${String(next.getDate()).padStart(2, "0")}`;
+      const target = document.querySelector(`.date-cal-day[data-date="${nextDate}"]`);
+      if (target) {
+        target.focus();
+      } else {
+        datePickerState.viewYear = next.getFullYear();
+        datePickerState.viewMonth = next.getMonth();
+        renderDatePickerCalendars();
+        document.querySelector(`.date-cal-day[data-date="${nextDate}"]`)?.focus();
+      }
+    });
+  });
+}
+
+function previewDateRange(dateStr) {
+  if (datePickerState.hoverDate === dateStr) return;
+  datePickerState.hoverDate = dateStr;
+  const start = datePickerState.pendingStart;
+  const rangeStart = dateStr < start ? dateStr : start;
+  const rangeEnd = dateStr < start ? start : dateStr;
+  document.querySelectorAll(".date-cal-day[data-date]").forEach((button) => {
+    const date = button.dataset.date;
+    button.classList.toggle("range-between", date > rangeStart && date < rangeEnd);
+    button.classList.toggle("range-preview-end", date === dateStr);
   });
 }
 
 function onCalendarDayClicked(dateStr) {
+  datePickerState.pendingPreset = "";
+  datePickerState.hoverDate = "";
   if (!datePickerState.pendingStart || (datePickerState.pendingStart && datePickerState.pendingEnd)) {
     datePickerState.pendingStart = dateStr;
     datePickerState.pendingEnd = null;
@@ -1522,56 +1606,59 @@ function onCalendarDayClicked(dateStr) {
 function syncDateInputsFromPending() {
   const inputStart = document.getElementById("dateRangeInputStart");
   const inputEnd = document.getElementById("dateRangeInputEnd");
-  const valMsg = document.getElementById("dateRangeValidationMsg");
-  const applyBtn = document.getElementById("dateRangeApplyBtn");
-
   if (inputStart) inputStart.value = datePickerState.pendingStart || "";
   if (inputEnd) inputEnd.value = datePickerState.pendingEnd || "";
-  if (valMsg) valMsg.textContent = "";
-  if (applyBtn) {
-    applyBtn.disabled = !datePickerState.pendingStart || !datePickerState.pendingEnd;
-  }
+  validateDatePickerInputs();
 }
 
 function onDateInputChanged() {
   const inputStart = document.getElementById("dateRangeInputStart");
   const inputEnd = document.getElementById("dateRangeInputEnd");
-  const valMsg = document.getElementById("dateRangeValidationMsg");
-  const applyBtn = document.getElementById("dateRangeApplyBtn");
-
   const vStart = inputStart?.value.trim() || "";
   const vEnd = inputEnd?.value.trim() || "";
 
-  const isValidFormat = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
-
-  if (vStart && !isValidFormat(vStart)) {
-    if (valMsg) valMsg.textContent = "Start date must be YYYY-MM-DD";
-    if (applyBtn) applyBtn.disabled = true;
-    return;
+  datePickerState.pendingStart = vStart || null;
+  datePickerState.pendingEnd = vEnd || null;
+  datePickerState.pendingPreset = "";
+  const visibleDate = vStart || vEnd;
+  if (visibleDate && isValidDatePickerValue(visibleDate)) {
+    const [year, month] = visibleDate.split("-").map(Number);
+    datePickerState.viewYear = year;
+    datePickerState.viewMonth = month - 1;
   }
-
-  if (vEnd && !isValidFormat(vEnd)) {
-    if (valMsg) valMsg.textContent = "End date must be YYYY-MM-DD";
-    if (applyBtn) applyBtn.disabled = true;
-    return;
-  }
-
-  if (vStart && vEnd && vStart > vEnd) {
-    if (valMsg) valMsg.textContent = "Start date must be before end date";
-    if (applyBtn) applyBtn.disabled = true;
-    return;
-  }
-
-  if (valMsg) valMsg.textContent = "";
-
-  if (vStart) datePickerState.pendingStart = vStart;
-  if (vEnd) datePickerState.pendingEnd = vEnd;
-
-  if (applyBtn) {
-    applyBtn.disabled = !datePickerState.pendingStart || !datePickerState.pendingEnd;
-  }
-
   renderDatePickerCalendars();
+  validateDatePickerInputs();
+}
+
+function isValidDatePickerValue(value) {
+  if (!value) return true;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+}
+
+function validateDatePickerInputs() {
+  const inputStart = document.getElementById("dateRangeInputStart");
+  const inputEnd = document.getElementById("dateRangeInputEnd");
+  const valMsg = document.getElementById("dateRangeValidationMsg");
+  const applyBtn = document.getElementById("dateRangeApplyBtn");
+  const start = inputStart?.value.trim() || "";
+  const end = inputEnd?.value.trim() || "";
+  const invalidDate = !isValidDatePickerValue(start) || !isValidDatePickerValue(end);
+  const reversed = start && end && start > end;
+  const effectiveStart = start || end;
+  const effectiveEnd = end || start;
+  const unchanged = (effectiveStart || "") === (filterState.from || "") &&
+    (effectiveEnd || "") === (filterState.to || "");
+  if (valMsg) {
+    valMsg.textContent = invalidDate
+      ? "Enter a valid date (YYYY-MM-DD)."
+      : reversed
+        ? "Start date must be on or before end date."
+        : "";
+  }
+  if (applyBtn) applyBtn.disabled = Boolean(invalidDate || reversed || unchanged);
 }
 
 /* ---------------------------------------------------------
@@ -1874,36 +1961,30 @@ function renderMyQr(canvas, options = {}) {
     if (onStateChange) onStateChange("loading");
 
     try {
-      let token = permanentQrToken || localStorage.getItem("recovibe_permanent_qr_token") || "";
+      const uid = currentUid;
+      if (!uid || auth?.currentUser?.uid !== uid) {
+        throw new Error("Sign in to load your attendance QR code.");
+      }
+      const tokenStorageKey = `recovibe_permanent_qr_token:${uid}`;
+      let token = permanentQrToken || localStorage.getItem(tokenStorageKey) || "";
 
-      if (!token && functions && navigator.onLine) {
-        try {
-          const getMyQrTokenCallable = httpsCallable(functions, "getMyQrToken");
-          const timeoutPromise = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error("Token request timed out")), 2500)
-          );
-          const result = await Promise.race([getMyQrTokenCallable(), timeoutPromise]);
-          if (result && result.data && result.data.token) {
-            token = result.data.token;
-            permanentQrToken = token;
-            localStorage.setItem("recovibe_permanent_qr_token", token);
-            if (typeof result.data.cooldownMs === "number") {
-              startCooldown(result.data.cooldownMs);
-            }
-          }
-        } catch (fnErr) {
-          console.warn("getMyQrToken callable notice:", fnErr);
+      if (!token) {
+        if (!functions || !navigator.onLine) {
+          throw new Error("Attendance QR code is unavailable. Check your connection and try again.");
         }
-      }
-
-      if (!token) {
-        token = localStorage.getItem("recovibe_permanent_qr_token") || "";
-      }
-
-      if (!token) {
-        const uid = currentUid || studentProfile.studentNo || "student";
-        token = `${uid}.1.fallback_signed_token`;
-        localStorage.setItem("recovibe_permanent_qr_token", token);
+        const getMyQrTokenCallable = httpsCallable(functions, "getMyQrToken");
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Token request timed out")), 2500)
+        );
+        const result = await Promise.race([getMyQrTokenCallable(), timeoutPromise]);
+        token = String(result?.data?.token || "");
+        if (!token) throw new Error("Attendance QR code could not be loaded. Please try again.");
+        if (!active || auth?.currentUser?.uid !== uid) return;
+        permanentQrToken = token;
+        localStorage.setItem(tokenStorageKey, token);
+        if (typeof result?.data?.cooldownMs === "number") {
+          startCooldown(result.data.cooldownMs);
+        }
       }
 
       if (!active) return;
@@ -2088,24 +2169,14 @@ function setupModalEventListeners() {
       if (!confirmed) return;
 
       try {
-        let newToken = "";
-        if (functions) {
-          const regenCallable = httpsCallable(functions, "regenerateMyQr");
-          const res = await regenCallable();
-          if (res && res.data && res.data.token) {
-            newToken = res.data.token;
-            startCooldown(res.data.cooldownMs || 180000);
-          }
-        }
-        if (!newToken) {
-          const uid = currentUid || studentProfile.studentNo || "student";
-          const curV = Number(localStorage.getItem("recovibe_qr_version") || 1) + 1;
-          localStorage.setItem("recovibe_qr_version", String(curV));
-          newToken = `${uid}.${curV}.refreshed_signed_token`;
-          startCooldown(180000);
-        }
+        if (!currentUid || !functions) throw new Error("Sign in to refresh your attendance QR code.");
+        const regenCallable = httpsCallable(functions, "regenerateMyQr");
+        const res = await regenCallable();
+        const newToken = String(res?.data?.token || "");
+        if (!newToken) throw new Error("Could not refresh your QR code. Please try again.");
+        startCooldown(res.data.cooldownMs || 180000);
         permanentQrToken = newToken;
-        localStorage.setItem("recovibe_permanent_qr_token", newToken);
+        localStorage.setItem(`recovibe_permanent_qr_token:${currentUid}`, newToken);
         initQrModal();
         alert("New code ready. Download it again so your saved copy works.");
       } catch (err) {
@@ -2117,7 +2188,11 @@ function setupModalEventListeners() {
   if (qrModalDownloadBtn) {
     qrModalDownloadBtn.addEventListener("click", async (e) => {
       e.preventDefault();
-      const token = permanentQrToken || localStorage.getItem("recovibe_permanent_qr_token") || "";
+      const token = permanentQrToken || localStorage.getItem(`recovibe_permanent_qr_token:${currentUid}`) || "";
+      if (!token) {
+        alert("Attendance QR code is unavailable. Please try again.");
+        return;
+      }
       await downloadQrCard(token, {
         name: studentProfile.fullName,
         studentNo: studentProfile.studentNo,
@@ -2168,7 +2243,6 @@ function cleanupParticipationListeners() {
 }
 
 (function init() {
-  applyStudentProfile(readCachedProfile());
   initCommon();
   readUrlParams();
   updateStatusButtonLabel();
@@ -2193,6 +2267,7 @@ function cleanupParticipationListeners() {
       if (user) {
         const uidChanged = currentUid !== user.uid;
         if (uidChanged) {
+          permanentQrToken = "";
           stopFirestoreRegistrationListeners();
           stopAttendanceListeners();
           rtdbRegistrationsMap.clear();
@@ -2205,7 +2280,18 @@ function cleanupParticipationListeners() {
         profileResolved = false;
         participationLoading = true;
         render();
-        await hydrateUserProfile(user);
+        try {
+          await hydrateUserProfile(user);
+        } catch (error) {
+          console.error("Could not verify the signed-in student profile:", error);
+          clearCachedStudentProfile();
+          if (String(error?.message || "").includes("not a student profile")) {
+            await signOut(auth);
+          }
+          window.location.replace("StudentLogin.html");
+          return;
+        }
+        if (auth.currentUser?.uid !== user.uid) return;
         profileResolved = true;
 
         if (rtdbRegistrationsUnsubscribe) {
@@ -2237,7 +2323,7 @@ function cleanupParticipationListeners() {
         maybeFinishInitialLoad();
       } else {
         currentUid = null;
-        profileResolved = true;
+        clearCachedStudentProfile();
         if (rtdbRegistrationsUnsubscribe) {
           rtdbRegistrationsUnsubscribe();
           rtdbRegistrationsUnsubscribe = null;
@@ -2250,7 +2336,8 @@ function cleanupParticipationListeners() {
         firestoreEventsLoaded = true;
         publicEventsLoaded = true;
         participationLoading = false;
-        render();
+        window.location.replace("StudentLogin.html");
+        return;
       }
     }, (error) => {
       console.error("Could not resolve student authentication state:", error);
@@ -2263,12 +2350,7 @@ function cleanupParticipationListeners() {
       render();
     });
   } else {
-    authResolved = true;
-    profileResolved = true;
-    firestoreEventsLoaded = true;
-    publicEventsLoaded = true;
-    participationLoading = false;
-    render();
+    window.location.replace("StudentLogin.html");
   }
 
   // 30-second interval automatic status refresh (e.g. event end detection)

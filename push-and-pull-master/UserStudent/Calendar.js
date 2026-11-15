@@ -87,6 +87,7 @@ import {
     return new Date(year, month - 1, day, 12);
   };
   state.date = dateFromISO(manilaDateKey(new Date())) || state.date;
+  if (state.date.getFullYear() < 2025) state.date = new Date(2025, 0, 1);
   const todayISO = () => manilaDateKey(new Date());
 
   function normalizeCalendarEvent(id, data) {
@@ -321,7 +322,7 @@ import {
       activeSources.forEach((source) => {
         const label = document.createElement("label");
         label.className = "filter-option";
-        label.innerHTML = `<input type="checkbox" checked data-source="${escape(source.key)}" style="accent-color: ${source.accent};" /><span>${escape(source.label)}</span>`;
+        label.innerHTML = `<input type="checkbox" checked data-source="${escape(source.key)}" style="accent-color: var(--maroon-700);" /><span>${escape(source.label)}</span>`;
         filterPanel.appendChild(label);
       });
 
@@ -334,6 +335,8 @@ import {
 
     const legendPanel = document.getElementById("calendarLegend");
     if (legendPanel) {
+      const legendTitle = legendPanel.querySelector(".legend-title");
+      if (legendTitle) legendTitle.textContent = "Legend";
       legendPanel.querySelectorAll(".legend-item").forEach((el) => el.remove());
       activeSources.forEach((source) => {
         const item = document.createElement("span");
@@ -453,8 +456,9 @@ import {
     });
   }
 
-  function getUpcomingEvents(visible = visibleEvents()) {
+  function getUpcomingEvents(visible = visibleEvents(), currentMonthOnly = false) {
     const today = todayISO();
+    const currentMonth = today.slice(0, 7);
     const uniqueEvents = new Map();
     visible.forEach((event) => {
       const key = eventIdentity(event);
@@ -463,7 +467,11 @@ import {
     return [...uniqueEvents.values()]
       .filter((event) => {
         const range = eventDateRange(event);
-        return range && manilaDateKey(range.end) >= today;
+        if (!range || manilaDateKey(range.end) < today) return false;
+        if (!currentMonthOnly) return true;
+        const start = manilaDateKey(range.start);
+        const upcomingDate = start < today ? today : start;
+        return upcomingDate.slice(0, 7) === currentMonth;
       })
       .sort((first, second) => {
         const firstRange = eventDateRange(first);
@@ -480,16 +488,23 @@ import {
   function buildUpcomingList(visible) {
     if (!upcomingPanel) return;
 
-    const upcoming = getUpcomingEvents(visible);
+    const upcoming = getUpcomingEvents(visible, true);
+    const allUpcoming = getUpcomingEvents(visible);
+    const moreButton = allUpcoming.length > 5
+      ? '<button class="upcoming-more" type="button" data-upcoming-more>See All Upcoming Events</button>'
+      : "";
 
     if (!upcoming.length) {
-      upcomingPanel.innerHTML =
-        '<h3>Upcoming</h3><div class="upcoming-empty">No upcoming events or holidays.</div>';
+      upcomingPanel.innerHTML = [
+        "<h3>Upcoming Events</h3>",
+        '<div class="upcoming-empty">No upcoming events or holidays.</div>',
+        moreButton,
+      ].join("");
       return;
     }
 
     upcomingPanel.innerHTML = [
-      "<h3>Upcoming</h3>",
+      "<h3>Upcoming Events</h3>",
       `<div class="upcoming-list">${upcoming.slice(0, 5).map((event) => {
         const range = eventDateRange(event);
         const startDate = manilaDateKey(range.start);
@@ -513,8 +528,9 @@ import {
             </div>
           `;
         }
+        const selectable = isSelectableEvent(event);
         return `
-          <div class="upcoming-item" data-event-id="${escape(event.id || event.eventId || "")}" tabindex="0" role="button">
+          <div class="upcoming-item" ${selectable ? `data-event-id="${escape(event.id || event.eventId || "")}" tabindex="0" role="button"` : 'aria-disabled="true" style="cursor:default;"'}>
             <div class="upcoming-date ${categoryClass}"><span>${day}</span><small>${month}</small></div>
             <div class="upcoming-copy">
               <strong title="${escape(event.title || "Untitled event")}">${escape(event.title || "Untitled event")}</strong>
@@ -523,17 +539,15 @@ import {
           </div>
         `;
       }).join("")}</div>`,
-      upcoming.length > 5
-        ? '<button class="upcoming-more" type="button" data-upcoming-more>See all upcoming</button>'
-        : "",
+      moreButton,
     ].join("");
   }
 
   function openRemainingUpcoming() {
-    openEventList("More upcoming events", getUpcomingEvents().slice(5));
+    openEventList("More upcoming events", getUpcomingEvents().slice(5), undefined, true);
   }
 
-  function openEventList(listTitle, listedEvents, iso) {
+  function openEventList(listTitle, listedEvents, iso, showStartDate = false) {
     const dayTitle = document.getElementById("organizerDayTitle");
     const dayList = document.getElementById("organizerDayList");
     dayTitle.textContent = listTitle;
@@ -542,10 +556,19 @@ import {
       : "";
     dayList.innerHTML = openDayHeader + listedEvents
       .map((event) => {
+        const range = eventDateRange(event);
+        const startDate = range ? dateFromISO(manilaDateKey(range.start)) : null;
+        const dateLabel = startDate
+          ? startDate.toLocaleDateString("en-US", { month: "short", day: "numeric" })
+          : "";
         if (isHolidayEvent(event)) {
-          return `<div class="day-modal-row day-modal-row--holiday dot-${eventDotClass(event)}" style="cursor: default; pointer-events: none;" aria-label="${escape(event.title || "Holiday")} (Holiday)"><strong>${escape(event.title || "Holiday")}</strong><small>Holiday</small></div>`;
+          return `<div class="day-modal-row day-modal-row--holiday dot-${eventDotClass(event)}" style="cursor: default; pointer-events: none;" aria-label="${escape(event.title || "Holiday")} (Holiday)"><strong>${escape(event.title || "Holiday")}</strong><small>${escape(showStartDate ? dateLabel : "Holiday")}</small></div>`;
         }
-        return `<button class="day-modal-row dot-${eventDotClass(event)}" type="button" data-event-id="${escape(event.id || event.eventId || "")}"><strong>${escape(event.title || "Untitled event")}</strong><small>${escape(event.time || "Time TBA")}</small></button>`;
+        const detail = showStartDate
+          ? dateLabel
+          : event.time || "Time TBA";
+        const selectable = isSelectableEvent(event);
+        return `<button class="day-modal-row dot-${eventDotClass(event)}" type="button" ${selectable ? `data-event-id="${escape(event.id || event.eventId || "")}"` : "disabled aria-disabled=\"true\""}><strong>${escape(event.title || "Untitled event")}</strong><small>${escape(detail)}</small></button>`;
       })
       .join("");
     dayModal.classList.add("is-open");
@@ -637,7 +660,7 @@ import {
           .join("");
         const dotOverflowCount = Math.max(0, eventCount - 3);
         return `
-        <div class="cal-day-full ${cell.muted ? "is-muted" : ""} ${eventCount ? "has-event" : ""} ${isOnlyHoliday ? "only-holiday" : ""} ${today ? "is-today" : ""}" ${cell.iso ? `data-date="${cell.iso}" data-iso="${cell.iso}" tabindex="0" aria-label="${cell.iso}: ${eventCount ? `${eventCount} event${eventCount === 1 ? "" : "s"}` : "no events"}"` : ""}>
+        <div class="cal-day-full ${cell.muted ? "is-muted" : ""} ${eventCount ? "has-event" : ""} ${isOnlyHoliday ? "only-holiday" : ""} ${today ? "is-today" : ""}" ${cell.iso ? `data-date="${cell.iso}" data-iso="${cell.iso}" tabindex="${cell.iso <= todayISO() ? "0" : "-1"}" aria-disabled="${cell.iso > todayISO()}" aria-label="${cell.iso}: ${eventCount ? `${eventCount} event${eventCount === 1 ? "" : "s"}` : "no events"}"` : ""}>
           <span class="day-num">${cell.day || ""}</span>
           ${eventCount ? `<span class="event-dots" aria-hidden="true">${eventDots}${dotOverflowCount ? `<span class="event-dot-overflow">+${dotOverflowCount}</span>` : ""}</span>` : ""}
           ${eventCount ? `<span class="calendar-day-event-list">${eventTitles}<button class="calendar-day-more" type="button" hidden></button></span>` : ""}
@@ -696,8 +719,17 @@ import {
     const event = events.find(
       (item) => String(item.id || item.eventId) === String(eventId),
     );
-    if (!event || isHolidayEvent(event)) return;
+    if (!event || isHolidayEvent(event) || !isSelectableEvent(event)) return;
     window.RecovibeStudentEventDetails?.open(event);
+  }
+
+  function isSelectableEvent(event) {
+    const range = eventDateRange(event);
+    return Boolean(
+      range &&
+        manilaDateKey(range.end) >= "2025-01-01" &&
+        manilaDateKey(range.start) <= todayISO(),
+    );
   }
 
   function closeModal() {
@@ -705,6 +737,7 @@ import {
   }
 
   function openDay(iso, forceList = false) {
+    if (iso > todayISO()) return;
     const dayEvents = visibleEvents().filter((event) => eventOccursOn(event, iso));
     if (!dayEvents.length) return;
 
@@ -727,10 +760,12 @@ import {
   }
 
   function renderYearOptions() {
-    const currentYear = state.date.getFullYear();
+    const currentYear = Number(todayISO().slice(0, 4));
+    const earliestYear = Math.max(2025, currentYear - 10);
+    const latestYear = Math.max(2025, currentYear + 10);
     const years = Array.from(
-      { length: 21 },
-      (_, index) => currentYear - 10 + index,
+      { length: latestYear - earliestYear + 1 },
+      (_, index) => earliestYear + index,
     );
     yearSelect.innerHTML = years
       .map((year) => `<option value="${year}">${year}</option>`)
@@ -738,6 +773,11 @@ import {
   }
 
   function setCalendarMonth(year, month) {
+    const requestedMonth = new Date(year, month, 1);
+    if (requestedMonth < new Date(2025, 0, 1)) {
+      year = 2025;
+      month = 0;
+    }
     const day = Math.min(
       state.date.getDate(),
       new Date(year, month + 1, 0).getDate(),
@@ -802,7 +842,13 @@ import {
     try {
       const eventsQuery = query(
         collection(db, "events"),
-        where("status", "in", STUDENT_EVENT_STATUSES),
+        where(
+          "status",
+          "in",
+          STUDENT_EVENT_STATUSES.filter(
+            (status) => status !== "cancelled" && status !== "canceled",
+          ),
+        ),
       );
       eventsUnsubscribe = onSnapshot(
         eventsQuery,
@@ -848,6 +894,9 @@ import {
     if (!user) {
       clearCachedStudentProfile();
       renderStudentSidebar({});
+      updateDataStatus();
+      window.location.replace("StudentLogin.html");
+      return;
     }
     updateDataStatus();
     if (user && db) {
@@ -860,8 +909,16 @@ import {
       } catch (error) {
         console.error("Unable to load student profile for calendar audience filtering:", error);
         if (disposed || request !== authRequestSequence) return;
+        if (String(error?.message || "").includes("not a student profile")) {
+          clearCachedStudentProfile();
+          window.location.replace("StudentLogin.html");
+          return;
+        }
         profileLoadError =
-          "Your student profile could not be loaded; audience-specific event visibility may be incomplete.";
+          "Your student profile could not be verified. Calendar events are hidden until it can be loaded.";
+        eventsLoading = false;
+        updateDataStatus();
+        return;
       }
     }
     if (disposed || request !== authRequestSequence) return;

@@ -5,8 +5,6 @@ import {
   getDocs,
   limit,
   query,
-  serverTimestamp,
-  setDoc,
   where,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { auth, db } from "./firebaseConfig.js";
@@ -65,7 +63,6 @@ export async function loadStudentProfile(user, { storage, createIfMissing = fals
   const profileRef = doc(db, "users", user.uid);
   const profileSnapshot = await getDoc(profileRef);
   let profile = profileSnapshot.exists() ? profileSnapshot.data() : null;
-  let profileSource = profile ? "uid" : "";
 
   if (profile && profile.uid && profile.uid !== user.uid) {
     throw new Error("The profile document UID does not match the authenticated user.");
@@ -91,7 +88,6 @@ export async function loadStudentProfile(user, { storage, createIfMissing = fals
     }
     if (matches.size === 1) {
       profile = matches.docs[0].data();
-      profileSource = "email";
     }
   }
 
@@ -99,7 +95,6 @@ export async function loadStudentProfile(user, { storage, createIfMissing = fals
     const cached = readStoredProfile(user.email);
     if (cached) {
       profile = cached;
-      profileSource = "verified-cache";
     }
   }
 
@@ -114,10 +109,9 @@ export async function loadStudentProfile(user, { storage, createIfMissing = fals
       role: "student",
       status: "Active",
     };
-    profileSource = "created";
   }
 
-  const role = String(profile.role || profile.userRole || "student").trim().toLowerCase();
+  const role = String(profile.role || profile.userRole || "").trim().toLowerCase();
   if (role !== "student") {
     throw new Error(`The authenticated account is not a student profile (role: ${role}).`);
   }
@@ -127,20 +121,6 @@ export async function loadStudentProfile(user, { storage, createIfMissing = fals
     uid: user.uid,
     email: profile.email || user.email || "",
   };
-  if (!profileSnapshot.exists() || profile.uid !== user.uid) {
-    await setDoc(
-      profileRef,
-      {
-        ...canonicalProfile,
-        ...(profileSource === "created" ? { createdAt: serverTimestamp() } : {}),
-      },
-      { merge: true },
-    );
-    console.info("[Student Identity] Student profile backfilled:", {
-      uid: user.uid,
-      source: profileSource,
-    });
-  }
   if (auth?.currentUser?.uid !== user.uid) {
     throw new Error("The authenticated student changed while their profile was being saved.");
   }
@@ -148,33 +128,43 @@ export async function loadStudentProfile(user, { storage, createIfMissing = fals
   return canonicalProfile;
 }
 
-export function renderStudentSidebar(profile) {
+export function renderStudentSidebar(profile = {}) {
   const fullName = String(
     profile.fullName ||
       profile.name ||
       [profile.firstName, profile.middleName, profile.lastName]
         .filter(Boolean)
         .join(" ") ||
-      "Student",
+      "",
   ).trim();
-  const firstName = String(profile.firstName || fullName.split(/\s+/)[0] || "S");
-  const organization = String(
-    profile.organization ||
-      profile.courseOrganization ||
-      profile.courseOrg ||
-      profile.organizationCode ||
-      profile.organizationName ||
-      "Student",
+  const nameParts = fullName.split(/\s+/).filter(Boolean);
+  const firstName = String(profile.firstName || nameParts[0] || "");
+  const initials = [
+    firstName,
+    profile.lastName || (nameParts.length > 1 ? nameParts[nameParts.length - 1] : ""),
+  ]
+    .filter(Boolean)
+    .map((part) => Array.from(String(part))[0]?.toLocaleUpperCase() || "")
+    .join("");
+  const program = String(
+    profile.program ||
+      profile.course ||
+      profile.department ||
+      profile.departmentCode ||
+      "",
   ).trim();
-  const role = organization.toLowerCase() === "none" ? "Student" : organization;
+  const studentNumber = String(
+    profile.studentNumber || profile.studentNo || profile.studentId || "",
+  ).trim();
+  const subtitle = [program, studentNumber].filter(Boolean).join(" · ");
   document.querySelectorAll(".user-name, #userName").forEach((element) => {
     element.textContent = fullName;
   });
   document.querySelectorAll(".user-role, #userRole").forEach((element) => {
-    element.textContent = role;
+    element.textContent = subtitle;
   });
   document.querySelectorAll(".avatar, #userAvatar").forEach((element) => {
-    element.textContent = Array.from(firstName)[0]?.toLocaleUpperCase() || "S";
+    element.textContent = initials;
   });
   document.querySelectorAll("#userFirstName").forEach((element) => {
     element.textContent = firstName;
@@ -182,7 +172,7 @@ export function renderStudentSidebar(profile) {
   const greeting = document.getElementById("dashboardGreeting");
   if (greeting) {
     const hour = new Date().getHours();
-    const salutation = hour < 12 ? "Good Morning" : hour < 18 ? "Good Noon" : "Good Evening";
-    greeting.textContent = `${salutation}, ${fullName}`;
+    const salutation = hour < 12 ? "Good Morning" : hour < 18 ? "Good Afternoon" : "Good Evening";
+    greeting.textContent = `${salutation}${firstName ? `, ${firstName}` : ""}`;
   }
 }

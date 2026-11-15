@@ -152,7 +152,7 @@
         >
           <div class="panel-head">
             <h2 id="recommendationsHeading">Recommended for you</h2>
-            <span class="hint-label">Based on your preferences · <a href="StudentProfile.html#preferencesPanel" class="link-edit-pref" id="editPreferencesLink">Edit</a></span>
+            <a href="StudentProfile.html#preferencesPanel" class="btn-outline link-edit-pref" id="editPreferencesLink">Edit Preferences</a>
           </div>
           <div class="rec-grid" id="recGrid"><!-- injected by JS --></div>
         </section>
@@ -188,7 +188,7 @@
             <input
               type="text"
               id="searchInput"
-              placeholder="PUP Connect!"
+              placeholder="Search events or categories..."
               aria-label="Search events"
             />
           </div>
@@ -210,7 +210,7 @@
           <div class="content-col content-upcoming" id="upcomingEventsColumn">
             <div class="panel-head">
               <h2 id="upcomingHeading">Upcoming events</h2>
-              <a href="Events.html" class="link-see-all" data-view="events" id="seeAllEventsLink">See all events</a>
+              <a href="Events.html" class="link-see-all" data-view="events" id="seeAllEventsLink">View All</a>
             </div>
             <div class="event-list" id="upcomingEventsList" aria-labelledby="upcomingHeading">Loading events...</div>
           </div>
@@ -219,8 +219,8 @@
           <div class="content-col content-calendar" id="calendarColumn">
             <div class="card calendar-card" id="dashboardCalendarCard">
               <div class="panel-head panel-head--tight">
-                <h2 id="calendarHeading">Calendar preview</h2>
-                <a href="Calendar.html" class="link-see-all" data-view="calendar" id="fullCalendarLink">Full calendar</a>
+                <h2 id="calendarHeading">Event Calendar</h2>
+                <a href="Calendar.html" class="link-see-all" data-view="calendar" id="fullCalendarLink">View Calendar</a>
               </div>
               <div class="cal-nav">
                 <button

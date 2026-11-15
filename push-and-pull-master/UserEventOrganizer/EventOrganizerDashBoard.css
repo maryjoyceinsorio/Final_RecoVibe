@@ -23,8 +23,10 @@
 
 .organizer-dashboard-header h1 {
   margin: 0;
+  min-width: 0;
   color: var(--ink);
   font: 600 32px/1.15 var(--display);
+  overflow-wrap: anywhere;
 }
 
 .organizer-dashboard-date {
@@ -430,6 +432,11 @@
   color: #8c2830;
 }
 
+.organizer-status.completed {
+  background: #e5e9ef;
+  color: #425466;
+}
+
 .event-view-button {
   display: inline-flex;
   align-items: center;
@@ -812,6 +819,11 @@ body.modal-open {
   .organizer-results-bar {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  #happeningNowSection .organizer-results-bar {
+    align-items: center;
+    flex-direction: row;
   }
 
   .organizer-grid {

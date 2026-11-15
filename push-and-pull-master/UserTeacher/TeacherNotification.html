@@ -191,59 +191,41 @@
       </aside>
 
       <main class="main" id="notificationMain">
+        <header class="notifications-header">
+          <h1>Notifications</h1>
+        </header>
         <section
           class="notification-toolbar"
           id="notificationFilterSection"
           aria-label="Notification controls"
         >
-          <div class="search-box">
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 20 20"
-              fill="none"
-              aria-hidden="true"
-            >
-              <circle
-                cx="8.8"
-                cy="8.8"
-                r="5.6"
-                stroke="currentColor"
-                stroke-width="1.5"
-              />
-              <path
-                d="M13 13l4 4"
-                stroke="currentColor"
-                stroke-width="1.5"
-                stroke-linecap="round"
-              /></svg
-            ><input
-              id="notificationSearch"
-              type="search"
-              placeholder="PUP Connect!"
-              aria-label="Search notifications"
-            />
+          <div class="notification-toolbar-left">
+            <nav class="notification-tabs" aria-label="Notification view">
+              <button type="button" class="is-active" data-notification-filter="all" aria-pressed="true">All</button>
+              <button type="button" data-notification-filter="unread" aria-pressed="false">Unread <span id="notificationUnreadCount">0</span></button>
+            </nav>
+            <label class="filter-select-wrap" for="notificationFilter"
+              >Show
+              <select id="notificationFilter" class="filter-select">
+                <option value="all">All</option>
+                <option value="unread">Unread</option>
+                <option value="read">Read</option>
+              </select>
+            </label>
           </div>
-          <label class="filter-select-wrap" for="notificationFilter"
-            >Filter notifications
-            <select id="notificationFilter" class="filter-select">
-              <option value="all">All Notifications</option>
-              <option value="unread">Unread</option>
-              <option value="read">Read</option>
-            </select>
-          </label>
-        </section>
-
-        <div id="notificationPanels" data-panel-owner="notifications">
           <div
-            class="notification-panel-switcher"
+            class="notification-panel-switcher notification-toolbar-actions"
             aria-label="Notification panel controls"
           >
+            <button id="markAllRead" class="mark-all" type="button">
+              Mark all as read
+            </button>
             <button
               id="showDeletedNotifications"
               class="trash-bin-link"
               type="button"
               aria-pressed="false"
+              aria-label="Open Recently Deleted"
             >
               <svg
                 id="showDeletedNotificationsIcon"
@@ -260,10 +242,20 @@
                 /></svg
               ><span id="showDeletedNotificationsLabel">Recently Deleted</span>
             </button>
-            <button id="markAllRead" class="mark-all" type="button">
-              Mark All As Read
-            </button>
           </div>
+        </section>
+        <label class="notification-search">
+          <span>Search notifications</span>
+          <input
+            id="notificationSearch"
+            type="search"
+            placeholder="Search notifications"
+            aria-label="Search notifications"
+          />
+        </label>
+        <p id="recentDeletedInfo" class="notification-trash-info" hidden><span aria-hidden="true">i</span> Deleted notifications stay here for 30 days, then they are removed for good.</p>
+
+        <div id="notificationPanels" data-panel-owner="notifications">
           <section
             class="notifications-panel"
             id="allNotificationsPanel"
@@ -296,6 +288,7 @@
             ></div>
           </section>
         </div>
+        <div id="teacherNotificationToast" class="notification-toast" role="status" aria-live="polite" hidden></div>
       </main>
     </div>
     <div
