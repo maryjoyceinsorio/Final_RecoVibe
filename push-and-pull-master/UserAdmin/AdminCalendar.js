@@ -5,6 +5,9 @@ import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase
 
 (() => {
   "use strict";
+  import("./AdminNotificationData.js")
+    .then(({ startAdminNotificationBadge }) => startAdminNotificationBadge())
+    .catch(() => document.querySelectorAll("[data-notification-count]").forEach((badge) => { badge.hidden = true; }));
   let profile = {};
   const root = document.getElementById("calendarRoot"),
     statusElement = document.getElementById("calendarStatus"),

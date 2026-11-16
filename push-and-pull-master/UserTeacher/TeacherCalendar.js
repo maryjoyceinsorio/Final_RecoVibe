@@ -12,12 +12,20 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 import {
   auth,
+  authReady,
+  db,
+  isFirebaseConfigured,
   rtdb,
   isRtdbConfigured,
 } from "../UserStudent/firebaseConfig.js";
 import { fetchMonthHolidays } from "../holidayService.js";
+import {
+  getDocs,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { teacherEventReadFilters, teacherEventsQuery } from "./TeacherEventQuery.js";
 
 (() => {
+  const DEBUG = false;
   const monthNames = [
     "January",
     "February",
@@ -75,7 +83,7 @@ import { fetchMonthHolidays } from "../holidayService.js";
     organizerUnpublishedEvents: [],
     holidays: [],
     isLoading: true,
-    loadError: false,
+    loadError: "",
     currentUser: null,
     organizerProfile: null,
   };
@@ -86,6 +94,10 @@ import { fetchMonthHolidays } from "../holidayService.js";
   let activeOrganizerEventsRef = null;
   let activeOrganizerEventsCallback = null;
   let holidayRequestSequence = 0;
+
+  function debug(...args) {
+    if (DEBUG) console.debug("[Teacher Calendar]", ...args);
+  }
 
   // --- Philippine Time Date Helpers ---
   function toPhDateStr(timestampOrString) {
@@ -407,7 +419,7 @@ import { fetchMonthHolidays } from "../holidayService.js";
     if (state.loadError) {
       calendarDays.innerHTML = `
         <div class="calendar-grid-error-state" style="grid-column: 1 / -1; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 280px; text-align: center; color: #7a6d66; padding: 24px;">
-          <p style="font-size: 15px; font-weight: 500; margin-bottom: 12px;">Couldn't load events</p>
+          <p style="font-size: 15px; font-weight: 500; margin-bottom: 12px;">${escapeHTML(state.loadError)}</p>
           <button type="button" class="cal-toggle" id="calTryAgainBtn" style="cursor: pointer;">Try again</button>
         </div>
       `;
@@ -547,6 +559,11 @@ import { fetchMonthHolidays } from "../holidayService.js";
   // --- Upcoming Events Card Rendering ---
   function renderUpcomingList(isMonthEmpty = false) {
     if (!upcomingList) return;
+
+    if (state.loadError) {
+      upcomingList.innerHTML = `<div class="upcoming-empty">${escapeHTML(state.loadError)}</div>`;
+      return;
+    }
 
     if (state.isLoading) {
       upcomingList.innerHTML = '<div class="upcoming-empty">Loading events...</div>';
@@ -831,54 +848,38 @@ import { fetchMonthHolidays } from "../holidayService.js";
     const seen = new Set();
 
     // 1. Try Firestore events
+    const uidAtRead = auth?.currentUser?.uid;
+    const filters = teacherEventReadFilters(state.currentUser?.uid || "");
     try {
-      const { db, isFirebaseConfigured } = await import(
-        "../UserStudent/firebaseConfig.js"
-      );
-      if (isFirebaseConfigured && db) {
-        const { collection, getDocs, query, where } = await import(
-          "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js"
-        );
-        const eventsRef = collection(db, "events");
-        const publicSnapshots = await Promise.all([
-          getDocs(query(eventsRef, where("status", "in", [
-            "approved", "Approved", "APPROVED",
-            "published", "Published", "PUBLISHED",
-            "completed", "Completed", "COMPLETED",
-            "rescheduled", "Rescheduled", "RESCHEDULED",
-          ]))),
-          getDocs(query(eventsRef, where("published", "==", true))),
-          getDocs(query(eventsRef, where("isPublished", "==", true))),
-        ]);
-        const publicDocuments = new Map();
-        publicSnapshots.forEach((snapshot) => {
-          snapshot.docs.forEach((document) => {
-            publicDocuments.set(document.id, document);
-          });
+      const uid = state.currentUser?.uid;
+      if (isTeacher && (!uid || auth?.currentUser?.uid !== uid)) return list;
+      if (isFirebaseConfigured && db && uid) {
+        debug("Firestore read started:", {
+          path: "events",
+          filters,
+          uid: uidAtRead,
         });
-        publicDocuments.forEach((doc) => {
-          const data = doc.data();
-          const s = String(data.status || "").trim().toLowerCase();
-          const isApprovedOrPub =
-            data.published === true ||
-            ["approved", "published", "completed", "rescheduled"].includes(s);
-          const isUnpub = [
-            "draft",
-            "rejected",
-            "cancelled",
-            "canceled",
-          ].includes(s);
-          if (isApprovedOrPub && !isUnpub) {
-            const ev = normalizeEvent(doc.id, data);
-            if (!seen.has(ev.id)) {
-              seen.add(ev.id);
-              list.push(ev);
-            }
+        const publicSnapshot = await getDocs(teacherEventsQuery(db, uid));
+        publicSnapshot.docs.forEach((document) => {
+          const data = document.data();
+          const ev = normalizeEvent(document.id, data);
+          if (ev && !seen.has(ev.id)) {
+            seen.add(ev.id);
+            list.push(ev);
           }
         });
       }
-    } catch (e) {
-      console.warn("Firestore events query error:", e);
+    } catch (error) {
+      debug("Firestore read failed:", {
+        path: "events",
+        filters,
+        code: error?.code || "unknown",
+        message: error?.message || String(error),
+        uid: uidAtRead,
+      });
+      state.loadError = error?.code === "permission-denied"
+        ? "You don't have permission to view calendar events. Ask an administrator to check the Firestore events read rule."
+        : "Calendar events could not be loaded. Please retry.";
     }
 
     // 2. Global window.RECOVIBE_EVENTS
@@ -994,9 +995,13 @@ import { fetchMonthHolidays } from "../holidayService.js";
   }
 
   async function subscribeMonthData() {
+    if (isTeacher && (!state.currentUser?.uid || auth?.currentUser?.uid !== state.currentUser.uid)) {
+      cleanupListeners();
+      return;
+    }
     cleanupListeners();
     state.isLoading = true;
-    state.loadError = false;
+    state.loadError = "";
     renderCalendar();
 
     const year = state.date.getFullYear();
@@ -1054,10 +1059,10 @@ import { fetchMonthHolidays } from "../holidayService.js";
         state.publicEvents = allEvs.filter(
           (ev) => ev.startDay <= monthEndDay && ev.endDay >= monthStartDay,
         );
-        state.loadError = false;
       } catch (err) {
-        console.warn("Error loading fallback events:", err);
-        state.loadError = true;
+        state.loadError = err?.code === "permission-denied"
+          ? "You don't have permission to view calendar events. Ask an administrator to check the Firestore events read rule."
+          : "Calendar events could not be loaded. Please retry.";
       } finally {
         state.isLoading = false;
         renderCalendar();
@@ -1080,7 +1085,6 @@ import { fetchMonthHolidays } from "../holidayService.js";
             activeFallbackTimer = null;
           }
           state.isLoading = false;
-          state.loadError = false;
 
           const val = snapshot.val() || {};
           const records = [];
@@ -1101,6 +1105,7 @@ import { fetchMonthHolidays } from "../holidayService.js";
           fetchApprovedEvents().then((evs) => {
             state.upcomingEvents = evs;
             renderUpcomingList();
+            renderCalendar();
           });
 
           renderCalendar();
@@ -1119,9 +1124,10 @@ import { fetchMonthHolidays } from "../holidayService.js";
             state.publicEvents = allEvs.filter(
               (ev) => ev.startDay <= monthEndDay && ev.endDay >= monthStartDay,
             );
-            state.loadError = false;
           } catch (e) {
-            state.loadError = true;
+            state.loadError = e?.code === "permission-denied"
+              ? "You don't have permission to view calendar events. Ask an administrator to check the Firestore events read rule."
+              : "Calendar events could not be loaded. Please retry.";
           } finally {
             state.isLoading = false;
             renderCalendar();
@@ -1336,11 +1342,7 @@ import { fetchMonthHolidays } from "../holidayService.js";
           const avatarEl = document.getElementById("teacherCalendarAvatar");
           if (nameEl) nameEl.textContent = name;
           if (roleEl) {
-            roleEl.textContent =
-              teacher.department ||
-              teacher.organization ||
-              teacher.role ||
-              "Faculty account";
+            roleEl.textContent = "Teacher";
           }
           if (avatarEl) {
             avatarEl.textContent = name
@@ -1413,21 +1415,33 @@ import { fetchMonthHolidays } from "../holidayService.js";
 
     // Authentication observation
     if (auth) {
-      onAuthStateChanged(auth, (user) => {
-        state.currentUser = user;
-        if (!user && !isTeacher) {
-          const localOrganizer = localStorage.getItem("recovibeOrganizerId");
-          if (!localOrganizer && isRtdbConfigured) {
-            window.location.replace("EventOrganizerLogin.html");
+      Promise.resolve(authReady).then(() => {
+        onAuthStateChanged(auth, (user) => {
+          state.currentUser = user;
+          if (isTeacher && !user?.uid) {
+            cleanupListeners();
+            window.location.replace("TeacherLogin.html");
             return;
           }
-        }
-        subscribeMonthData().then(() => {
-          if (dayParam) {
-            openDay(dayParam);
+          if (!user && !isTeacher) {
+            const localOrganizer = localStorage.getItem("recovibeOrganizerId");
+            if (!localOrganizer && isRtdbConfigured) {
+              window.location.replace("EventOrganizerLogin.html");
+              return;
+            }
           }
+          subscribeMonthData().then(() => {
+            if (dayParam) {
+              openDay(dayParam);
+            }
+          });
         });
+      }).catch((error) => {
+        debug("Calendar authentication initialization failed:", error);
+        if (isTeacher) window.location.replace("TeacherLogin.html");
       });
+    } else if (isTeacher) {
+      window.location.replace("TeacherLogin.html");
     } else {
       subscribeMonthData().then(() => {
         if (dayParam) {

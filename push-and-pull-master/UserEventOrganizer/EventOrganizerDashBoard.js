@@ -1,4 +1,5 @@
 (() => {
+  const DEBUG = false;
   const allEvents = getOrganizerEvents();
   const organizerId = localStorage.getItem("recovibeOrganizerId");
   const actionRows = document.getElementById("organizerActionRows");
@@ -27,6 +28,93 @@
           "'": "&#39;",
         })[character],
     );
+
+  function toMillis(value) {
+    if (value === null || value === undefined) return null;
+    if (value instanceof Date) {
+      const millis = value.getTime();
+      return Number.isFinite(millis) ? millis : null;
+    }
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) return null;
+      const millis = Math.abs(value) < 100000000000 ? value * 1000 : value;
+      return Number.isFinite(millis) ? millis : null;
+    }
+    if (typeof value === "string") {
+      const text = value.trim();
+      let dateText = "";
+      const dateParts = /^(\d{4})-(\d{2})-(\d{2})/.exec(text);
+      if (dateParts) {
+        const calendarDate = new Date(0);
+        calendarDate.setUTCFullYear(
+          Number(dateParts[1]),
+          Number(dateParts[2]) - 1,
+          Number(dateParts[3]),
+        );
+        if (
+          calendarDate.getUTCFullYear() !== Number(dateParts[1]) ||
+          calendarDate.getUTCMonth() !== Number(dateParts[2]) - 1 ||
+          calendarDate.getUTCDate() !== Number(dateParts[3])
+        ) {
+          return null;
+        }
+      }
+      if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+        dateText = `${text}T00:00:00+08:00`;
+      } else if (
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?$/i.test(text)
+      ) {
+        dateText = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(text)
+          ? text
+          : `${text}+08:00`;
+      } else {
+        return null;
+      }
+      const millis = Date.parse(dateText);
+      return Number.isFinite(millis) ? millis : null;
+    }
+    if (typeof value.toMillis === "function") {
+      try {
+        const millis = value.toMillis();
+        return Number.isFinite(millis) ? millis : null;
+      } catch {
+        return null;
+      }
+    }
+    const seconds = value.seconds ?? value._seconds;
+    if (typeof seconds === "number" && Number.isFinite(seconds)) {
+      const nanos = Number(value.nanoseconds ?? value._nanoseconds ?? 0);
+      const millis = seconds * 1000 + (Number.isFinite(nanos) ? nanos / 1000000 : 0);
+      return Number.isFinite(millis) ? millis : null;
+    }
+    return null;
+  }
+
+  function formatCreatedDate(value) {
+    const millis = toMillis(value);
+    if (millis === null) return "—";
+    const dayKey = (timestamp) =>
+      new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Manila",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(new Date(timestamp));
+    const today = Date.now();
+    if (dayKey(millis) === dayKey(today)) return "Today";
+    if (dayKey(millis) === dayKey(today - 86400000)) return "Yesterday";
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: "Asia/Manila",
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    }).format(new Date(millis));
+  }
+
+  window.RecovibeOrganizerDashboardDates = Object.freeze({
+    toMillis,
+    formatCreatedDate,
+  });
 
   const organizerEvents = allEvents.filter(
     (event) => organizerId && String(event.organizerId) === String(organizerId),
@@ -117,29 +205,14 @@
   }
 
   function getEventCreatedAt(event) {
-    const values = [
-      event.approvalSubmittedAt,
-      event.submittedAt,
-      event.submitted_at,
-      event.dateSubmitted,
-      event.date_submitted,
-      event.createdAt,
-      event.created_at,
-    ];
-    for (const value of values) {
-      if (!value) continue;
-      const date = value?.toDate
-        ? value.toDate()
-        : value?.seconds != null
-          ? new Date(Number(value.seconds) * 1000)
-          : value?._seconds != null
-            ? new Date(Number(value._seconds) * 1000)
-            : typeof value === "number"
-              ? new Date(value < 100000000000 ? value * 1000 : value)
-              : new Date(String(value));
-      if (!Number.isNaN(date.getTime())) return date.toISOString();
+    for (const field of ["createdAt", "submittedAt", "dateCreated", "createdAtMs", "updatedAt"]) {
+      const millis = toMillis(event[field]);
+      if (millis !== null) return millis;
     }
-    return "";
+    if (DEBUG) {
+      console.info("[OrganizerDashboard] No usable creation date for event:", event.eventId || event.id);
+    }
+    return null;
   }
 
   function getDateParts(
@@ -308,10 +381,13 @@
       .filter((event) =>
         ["Draft", "Pending", "Needs Revision", "Rejected", "Approved"].includes(getStatus(event)),
       )
-      .sort((first, second) =>
-        new Date(getEventCreatedAt(second) || 0).getTime() -
-        new Date(getEventCreatedAt(first) || 0).getTime(),
-      );
+      .sort((first, second) => {
+        const firstCreated = getEventCreatedAt(first);
+        const secondCreated = getEventCreatedAt(second);
+        if (firstCreated === null) return secondCreated === null ? 0 : 1;
+        if (secondCreated === null) return -1;
+        return secondCreated - firstCreated;
+      });
 
     if (!actionableEvents.length) {
       actionRows.innerHTML = `
@@ -329,6 +405,7 @@
       .map((event) => {
         const status = getStatus(event);
         const statusClass = getStatusClass(status);
+        const createdAt = getEventCreatedAt(event);
 
         return `
         <tr data-event-id="${escapeHtml(event.eventId)}" style="cursor: pointer;">
@@ -336,7 +413,7 @@
             <strong>${escapeHtml(event.title || "Untitled event")}</strong>
             <small>${escapeHtml(event.category || "General")}</small>
           </td>
-          <td>${formatDate(getEventCreatedAt(event), "TBA")}</td>
+          <td>${escapeHtml(createdAt === null ? "—" : formatCreatedDate(createdAt))}</td>
           <td>
             <span class="organizer-status ${statusClass}">
               ${escapeHtml(status)}
@@ -461,10 +538,6 @@
     updateTodayDate();
   }
 
-  renderStatistics();
-  renderActionRequired();
-  renderHappeningNow();
-  renderUpcomingEvents();
   setInterval(updateTodayDate, 60000);
 
   const organizerDashboardHeading = document.getElementById("organizerDashboardHeading");

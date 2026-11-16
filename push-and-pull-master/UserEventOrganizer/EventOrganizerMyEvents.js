@@ -27,6 +27,10 @@ import {
   rtdb,
   functions,
 } from "../UserStudent/firebaseConfig.js";
+import {
+  getEventStage,
+  isFullyApproved as isEventFullyApproved,
+} from "../eventWorkflow.js";
 
 (() => {
   "use strict";
@@ -158,6 +162,7 @@ import {
   }
 
   function buildFirestoreApproval(event) {
+    const workflow = getEventStage(event);
     const standardStages = [
       { key: "org_adv", label: "Organization Adviser", aliases: ["org_adv", "org adviser", "organization adviser", "organization adviser review", "migs", "michael anjelo miguel"] },
       { key: "sir_abelida", label: "Laboratory Head, Property Custodian, Administrative Officer", aliases: ["sir_abelida", "abelidads", "abelida", "sir abelida", "gerino abelida", "gerino abelida jr", "laboratory head", "property custodian", "administrative officer", "laboratory head property custodian administrative officer"] },
@@ -171,82 +176,56 @@ import {
     const normalizeKey = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
     const overallStatusValues = getEventStatusValues(event);
     const approvalHistory = Array.isArray(event.approvalHistory) ? event.approvalHistory : [];
-    const currentStep = Number(event.approvalCurrentStep);
-    const historyByStage = new Map();
-    approvalHistory.forEach((entry) => {
-      if (!entry || typeof entry !== "object") return;
-      const historyStage = [entry.stage, entry.stageKey, entry.key, entry.id, entry.stageLabel, entry.label]
-        .map(normalizeKey)
-        .find((value) => standardStages.some((stage) =>
-          normalizeKey(stage.key) === value ||
-          normalizeKey(stage.label) === value ||
-          stage.aliases.some((alias) => normalizeKey(alias) === value),
-        ));
-      if (!historyStage) return;
-      const stage = standardStages.find((candidate) =>
-        normalizeKey(candidate.key) === historyStage ||
-        normalizeKey(candidate.label) === historyStage ||
-        candidate.aliases.some((alias) => normalizeKey(alias) === historyStage),
-      );
-      if (stage) historyByStage.set(stage.key, entry);
-    });
     const members = {};
 
-    standardStages.forEach((stage, index) => {
+    workflow.stages.forEach((stageState) => {
+      const stage = standardStages.find((candidate) => candidate.key === stageState.key);
       const source = stageEntries.find(([id, candidate]) =>
-        [id, candidate?.id, candidate?.key, candidate?.label, candidate?.name, candidate?.reviewer]
+        [id, candidate?.id, candidate?.key, candidate?.label, candidate?.name]
           .some((value) => stage.aliases.some((alias) => normalizeKey(alias) === normalizeKey(value)) ||
             normalizeKey(value) === normalizeKey(stage.key) ||
             normalizeKey(value) === normalizeKey(stage.label)),
-      )?.[1];
-      const historyEntry = historyByStage.get(stage.key);
-      const sourceStatus = normalizeStatus(
-        historyEntry?.decision || historyEntry?.status || historyEntry?.approvalStatus ||
-        source?.status || source?.approvalStatus || source?.state || source?.decision,
-      );
-      const stepStatus = Number.isInteger(currentStep) && currentStep >= 1
-        ? index + 1 < currentStep
-          ? "approved"
-          : index + 1 === currentStep
-            ? "review"
-            : "pending"
-        : "";
-      const status = sourceStatus === "approved"
+      )?.[1] || {};
+      const assignment = event.approverAssignments?.[stage.key] || {};
+      const hasApprover = [
+        source.reviewerUid,
+        source.assignedReviewerUid,
+        source.approverUid,
+        source.assignedUid,
+        source.uid,
+        source.reviewerEmail,
+        source.assignedReviewerEmail,
+        source.approverEmail,
+        source.assignedEmail,
+        assignment.reviewerUid,
+        assignment.approverUid,
+        assignment.uid,
+        assignment.reviewerEmail,
+        assignment.approverEmail,
+        assignment.email,
+        event[`${stage.key}ReviewerUid`],
+        event[`${stage.key}ApproverUid`],
+        event[`${stage.key}ReviewerEmail`],
+        event[`${stage.key}ApproverEmail`],
+      ].some((value) => String(value || "").trim());
+      const historyEntry = stageState.approvedEntry;
+      const status = stageState.state === "approved"
         ? "ok"
-        : ["review", "reviewing", "in review", "pending"].includes(sourceStatus)
+        : stageState.state === "current" && hasApprover
           ? "review"
-          : sourceStatus === "revision"
-            ? "rev"
-            : sourceStatus === "rejected"
-              ? "rej"
-              : ["wait", "waiting"].includes(sourceStatus)
-                ? "wait"
-                : stepStatus === "approved"
-                  ? "ok"
-                  : stepStatus === "review"
-                    ? "review"
-                    : index === 0 ? "review" : "wait";
+          : "wait";
       members[stage.key] = {
         key: stage.key,
         label: stage.label,
-        step: index + 1,
+        step: stageState.step,
         status,
-        note: historyEntry?.note || source?.note || "",
-        updatedAt: historyEntry?.timestamp || historyEntry?.at || historyEntry?.createdAt ||
-          source?.updatedAt || source?.approvedAt || null,
-        approvedByName: historyEntry?.decidedByName || historyEntry?.by ||
-          source?.approvedByName || source?.decidedBy || "",
+        note: stageState.state === "current" && !hasApprover
+          ? "No approver assigned"
+          : historyEntry?.note || "",
+        updatedAt: historyEntry?.timestamp || historyEntry?.at || historyEntry?.createdAt || null,
+        approvedByName: historyEntry?.decidedByName || historyEntry?.by || "",
       };
     });
-    const hasBlockedStage = Object.values(members).some((member) =>
-      ["rev", "rej"].includes(member.status),
-    );
-    const allStagesApproved = standardStages.every((stage) => members[stage.key].status === "ok");
-    const hasUnpublishedTerminalStatus = overallStatusValues.some((status) =>
-      ["cancelled", "rejected", "revision"].includes(status),
-    );
-    const allApprovalStepsComplete = !hasUnpublishedTerminalStatus &&
-      allStagesApproved;
 
     const files = {};
     (Array.isArray(event.approvalDocuments) ? event.approvalDocuments : []).forEach((file, index) => {
@@ -266,18 +245,18 @@ import {
       };
     }
 
-    const status = allApprovalStepsComplete
+    const status = workflow.isFullyApproved
       ? "approved"
       : overallStatusValues.find((value) =>
-      ["published", "completed", "cancelled", "rejected", "revision", "approved"].includes(value),
-    ) || overallStatusValues.find(Boolean) || "pending";
+      ["published", "completed", "cancelled", "rejected", "revision"].includes(value),
+    ) || overallStatusValues.find((value) => value !== "approved") || "pending";
 
     return {
       submittedAt: event.approvalSubmittedAt || event.createdAt,
       members,
       files,
       history: approvalHistory,
-      currentStep: Number.isInteger(currentStep) ? currentStep : null,
+      currentStep: workflow.currentStageIndex,
       status,
     };
   }
@@ -381,7 +360,6 @@ import {
     const eventStatus = firestoreStatuses[0] || "";
     if (eventStatus === "draft") return "draft";
 
-    const eventKey = String(event.eventId || event.id);
     const approval = getApprovalForEvent(event);
 
     const isPublished = ["published", "completed", "cancelled"].find((status) =>
@@ -392,48 +370,12 @@ import {
       return "published";
     }
     if (normalizeStatus(approval?.status) === "published") return "published";
+    if (isEventFullyApproved(event)) return "approved";
 
-    const stageEntries = Array.isArray(event.approvalStages)
-      ? event.approvalStages
-      : Object.values(event.approvalStages || {});
-    const requiredStageStatuses = stageEntries
-      .filter((stage) => !stage || typeof stage !== "object" || (stage.required !== false && stage.enabled !== false))
-      .map((stage) =>
-        normalizeStatus(
-          typeof stage === "string"
-            ? stage
-            : stage?.status || stage?.approvalStatus || stage?.state || stage?.decision,
-        ),
-      );
-    if (firestoreStatuses.includes("rejected")) return "rejected";
-    if (firestoreStatuses.includes("revision")) return "revision";
-    if (firestoreStatuses.includes("approved")) return "approved";
-    if ([event.isApproved, event.approved].some(hasTrueFlag)) return "approved";
-
-    const members = Object.values(approval?.members || {});
-    const approvalStatus = normalizeStatus(approval?.status);
-    if (approvalStatus === "rejected") return "rejected";
-    if (approvalStatus === "revision") return "revision";
-    if (approvalStatus === "approved") return "approved";
-    if (members.length > 0 && members.every((member) => normalizeStatus(member.status) === "approved" || normalizeStatus(member.status) === "ok")) {
-      return "approved";
-    }
-    if (requiredStageStatuses.includes("rejected")) return "rejected";
-    if (requiredStageStatuses.includes("revision")) return "revision";
-    if (
-      requiredStageStatuses.length > 0 &&
-      requiredStageStatuses.every((status) => status === "approved")
-    ) {
-      return "approved";
-    }
-    if (
-      typeof isOrganizerEventHapApproved === "function" &&
-      [1, 2, 3].every((stage) => isOrganizerEventHapApproved(event, stage))
-    ) {
-      return "approved";
-    }
-
-    return firestoreStatuses.find((status) => status === "pending") || eventStatus || "pending";
+    return firestoreStatuses.find((status) => ["rejected", "revision"].includes(status)) ||
+      firestoreStatuses.find((status) => status === "pending") ||
+      (eventStatus === "approved" ? "pending" : eventStatus) ||
+      "pending";
   }
 
   function findOrganizerEvent(eventId) {
@@ -449,8 +391,24 @@ import {
     return firestoreApprovalsById.get(eventId) || approvalsMap.get(eventId);
   }
 
+  function getHistoryBasedApproval(event) {
+    const existing = getApprovalForEvent(event);
+    const history = Array.isArray(event.approvalHistory)
+      ? event.approvalHistory
+      : [];
+    const derived = buildFirestoreApproval({ ...event, approvalHistory: history });
+    return {
+      ...existing,
+      ...derived,
+      members: derived.members,
+      files: { ...derived.files, ...(existing?.files || {}) },
+      history,
+      status: derived.status,
+    };
+  }
+
   function isFullyApproved(event) {
-    return normalizeStatus(getEffectiveStatus(event)) === "approved";
+    return isEventFullyApproved(event);
   }
 
   function dateRangeBounds(value, today) {
@@ -545,8 +503,7 @@ import {
    * Build the Approval column bar and status line (Task 1)
    */
   function buildApprovalColumnMarkup(event) {
-    const eventId = String(event.eventId || event.id);
-    const approval = getApprovalForEvent(event);
+    const approval = getHistoryBasedApproval(event);
     const effStatus = normalizeStatus(getEffectiveStatus(event));
 
     if (effStatus === "cancelled") {
@@ -559,47 +516,9 @@ import {
         </div>`;
     }
 
-    if (!approval || !approval.members) {
-      const step = Number(event.approvalCurrentStep);
-      const complete = ["approved", "published", "completed"].includes(effStatus) ||
-        (Number.isInteger(step) && step >= 4);
-      const waitingStep = Number.isInteger(step) && step >= 1 && step < 4 ? step : 1;
-      const fallbackStages = [
-        "Organization Adviser",
-        "Laboratory Head, Property Custodian, Administrative Officer",
-        "Head of Academic Programs, QAC Coordinator",
-        "OSAS",
-      ];
-      const segmentsMarkup = fallbackStages.map((label, index) => {
-        const segmentClass = complete || index + 1 < waitingStep
-          ? "is-approved"
-          : index + 1 === waitingStep
-            ? effStatus === "revision"
-              ? "is-revision"
-              : effStatus === "rejected"
-                ? "is-rejected"
-                : "is-current"
-            : "is-waiting";
-        return `<span class="approval-segment ${segmentClass}" title="Step ${index + 1} of 4: ${escapeHtml(label)}" aria-hidden="true"></span>`;
-      }).join("");
-      const approvalText = complete
-        ? "All 4 steps approved"
-        : effStatus === "revision"
-          ? "Changes requested"
-          : effStatus === "rejected"
-            ? "Rejected"
-            : `Step ${waitingStep} of 4: ${escapeHtml(fallbackStages[waitingStep - 1])}`;
-      return `
-        <div class="approval-progress-wrap">
-          <div class="approval-bar" role="img" aria-label="${escapeHtml(approvalText)}">${segmentsMarkup}</div>
-          <span class="approval-text">${escapeHtml(approvalText)}</span>
-        </div>`;
-    }
-
     const membersList = Object.values(approval.members)
-      .sort((a, b) => (a.step || 0) - (b.step || 0))
-      .slice(0, 4);
-    const totalSteps = 4;
+      .sort((a, b) => (a.step || 0) - (b.step || 0));
+    const totalSteps = membersList.length;
 
     let currentReviewer = null;
     let revisionRequester = null;
@@ -641,7 +560,7 @@ import {
     } else if (revisionRequester || effStatus === "revision") {
       const who = revisionRequester ? revisionRequester.label : "Approver";
       statusLineText = `Changes requested by ${escapeHtml(who)}`;
-    } else if (allApproved || effStatus === "approved" || effStatus === "published" || effStatus === "completed") {
+    } else if (allApproved && isFullyApproved(event)) {
       statusLineText = `All ${totalSteps} steps approved`;
     } else if (currentReviewer) {
       statusLineText = `Step ${currentReviewer.step} of ${totalSteps}: ${escapeHtml(currentReviewer.label)}`;
@@ -668,23 +587,21 @@ import {
     if (status === "approved" && isFullyApproved(event)) {
       actions.push({ type: "publish", label: "Publish" });
     } else if (status === "published" || status === "completed") {
-      const scanParams = new URLSearchParams({
-        eventId: String(event.eventId || event.id),
-        eventName: String(event.title || event.eventName || event.name || "Untitled Event"),
-        eventDate: String(getEventDate(event) || ""),
-        eventTime: String(getScheduleDisplay(event) || ""),
-        eventVenue: String(event.venue || event.location || "Venue TBA"),
-      });
       actions.push({
         type: "scan",
         label: "Scan attendance",
-        href: `EventOrganizerScanAttendance.html?${scanParams.toString()}`,
+        href: getScanAttendanceHref(event),
       });
     } else if (status === "rejected") {
       actions.push({ type: "resubmit", label: "Resubmit" });
     }
 
     return actions;
+  }
+
+  function getScanAttendanceHref(event) {
+    const eventId = String(event.id || event.eventId || "");
+    return `EventOrganizerScanAttendance.html?${new URLSearchParams({ eventId }).toString()}`;
   }
 
   function getActionMarkup(event, actions) {
@@ -840,7 +757,7 @@ import {
 
     const activeEventId = String(event.eventId || event.id);
     activeTrackingEventId = activeEventId;
-    const approval = getApprovalForEvent(event) || buildFirestoreApproval(event);
+    const approval = getHistoryBasedApproval(event);
 
     if (trackerSubmittedDate) {
       const subDate = approval.submittedAt || event.createdAt;
@@ -1146,14 +1063,7 @@ import {
     if (btnTrackerDelete) btnTrackerDelete.hidden = !canDelete;
     if (btnTrackerScan) {
       btnTrackerScan.hidden = !isPublished;
-      const scanParams = new URLSearchParams({
-        eventId: String(event.eventId || event.id),
-        eventName: String(event.title || event.eventName || event.name || "Untitled Event"),
-        eventDate: String(getEventDate(event) || ""),
-        eventTime: String(getScheduleDisplay(event) || ""),
-        eventVenue: String(event.venue || event.location || "Venue TBA"),
-      });
-      btnTrackerScan.href = `EventOrganizerScanAttendance.html?${scanParams.toString()}`;
+      btnTrackerScan.href = getScanAttendanceHref(event);
     }
     if (btnTrackerCancel) btnTrackerCancel.hidden = isPublished || isCancelled;
   }
@@ -1169,13 +1079,12 @@ import {
       return;
     }
     const effStatus = normalizeStatus(getEffectiveStatus(event));
-    if (!isFullyApproved(event) && effStatus !== "published") {
-      window.alert("Publish unlocks after every approver signs off.");
-      return;
-    }
-
     if (effStatus === "published" || normalizeStatus(event?.status) === "published") {
       window.alert("This event has already been published.");
+      return;
+    }
+    if (!isFullyApproved(event)) {
+      window.alert("Publish unlocks after every approver signs off.");
       return;
     }
 
@@ -1267,7 +1176,7 @@ import {
       }
       renderEvents();
       if (activeTrackingEventId === activeEventId) {
-        renderTrackerContent(event, approval);
+        renderTrackerContent(event, getHistoryBasedApproval(event));
       }
       window.alert("Event published successfully!");
     } catch (err) {
@@ -1480,7 +1389,7 @@ import {
         activeUser = ownedEvent.activeUser;
         approval = buildFirestoreApproval(ownedEvent.latestEvent);
       } else {
-        approval = getApprovalForEvent(event) || buildFirestoreApproval(event);
+        approval = getHistoryBasedApproval(event);
       }
       const activeReviewers = Object.values(approval.members || {})
         .filter((member) => member.status === "review");
@@ -1546,7 +1455,7 @@ import {
         approval.files[fileId].note = "";
       }
 
-      renderTrackerContent(event, approval);
+      renderTrackerContent(event, getHistoryBasedApproval(event));
       trackerReplaceForm.hidden = true;
       trackerReplaceDriveLink.value = "";
       window.alert(`The Google Drive link for "${fileName}" has replaced the flagged document.`);
@@ -1717,7 +1626,7 @@ import {
         renderEvents();
         if (activeTrackingEventId === eventId) {
           const event = organizerEvents.find((e) => String(e.eventId || e.id) === String(eventId));
-          if (event) renderTrackerContent(event, getApprovalForEvent(event) || data);
+          if (event) renderTrackerContent(event, getHistoryBasedApproval(event));
         }
       }
     });
@@ -1958,7 +1867,7 @@ import {
         events.set(eventId, event);
         firestoreApprovalsById.set(eventId, buildFirestoreApproval(event));
         if (activeTrackingEventId === eventId) {
-          renderTrackerContent(event, getApprovalForEvent(event));
+          renderTrackerContent(event, getHistoryBasedApproval(event));
         }
       });
 

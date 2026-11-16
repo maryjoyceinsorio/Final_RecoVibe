@@ -207,7 +207,7 @@
             <div class="avatar" id="teacherAvatar"></div>
             <div class="user-meta">
             <div class="user-name" id="teacherName"></div>
-            <div class="user-role" id="teacherRole"></div>
+            <div class="user-role" id="teacherRole">Teacher</div>
             </div>
           </div>
           <a
@@ -249,61 +249,55 @@
             ><input
               id="teacherEventSearch"
               type="search"
-              placeholder="PUP Connect!"
+              placeholder="Search events"
               autocomplete="off"
           /></label>
-          <select id="teacherEventTypeFilter" aria-label="Filter by event type">
+          <select id="teacherScopeFilter" aria-label="Event scope">
             <option value="all">All Events</option>
-            <option value="campus">Campus Events</option>
-            <option value="organization">Organization Events</option>
+            <option value="upcoming">Upcoming</option>
+            <option value="past">Past</option>
           </select>
           <select id="teacherSourceFilter" aria-label="Filter by event source">
             <option value="all">All Sources</option>
-            <option value="PUP Official">PUP Official</option>
-            <option value="CSC">CSC</option>
-            <option value="Teacher / Faculty">Teacher / Faculty</option>
-            <option value="Organizational">Organizational</option>
-            <option value="Others / External">Others / External</option>
           </select>
           <select id="teacherCategoryFilter" aria-label="Filter by category">
             <option value="all">Category</option>
-            <option value="Academic &amp; Learning">Academic &amp; Learning</option>
-            <option value="Tech &amp; Innovation">Tech &amp; Innovation</option>
-            <option value="Leadership &amp; Career">Leadership &amp; Career</option>
-            <option value="Sports &amp; Fitness">Sports &amp; Fitness</option>
-            <option value="Music &amp; Entertainment">Music &amp; Entertainment</option>
-            <option value="Orgs &amp; Student Acts">Orgs &amp; Student Acts</option>
-            <option value="Social Events">Social Events</option>
-            <option value="Community &amp; Outreach">Community &amp; Outreach</option>
-            <option value="Competitions">Competitions</option>
-            <option value="Seminars &amp; Workshops">Seminars &amp; Workshops</option>
-            <option value="Arts &amp; Culture">Arts &amp; Culture</option>
-            <option value="University &amp; Campuses">University &amp; Campuses</option>
           </select>
           <select id="teacherDateFilter" aria-label="Filter by date">
             <option value="all">All Dates</option>
             <option value="today">Today</option>
-            <option value="week">This Week</option>
-            <option value="month">This Month</option>
-            <option value="upcoming">Upcoming</option>
-            <option value="past">Past Events</option>
+            <option value="week">This week</option>
+            <option value="month">This month</option>
+            <option value="custom">Custom range</option>
           </select>
+          <div class="teacher-custom-range" id="teacherCustomRange" hidden>
+            <label>From <input id="teacherDateFrom" type="date" /></label>
+            <label>To <input id="teacherDateTo" type="date" /></label>
+          </div>
           <select id="teacherStatusFilter" aria-label="Filter by event status">
             <option value="all">Event Status</option>
-            <option value="Available to Join">Available to Join</option>
-            <option value="Registration Closed">Registration Closed</option>
-            <option value="Cancelled">Cancelled</option>
-            <option value="Rescheduled">Rescheduled</option>
+            <option value="upcoming">Upcoming</option>
+            <option value="live">Live now</option>
+            <option value="completed">Completed</option>
+            <option value="cancelled">Cancelled</option>
+            <option value="rescheduled">Rescheduled</option>
           </select>
           <select
             id="teacherAvailabilityFilter"
             aria-label="Filter by availability"
           >
             <option value="all">Availability</option>
-            <option value="available">Available</option>
+            <option value="open">Open</option>
+            <option value="almost-full">Almost full (80%+)</option>
             <option value="full">Full</option>
           </select>
+          <small id="teacherAvailabilityNote" class="teacher-filter-note" hidden></small>
+          <button type="button" class="teacher-clear-filters" id="teacherClearFilters" hidden>
+            Clear filters
+          </button>
         </section>
+        <p class="teacher-event-notice" id="teacherEventNotice" hidden></p>
+        <div class="teacher-load-state" id="teacherLoadState" hidden></div>
 
         <section
           class="teacher-events-section"
@@ -372,16 +366,14 @@
             ><span id="teacherModalCapacity"></span>
           </div>
           <div id="teacherModalStatusField">
-            <strong id="teacherModalStatusLabel">Registration</strong
+            <strong id="teacherModalStatusLabel">Event status</strong
             ><span id="teacherModalStatus"></span>
           </div>
         </div>
       </article>
     </div>
 
-    <script src="../UserStudent/events-data.js"></script>
-    <script src="../EventDetailsModal.js"></script>
-    <script src="TeacherAllEvent.js"></script>
-    <script src="TeacherNotification.js"></script>
+    <script src="TeacherEventVisibility.js"></script>
+    <script type="module" src="TeacherAllEvent.js"></script>
   </body>
 </html>

@@ -7,6 +7,7 @@ import {
 import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { auth, authReady, db, functions, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
 import { syncOrganizerOrganization } from "../organizationScope.js";
+import "./OrganizerNotificationBadge.js";
 
 (() => {
   "use strict";
@@ -31,160 +32,16 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
     profile.displayName ||
     "Event Organizer";
 
-  const notificationStorageKey = "recovibeOrganizerNotifications";
   const notificationBadge = document.getElementById("navNotifBadge");
-  let notificationUser = null;
-  let realtimeNotifications = null;
-  let notificationLoadFailed = false;
-  let unsubscribeNotifications = null;
 
   function setNotificationBadgeCount(count) {
     if (!notificationBadge) return;
-    notificationBadge.textContent = count > 0 ? String(count) : "";
+    notificationBadge.textContent = count > 9 ? "9+" : count ? String(count) : "";
     notificationBadge.hidden = count <= 0;
   }
 
-  function cachedNotificationsForUser(user) {
-    const stored = readStorage(notificationStorageKey, []);
-    if (!Array.isArray(stored)) return [];
-
-    const cachedProfile = readStorage("recovibeOrganizerProfile", {});
-    const profileUid = String(cachedProfile.uid || cachedProfile.userId || "");
-    const verifiedProfile = profileUid === String(user.uid) ? cachedProfile : {};
-    const identifiers = new Set([
-      user.uid,
-      user.email,
-      verifiedProfile.uid,
-      verifiedProfile.userId,
-      verifiedProfile.id,
-      verifiedProfile.email,
-      verifiedProfile.organizerId,
-      verifiedProfile.organizerCode,
-      verifiedProfile.organizerNumber,
-      verifiedProfile.organizerNo,
-      verifiedProfile.organizationCode,
-      verifiedProfile.accountNumber,
-      verifiedProfile.accountNo,
-      ...(profileUid === String(user.uid)
-        ? [localStorage.getItem("recovibeOrganizerId")]
-        : []),
-    ].filter(Boolean).map((value) => String(value).trim().toLowerCase()));
-
-    return stored.filter((item) => {
-      if (!item || typeof item !== "object") return false;
-      const recipients = [
-        item.organizerId,
-        item.organizerUid,
-        item.recipientUid,
-        item.recipientId,
-        item.recipientUserId,
-        item.userId,
-        item.organizationCode,
-        item.organizerCode,
-        item.recipientOrganizationCode,
-        item.recipientEmail,
-      ].filter(Boolean).map((value) => String(value).trim().toLowerCase());
-      return recipients.some((identifier) => identifiers.has(identifier));
-    });
-  }
-
-  function refreshNotificationBadge() {
-    if (!notificationUser) {
-      setNotificationBadgeCount(0);
-      return;
-    }
-
-    if (notificationLoadFailed) {
-      setNotificationBadgeCount(0);
-      return;
-    }
-
-    if (realtimeNotifications) {
-      const stored = readStorage(notificationStorageKey, []);
-      const readById = new Map(
-        (Array.isArray(stored) ? stored : [])
-          .filter((item) => item && item.id)
-          .map((item) => [String(item.id), item.read === true || item.isRead === true]),
-      );
-      const unread = Object.entries(realtimeNotifications).filter(([id, item]) =>
-        item &&
-        typeof item === "object" &&
-        item.read !== true &&
-        item.isRead !== true &&
-        readById.get(String(id)) !== true,
-      ).length;
-      setNotificationBadgeCount(unread);
-      return;
-    }
-
-    const unread = cachedNotificationsForUser(notificationUser).filter(
-      (item) => item.read !== true && item.isRead !== true,
-    ).length;
-    setNotificationBadgeCount(unread);
-  }
-
-  function observeOrganizerNotifications(user) {
-    unsubscribeNotifications?.();
-    unsubscribeNotifications = null;
-    notificationUser = user;
-    realtimeNotifications = null;
-    notificationLoadFailed = false;
-    setNotificationBadgeCount(0);
-
-    if (!user) return;
-    refreshNotificationBadge();
-
-    (async () => {
-      try {
-        const [config, database] = await Promise.all([
-          import("../UserStudent/firebaseConfig.js"),
-          import("https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js"),
-        ]);
-        if (auth?.currentUser?.uid !== user.uid) return;
-        if (!config.rtdb) {
-          notificationLoadFailed = true;
-          setNotificationBadgeCount(0);
-          return;
-        }
-
-        unsubscribeNotifications = database.onValue(
-          database.ref(config.rtdb, `notifications/${user.uid}`),
-          (snapshot) => {
-            if (auth?.currentUser?.uid !== user.uid) return;
-            const value = snapshot.val();
-            realtimeNotifications =
-              value && typeof value === "object" && !Array.isArray(value)
-                ? value
-                : {};
-            refreshNotificationBadge();
-          },
-          () => {
-            if (auth?.currentUser?.uid !== user.uid) return;
-            notificationLoadFailed = true;
-            realtimeNotifications = null;
-            setNotificationBadgeCount(0);
-          },
-        );
-      } catch {
-        if (auth?.currentUser?.uid === user.uid) {
-          notificationLoadFailed = true;
-          realtimeNotifications = null;
-          setNotificationBadgeCount(0);
-        }
-      }
-    })();
-  }
-
-  if (notificationBadge) notificationBadge.hidden = true;
-  window.addEventListener("recovibeOrganizerNotificationsChanged", refreshNotificationBadge);
-  window.addEventListener("storage", (event) => {
-    if (
-      event.key === notificationStorageKey ||
-      event.key === "recovibeOrganizerProfile" ||
-      event.key === "recovibeOrganizerId"
-    ) {
-      refreshNotificationBadge();
-    }
+  window.OrganizerNotificationData?.subscribe(({ counts }) => {
+    setNotificationBadgeCount(counts?.unread || 0);
   });
 
   let currentUserUid = profile.uid || profile.id || organizerId;
@@ -201,17 +58,13 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
   // Track Firebase Auth user if available
   if (auth) {
     authReady.then(() => onAuthStateChanged(auth, (user) => {
-      observeOrganizerNotifications(user);
       if (user?.uid) {
         currentUserUid = user.uid;
         if (allEvents.length) renderReport();
       }
     })).catch((error) => {
-      setNotificationBadgeCount(0);
       console.error("Could not observe organizer authentication state:", error);
     });
-  } else {
-    setNotificationBadgeCount(0);
   }
 
   // Known venues seed list

@@ -2,26 +2,43 @@ import { onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/
 import {
   collection,
   onSnapshot,
+  or,
   query,
   where,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { onValue, off, ref } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
-import { auth, db, isFirebaseConfigured, rtdb } from "../UserStudent/firebaseConfig.js";
+import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
 
+const { toMillis, formatCreatedDate } = window.RecovibeOrganizerDashboardDates;
+const CREATION_DATE_FIELDS = [
+  "createdAt",
+  "submittedAt",
+  "dateCreated",
+  "createdAtMs",
+  "updatedAt",
+];
 const loginPath = "EventOrganizerLogin.html";
 const actionRows = document.getElementById("organizerActionRows");
 const actionTable = document.getElementById("actionRequiredTable");
 const upcomingEventsList = document.getElementById("upcomingEventsList");
 const happeningNowList = document.getElementById("happeningNowList");
 const logoutButton = document.getElementById("organizerLogout");
-let unsubscribeEvents = [];
+const dashboardStatus = document.getElementById("dashboardStatusMessage");
+const notificationsBadge = document.getElementById("navNotifBadge");
+let unsubscribeEvents = null;
+let unsubscribeNotifications = null;
 let unsubscribeAuth = null;
 let organizerEvents = [];
 let signingOut = false;
-const eventsById = new Map();
-const eventsBySource = new Map();
-const approvalListeners = new Map();
-const approvalsById = new Map();
+const dashboardMessages = new Map();
+if (notificationsBadge) notificationsBadge.hidden = true;
+
+function setDashboardMessage(source, message) {
+  if (!dashboardStatus) return;
+  if (message) dashboardMessages.set(source, message);
+  else dashboardMessages.delete(source);
+  dashboardStatus.textContent = [...dashboardMessages.values()].join(" ");
+  dashboardStatus.hidden = dashboardMessages.size === 0;
+}
 
 const escapeHtml = (value) =>
   String(value ?? "").replace(
@@ -38,33 +55,28 @@ const escapeHtml = (value) =>
 
 function normalizeEvent(documentSnapshot) {
   const data = documentSnapshot.data();
-  const normalizeTimestamp = (value) => {
-    if (!value) return "";
-    const date = value?.toDate
-      ? value.toDate()
-      : value?.seconds != null
-        ? new Date(Number(value.seconds) * 1000)
-        : value?._seconds != null
-          ? new Date(Number(value._seconds) * 1000)
-          : typeof value === "number"
-            ? new Date(value < 100000000000 ? value * 1000 : value)
-            : new Date(String(value));
-    return Number.isNaN(date.getTime()) ? "" : date.toISOString();
-  };
-  const createdAt = [
-    data.approvalSubmittedAt, data.submittedAt, data.submitted_at,
-    data.dateSubmitted, data.date_submitted, data.createdAt, data.created_at,
-  ].map(normalizeTimestamp).find(Boolean) || "";
+  const createdAt = CREATION_DATE_FIELDS
+    .map((field) => ({ field, millis: toMillis(data[field]) }))
+    .find((candidate) => candidate.millis !== null);
+  const hasUnresolvedCreatedAt = !createdAt &&
+    documentSnapshot.metadata?.hasPendingWrites === true &&
+    CREATION_DATE_FIELDS.some((field) =>
+      Object.prototype.hasOwnProperty.call(data, field) && data[field] == null,
+    );
   const dateISO = data.eventDate || data.dateISO || data.dateStart || data.date || "";
   const endDateISO = data.endDateISO || data.dateEnd || data.endDate || dateISO;
   const startTime = data.timeStart || data.startTime || "";
   const endTime = data.timeEnd || data.endTime || "";
+  const categories = Array.isArray(data.categories)
+    ? data.categories.filter(Boolean).join(", ")
+    : data.categories;
 
   return {
     ...data,
     id: documentSnapshot.id,
     eventId: documentSnapshot.id,
     title: data.eventName || data.title || "Untitled event",
+    category: categories || data.category || data.eventType || "General",
     dateISO,
     endDateISO,
     startTime,
@@ -74,30 +86,68 @@ function normalizeEvent(documentSnapshot) {
     venue: data.venue || data.location || "Location TBA",
     description: data.eventDescription || data.description || "",
     status: displayStatus(data.status),
-    createdAt,
+    createdAt: createdAt?.millis ?? null,
+    creationTimestampPending: hasUnresolvedCreatedAt,
   };
 }
 
 function formatDate(value, options = {}) {
-  if (!value) return "Date TBA";
-  const dateText = String(value);
-  const date = new Date(`${dateText.slice(0, 10)}T00:00:00`);
-  if (Number.isNaN(date.getTime())) return "Date TBA";
+  const date = toEventDate(value);
+  if (!date) return "Date TBA";
   return date.toLocaleDateString("en-US", options);
 }
 
-function formatCreatedDate(value) {
-  if (!value) return "TBA";
-  const dateText = String(value);
-  const date = /^\d{4}-\d{2}-\d{2}$/.test(dateText)
-    ? new Date(`${dateText}T00:00:00`)
+function toEventDate(value) {
+  if (!value) return null;
+  const dateValue = value && typeof value.toDate === "function"
+    ? value.toDate()
+    : value;
+  if (dateValue instanceof Date) {
+    return Number.isNaN(dateValue.getTime()) ? null : dateValue;
+  }
+  const dateText = String(dateValue).trim();
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateText);
+  const date = dateOnly
+    ? new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]))
     : new Date(dateText);
-  if (Number.isNaN(date.getTime())) return "TBA";
-  return date.toLocaleDateString("en-US", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function eventBoundaryMillis(event, isEnd = false) {
+  const rawDate = isEnd
+    ? event.endDateISO || event.dateEnd || event.endDate || event.dateISO || event.date
+    : event.dateISO || event.dateStart || event.date;
+  const date = toEventDate(rawDate);
+  if (!date) return null;
+
+  const timeValue = String(
+    isEnd
+      ? event.endTime || event.timeEnd || ""
+      : event.startTime || event.timeStart || "",
+  ).trim();
+  const timeMatch = /^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?$/i.exec(timeValue);
+  if (timeValue && !timeMatch) return null;
+
+  if (timeMatch) {
+    let hours = Number(timeMatch[1]);
+    const minutes = Number(timeMatch[2]);
+    const seconds = Number(timeMatch[3] || 0);
+    const meridiem = String(timeMatch[4] || "").toUpperCase();
+    if (meridiem) {
+      if (hours < 1 || hours > 12) return null;
+      if (hours === 12) hours = 0;
+      if (meridiem === "PM") hours += 12;
+    } else if (hours > 23) {
+      return null;
+    }
+    if (minutes > 59 || seconds > 59) return null;
+    date.setHours(hours, minutes, seconds, 0);
+  } else if (isEnd) {
+    date.setHours(23, 59, 59, 999);
+  } else {
+    date.setHours(0, 0, 0, 0);
+  }
+  return date.getTime();
 }
 
 function statusClass(status) {
@@ -125,7 +175,17 @@ function statusClass(status) {
 
 function setCount(id, count) {
   const element = document.getElementById(id);
-  if (element) element.textContent = String(count);
+  if (!element) return;
+  const nextCount = String(count);
+  if (element.textContent !== nextCount) {
+    const card = element.closest(".organizer-stat");
+    if (card && element.textContent.trim() !== "") {
+      card.classList.remove("stat-highlight");
+      void card.offsetWidth;
+      card.classList.add("stat-highlight");
+    }
+    element.textContent = nextCount;
+  }
 }
 
 function normalizeStatus(status) {
@@ -162,7 +222,7 @@ function getEffectiveStatus(event) {
   const isPublished = ["published", "cancelled"].find((value) => firestoreStatuses.includes(value));
   if (isPublished) return isPublished;
   if ([event.published, event.isPublished, event.isLive].some(hasTrueFlag)) return "published";
-  const approval = approvalsById.get(String(event.eventId || event.id)) || event.approval;
+  const approval = event.approval;
   if (normalizeStatus(approval?.status) === "published") return "published";
   const stageEntries = Array.isArray(event.approvalStages) ? event.approvalStages : Object.values(event.approvalStages || {});
   const requiredStageStatuses = stageEntries
@@ -184,40 +244,8 @@ function getEffectiveStatus(event) {
 }
 
 function hasEventEnded(event, now = Date.now()) {
-  const endDateValue = event.endDateISO || event.dateEnd || event.endDate || event.dateISO || event.date;
-  if (!endDateValue) return false;
-  const dateText = String(endDateValue).trim().slice(0, 10);
-  const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateText);
-  if (!dateMatch) return false;
-  const endDate = new Date(
-    Number(dateMatch[1]),
-    Number(dateMatch[2]) - 1,
-    Number(dateMatch[3]),
-  );
-  if (Number.isNaN(endDate.getTime())) return false;
-
-  const endTime = String(event.endTime || event.timeEnd || "").trim();
-  if (!endTime) {
-    endDate.setHours(23, 59, 59, 999);
-  } else {
-    const timeMatch = /^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?$/i.exec(endTime);
-    if (!timeMatch) return false;
-    let hours = Number(timeMatch[1]);
-    const minutes = Number(timeMatch[2]);
-    const seconds = Number(timeMatch[3] || 0);
-    const meridiem = String(timeMatch[4] || "").toUpperCase();
-    if (meridiem) {
-      if (hours < 1 || hours > 12) return false;
-      if (hours === 12) hours = 0;
-      if (meridiem === "PM") hours += 12;
-    } else if (hours > 23) {
-      return false;
-    }
-    if (minutes > 59 || seconds > 59) return false;
-    endDate.setHours(hours, minutes, seconds, 0);
-  }
-
-  return endDate.getTime() <= now;
+  const end = eventBoundaryMillis(event, true);
+  return end !== null && end <= now;
 }
 
 function getDashboardStatus(event) {
@@ -262,7 +290,13 @@ function renderActionRows() {
   const actionableStatuses = ["pending", "revision", "rejected", "approved", "draft"];
   const actionableEvents = organizerEvents.filter((event) =>
     actionableStatuses.includes(getDashboardStatus(event)),
-  );
+  ).sort((first, second) => {
+    const firstCreated = toMillis(first.createdAt);
+    const secondCreated = toMillis(second.createdAt);
+    if (firstCreated === null) return secondCreated === null ? 0 : 1;
+    if (secondCreated === null) return -1;
+    return secondCreated - firstCreated;
+  });
   if (!actionableEvents.length) {
     actionRows.innerHTML = `<tr><td colspan="3"><div class="dashboard-empty-state"><strong>Nothing needs your action right now.</strong></div></td></tr>`;
     return;
@@ -272,9 +306,13 @@ function renderActionRows() {
     .map(
       (event) => {
         const status = displayStatus(getDashboardStatus(event));
+        const createdAt = toMillis(event.createdAt);
+        const createdAtText = createdAt === null
+          ? event.creationTimestampPending ? "" : "—"
+          : formatCreatedDate(createdAt);
         return `<tr data-firestore-event-id="${escapeHtml(event.eventId)}" style="cursor: pointer;">
         <td><strong>${escapeHtml(event.title)}</strong><small>${escapeHtml(event.category || event.eventType || "General")}</small></td>
-        <td>${escapeHtml(formatCreatedDate(event.createdAt))}</td>
+        <td>${escapeHtml(createdAtText)}</td>
         <td><span class="organizer-status ${statusClass(status)}">${escapeHtml(status)}</span></td>
       </tr>`;
       },
@@ -284,22 +322,17 @@ function renderActionRows() {
 
 function renderHappeningNow() {
   if (!happeningNowList) return;
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  const todayISO = `${year}-${month}-${day}`;
+  const now = Date.now();
 
   const happeningNow = organizerEvents
     .filter((event) => {
-      if (!event.dateISO) return false;
-      const startISO = String(event.dateISO).slice(0, 10);
-      const endISO = String(event.endDateISO || event.endDate || event.dateEnd || startISO).slice(0, 10);
-      const status = (event.status || "").toLowerCase();
-      if (status.includes("reject") || status.includes("cancel")) return false;
-      return startISO <= todayISO && endISO >= todayISO;
+      const start = eventBoundaryMillis(event);
+      const end = eventBoundaryMillis(event, true);
+      const status = getDashboardStatus(event);
+      return start !== null && end !== null && now >= start && now <= end &&
+        status !== "rejected" && status !== "cancelled";
     })
-    .sort((first, second) => first.dateISO.localeCompare(second.dateISO));
+    .sort((first, second) => eventBoundaryMillis(first) - eventBoundaryMillis(second));
 
   if (!happeningNow.length) {
     happeningNowList.innerHTML = `<div class="dashboard-empty-state compact"><strong>No events happening today</strong><span>Events scheduled for today will appear here.</span></div>`;
@@ -321,21 +354,16 @@ function renderHappeningNow() {
 
 function renderUpcomingEvents() {
   if (!upcomingEventsList) return;
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  const todayISO = `${year}-${month}-${day}`;
+  const now = Date.now();
 
   const upcoming = organizerEvents
     .filter((event) => {
-      if (!event.dateISO) return false;
-      const startISO = String(event.dateISO).slice(0, 10);
-      const status = (event.status || "").toLowerCase();
-      if (status.includes("reject") || status.includes("cancel")) return false;
-      return startISO > todayISO;
+      const start = eventBoundaryMillis(event);
+      const status = getDashboardStatus(event);
+      return start !== null && start > now &&
+        status !== "rejected" && status !== "cancelled";
     })
-    .sort((first, second) => first.dateISO.localeCompare(second.dateISO))
+    .sort((first, second) => eventBoundaryMillis(first) - eventBoundaryMillis(second))
     .slice(0, 4);
 
   if (!upcoming.length) {
@@ -356,44 +384,16 @@ function renderUpcomingEvents() {
     .join("");
 }
 
-function renderEvents() {
+function renderDashboard() {
   organizerEvents.sort((first, second) => {
-    const firstCreated = new Date(first.createdAt || 0).getTime();
-    const secondCreated = new Date(second.createdAt || 0).getTime();
+    const firstCreated = toMillis(first.createdAt) ?? 0;
+    const secondCreated = toMillis(second.createdAt) ?? 0;
     return secondCreated - firstCreated;
   });
   renderStatistics();
   renderActionRows();
   renderHappeningNow();
   renderUpcomingEvents();
-}
-
-function syncApprovalListeners() {
-  if (!rtdb) return;
-  const eventIds = new Set(organizerEvents.map((event) => String(event.eventId || event.id)));
-  approvalListeners.forEach((approvalRef, eventId) => {
-    if (eventIds.has(eventId)) return;
-    off(approvalRef);
-    approvalListeners.delete(eventId);
-    approvalsById.delete(eventId);
-  });
-  organizerEvents.forEach((event) => {
-    const eventId = String(event.eventId || event.id);
-    if (!eventId || approvalListeners.has(eventId)) return;
-    const approvalRef = ref(rtdb, `approvals/${eventId}`);
-    onValue(approvalRef, (snapshot) => {
-      if (snapshot.exists()) approvalsById.set(eventId, snapshot.val());
-      else approvalsById.delete(eventId);
-      renderEvents();
-    });
-    approvalListeners.set(eventId, approvalRef);
-  });
-}
-
-function showLoadError(message) {
-  if (actionRows) actionRows.innerHTML = `<tr><td colspan="3">${escapeHtml(message)}</td></tr>`;
-  if (upcomingEventsList) upcomingEventsList.textContent = message;
-  if (happeningNowList) happeningNowList.textContent = message;
 }
 
 const actionHead = actionTable?.querySelector("thead");
@@ -406,8 +406,8 @@ if (actionHead) {
   });
   actionHead.replaceChildren(headerRow);
 }
-renderEvents();
-const dashboardRefreshTimer = window.setInterval(renderEvents, 60000);
+renderDashboard();
+const dashboardRefreshTimer = window.setInterval(renderDashboard, 60000);
 
 actionRows?.addEventListener("click", (event) => {
   const item = event.target.closest("[data-firestore-event-id]");
@@ -437,8 +437,81 @@ actionRows?.addEventListener("click", (event) => {
   });
 });
 
+function stopDashboardListeners() {
+  unsubscribeEvents?.();
+  unsubscribeEvents = null;
+  unsubscribeNotifications?.();
+  unsubscribeNotifications = null;
+}
+
+function startDashboardListeners(user) {
+  try {
+    const eventsQuery = query(
+      collection(db, "events"),
+      or(
+        where("organizerUid", "==", user.uid),
+        where("organizerId", "==", user.uid),
+        where("createdBy", "==", user.uid),
+      ),
+    );
+    unsubscribeEvents = onSnapshot(
+      eventsQuery,
+      (snapshot) => {
+        organizerEvents = snapshot.docs.map(normalizeEvent);
+        setDashboardMessage("events", "");
+        renderDashboard();
+      },
+      (error) => {
+        console.error("Unable to load organizer dashboard events:", error.code, error.message);
+        setDashboardMessage(
+          "events",
+          error.code === "permission-denied"
+            ? "You don't have permission to view your organizer events."
+            : "Could not load your events. Check your connection and try again.",
+        );
+      },
+    );
+  } catch (error) {
+    console.error("Unable to start organizer event listener:", error.code, error.message);
+    setDashboardMessage("events", "Could not start loading your events. Please try again.");
+  }
+
+  try {
+    const notificationsQuery = query(
+      collection(db, "notifications"),
+      where("recipientUid", "==", user.uid),
+    );
+    unsubscribeNotifications = onSnapshot(
+      notificationsQuery,
+      (snapshot) => {
+        const unreadCount = snapshot.docs.filter((notification) => {
+          const data = notification.data();
+          return data.read !== true && data.isRead !== true;
+        }).length;
+        if (notificationsBadge) {
+          notificationsBadge.textContent = unreadCount > 9 ? "9+" : unreadCount ? String(unreadCount) : "";
+          notificationsBadge.hidden = unreadCount === 0;
+        }
+        setDashboardMessage("notifications", "");
+      },
+      (error) => {
+        console.error("Unable to load organizer notifications:", error.code, error.message);
+        setDashboardMessage(
+          "notifications",
+          error.code === "permission-denied"
+            ? "You don't have permission to view your notification count."
+            : "Could not update your notification count.",
+        );
+      },
+    );
+  } catch (error) {
+    console.error("Unable to start organizer notification listener:", error.code, error.message);
+    setDashboardMessage("notifications", "Could not update your notification count.");
+  }
+}
+
 if (!isFirebaseConfigured || !auth || !db) {
-  showLoadError("Event data is unavailable. Please contact support.");
+  setDashboardMessage("events", "Event data is unavailable. Please contact support.");
 } else {
   auth
     .authStateReady()
@@ -446,103 +519,25 @@ if (!isFirebaseConfigured || !auth || !db) {
       unsubscribeAuth = onAuthStateChanged(
         auth,
         (user) => {
-          unsubscribeEvents.forEach((unsubscribe) => unsubscribe());
-          unsubscribeEvents = [];
-          approvalListeners.forEach((approvalRef) => off(approvalRef));
-          approvalListeners.clear();
-          approvalsById.clear();
-          eventsById.clear();
-          eventsBySource.clear();
+          stopDashboardListeners();
           organizerEvents = [];
-
           if (!user) {
             window.location.replace(loginPath);
             return;
           }
-
-          console.log("Organizer UID:", user.uid);
-          renderEvents();
-
-          const q = query(
-            collection(db, "events"),
-            where("createdBy", "==", user.uid),
-          );
-          console.info("[OrganizerDashboard] Firestore query:", {
-            collection: "events",
-            field: "createdBy",
-            value: user.uid,
-          });
-          const legacyOrganizerQuery = query(
-            collection(db, "events"),
-            where("organizerId", "==", user.uid),
-          );
-          console.info("[OrganizerDashboard] Legacy query:", {
-            collection: "events",
-            field: "organizerId",
-            value: user.uid,
-          });
-
-          function subscribeToEvents(eventsQuery, sourceField) {
-            return onSnapshot(
-              eventsQuery,
-              (snapshot) => {
-                console.log("Fetched Events Count:", snapshot.docs.length);
-                console.info(
-                  "[OrganizerDashboard] Retrieved document IDs:",
-                  snapshot.docs.map((eventDocument) => eventDocument.id),
-                );
-                console.info(`[OrganizerDashboard] Snapshot source: ${sourceField}`);
-                const sourceEvents = new Map(
-                  snapshot.docs.map((eventDocument) => [
-                    eventDocument.id,
-                    normalizeEvent(eventDocument),
-                  ]),
-                );
-                eventsBySource.set(sourceField, sourceEvents);
-                eventsById.clear();
-                ["organizerId", "createdBy"].forEach((source) => {
-                  eventsBySource.get(source)?.forEach((event, eventId) => {
-                    eventsById.set(eventId, event);
-                  });
-                });
-                organizerEvents = [...eventsById.values()];
-                syncApprovalListeners();
-                console.log(
-                  ">> LOGGED IN AS UID:",
-                  user.uid,
-                  "MATCHING EVENTS FOUND:",
-                  organizerEvents.length,
-                );
-                renderEvents();
-              },
-              (error) => {
-                console.error(`Unable to load organizer events by ${sourceField}:`, error);
-                if (!eventsById.size) {
-                  showLoadError("Could not load events. Please try again later.");
-                }
-              },
-            );
-          }
-
-          try {
-            unsubscribeEvents = [
-              subscribeToEvents(q, "createdBy"),
-              subscribeToEvents(legacyOrganizerQuery, "organizerId"),
-            ];
-          } catch (error) {
-            console.error("Unable to start organizer event listeners:", error);
-            showLoadError("Could not load events. Please try again later.");
-          }
+          setDashboardMessage("events", "Loading your dashboard...");
+          startDashboardListeners(user);
+          renderDashboard();
         },
         (error) => {
-          console.error("Unable to observe organizer authentication state:", error);
-          showLoadError("Could not verify your session. Check your connection and try again.");
+          console.error("Unable to observe organizer authentication state:", error.code, error.message);
+          setDashboardMessage("events", "Could not verify your session. Check your connection and try again.");
         },
       );
     })
     .catch((error) => {
-      console.error("Unable to initialize organizer authentication state:", error);
-      showLoadError("Could not verify your session. Check your connection and try again.");
+      console.error("Unable to initialize organizer authentication state:", error.code, error.message);
+      setDashboardMessage("events", "Could not verify your session. Check your connection and try again.");
     });
 }
 
@@ -551,6 +546,7 @@ logoutButton?.addEventListener("click", async (event) => {
   if (signingOut) return;
   signingOut = true;
   logoutButton.disabled = true;
+  stopDashboardListeners();
   try {
     if (auth) {
       await auth.authStateReady();
@@ -561,14 +557,15 @@ logoutButton?.addEventListener("click", async (event) => {
     window.location.assign(loginPath);
   } catch (error) {
     console.error("Unable to sign out organizer:", error);
-    showLoadError("Could not sign out. Your session is still active; please try again.");
+    setDashboardMessage("events", "Could not sign out. Your session is still active; please try again.");
     signingOut = false;
     logoutButton.disabled = false;
+    if (auth?.currentUser) startDashboardListeners(auth.currentUser);
   }
 });
 
 window.addEventListener("beforeunload", () => {
   window.clearInterval(dashboardRefreshTimer);
   unsubscribeAuth?.();
-  unsubscribeEvents.forEach((unsubscribe) => unsubscribe());
+  stopDashboardListeners();
 });

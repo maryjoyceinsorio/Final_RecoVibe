@@ -6,14 +6,138 @@ import {
   collection,
   doc,
   getDoc,
+  getDocs,
   onSnapshot,
   query,
   runTransaction,
   where,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import {
+  buildApprovalUpdate,
+  EVENT_APPROVAL_STAGES,
+  getEventStage,
+  getStages,
+  getCurrentStageKey,
+} from "../eventWorkflow.js";
 
 (() => {
   "use strict";
+  const DEBUG = false;
+  const ORGANIZATION_FIELDS = [
+    "organizationCode",
+    "organizationCodes",
+    "organizationId",
+    "orgCode",
+    "orgId",
+    "organization",
+    "organizationName",
+    "orgName",
+    "organizations",
+    "orgIds",
+    "assignedOrgs",
+    "adviserOf",
+    "courseOrganization",
+    "courseOrganizations",
+  ];
+  const ORGANIZATION_QUERY_FIELDS = [
+    "organizationCode",
+    "organizationCodes",
+    "organizationId",
+    "orgCode",
+    "orgId",
+    "organization",
+    "organizationName",
+    "orgName",
+    "organizations",
+    "orgIds",
+    "assignedOrgs",
+    "adviserOf",
+    "courseOrganization",
+    "courseOrganizations",
+  ];
+  const EVENT_ORGANIZATION_FIELDS = [
+    "orgId",
+    "organizationId",
+    "organizationCode",
+    "organizerOrg",
+    "organizerOrganization",
+    "organization",
+    "organizationName",
+    "orgName",
+    "orgIds",
+    "organizationCodes",
+    "targetOrganizations",
+    "partnerOrganizations",
+  ];
+  const normalizeOrganizationId = (value) =>
+    String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+  const debugLog = (...args) => {
+    if (DEBUG) console.debug("[AdminApproval]", ...args);
+  };
+  const getRawOrganizationValues = (source, fields = ORGANIZATION_FIELDS) => {
+    const values = [];
+    fields.forEach((field) => {
+      const entries = Array.isArray(source?.[field]) ? source[field] : [source?.[field]];
+      entries.forEach((entry) => {
+        if (typeof entry === "string" || typeof entry === "number") {
+          values.push(String(entry));
+          return;
+        }
+        if (!entry || typeof entry !== "object") return;
+        [
+          entry.organizationCode,
+          entry.organizationId,
+          entry.organizationName,
+          entry.orgCode,
+          entry.orgId,
+          entry.orgName,
+          entry.organizerOrg,
+          entry.organizerOrganization,
+          entry.departmentCode,
+          entry.departmentId,
+          entry.code,
+          entry.id,
+          entry.name,
+          entry.label,
+        ].filter((value) => value != null && value !== "").forEach((value) => {
+          values.push(String(value));
+        });
+      });
+    });
+    return [...new Set(values.map((value) => String(value).trim()).filter(Boolean))];
+  };
+  const getOrganizationValues = (source, fields = ORGANIZATION_FIELDS) =>
+    [...new Set(getRawOrganizationValues(source, fields).map(normalizeOrganizationId).filter(Boolean))];
+  const normalizeHistoryDecision = (value) => {
+    const decision = String(value || "").trim().toLowerCase().replace(/[^a-z]/g, "");
+    if (decision === "approve") return "approved";
+    if (decision === "reject") return "rejected";
+    if (["requestchanges", "askedforchanges"].includes(decision)) return "revision";
+    return decision;
+  };
+  const getHistoryStageKey = (entry) => {
+    const stage = [
+      entry?.stage,
+      entry?.stageKey,
+      entry?.key,
+      entry?.stageId,
+      entry?.approvalStage,
+      entry?.label,
+    ].find((value) => String(value || "").trim());
+    return resolveApprovalStage(stage)?.key || null;
+  };
+  const normalizeProposalHistory = (event) =>
+    (Array.isArray(event?.approvalHistory) ? event.approvalHistory : [])
+      .filter((entry) => entry && typeof entry === "object")
+      .map((entry) => ({
+        ...entry,
+        stage: getHistoryStageKey(entry) || entry.stage || entry.stageKey || entry.key || entry.stageId,
+        decision: normalizeHistoryDecision(entry.decision || entry.action),
+      }));
+
+  import("./AdminNotificationData.js")
+    .then(({ startAdminNotificationBadge }) => startAdminNotificationBadge())
+    .catch(() => document.querySelectorAll("[data-notification-count]").forEach((badge) => { badge.hidden = true; }));
 
   const APPROVER_DIRECTORY_DEFAULTS = {
     org_adv: { key: "org_adv", label: "Organization Adviser", stage: 1, defaultOn: true, required: true },
@@ -31,10 +155,9 @@ import {
     { id: "org_adv", key: "org_adv", step: 1, name: "Organization Adviser", reviewer: "Organization Adviser", required: true },
     { id: "sir_abelida", key: "sir_abelida", step: 2, name: "Laboratory Head, Property Custodian, Administrative Officer", reviewer: "Laboratory Head, Property Custodian, Administrative Officer", required: true },
     { id: "hap", key: "hap", step: 3, name: "Head of Academic Programs, QAC Coordinator (HAP)", reviewer: "Head of Academic Programs, QAC Coordinator (HAP)", required: true },
-    { id: "osas", key: "osas", step: 4, name: "OSAS", reviewer: "OSAS", required: true },
+    { id: "osas", key: "osas", reviewer: "osas", step: 4, name: "osas", reviewer: "osas", required: true },
   ];
   const normalizeApprovalKey = (value) => String(value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
-  const normalizeOrganizationCode = (value) => String(value || "").trim().replace(/\s+/g, " ").toUpperCase();
   const isOrganizationAdviserStage = (value) => {
     const values = value && typeof value === "object"
       ? [value.roleKey, value.key, value.id, value.name, value.label, value.reviewer]
@@ -42,15 +165,6 @@ import {
     const adviserKeys = new Set(["orgadv", "orgadviser", "orgadvisor", "organizationadviser", "organizationadvisor", "organizationadviserreview"]);
     return values.some((item) => adviserKeys.has(normalizeApprovalKey(item)));
   };
-  const getProfileOrganizationCode = (profile) => normalizeOrganizationCode(
-    profile?.organizationCode ||
-    profile?.orgCode ||
-    profile?.organization ||
-    profile?.organizationName ||
-    profile?.orgName ||
-    "",
-  );
-  const getCurrentAdminOrganizationCode = () => getProfileOrganizationCode(currentAdminProfile);
   const isOrgAdviserReviewer = (stage) => isOrganizationAdviserStage(stage);
   const getApprovalStageFromAccountNumber = (profile) => {
     const accountNumbers = [
@@ -101,13 +215,6 @@ import {
     );
     return matches.length === 1 ? matches[0] : null;
   };
-  const getEventOrganizationCode = (event) => normalizeOrganizationCode(
-    event?.organizationCode ||
-    event?.organizerOrganization ||
-    event?.organization ||
-    event?.organizationName ||
-    "",
-  );
   const resolveApprovalStage = (value) => {
     const normalized = normalizeApprovalKey(value);
     return APPROVAL_ACCOUNT_STAGES.find((stage) =>
@@ -129,12 +236,15 @@ import {
   // Application State
   let currentAdminUid = null;
   let currentAdminProfile = null;
+  let currentAdminOrganizationIds = new Set();
+  let currentAdminOrganizationQueryValues = [];
   let verifiedAdminProfileUid = null;
   let currentAdminKey = null; // e.g. "org_adv"
   let approverDirectory = { ...APPROVER_DIRECTORY_DEFAULTS };
 
   let queueItems = [];
   let firestorePendingEvents = [];
+  let firestoreScopedEventIds = new Set();
   let firestorePendingEventsError = "";
   let firestorePendingEventsLoaded = false;
   let recentDecisions = [];
@@ -142,6 +252,8 @@ import {
   let activeEvent = null;
   let activeApproval = null;
   let activeFirestoreReview = false;
+  let activeReviewReadOnly = false;
+  const reportedStepNormalization = new Set();
   let firestoreProposalLoadError = "";
 
   let queueListenerRef = null;
@@ -155,6 +267,8 @@ import {
   let firestoreProposalLoadTimeout = null;
   let adminStartupTimeout = null;
   let adminStartupExpired = false;
+  let unsubscribeAuthState = null;
+  let authStateHandler = null;
 
   // Logout Handler
   const logoutBtn = document.querySelector(".admin-logout");
@@ -234,9 +348,10 @@ import {
 
   async function loadAdminProfileSafely(user, cachedProfile) {
     if (!user || !db) throw new Error("Please sign in with an Admin account.");
-    const [adminProfileResult, userProfileResult] = await Promise.allSettled([
+    const [adminProfileResult, userProfileResult, approverOrganizationsResult] = await Promise.allSettled([
       getDoc(doc(db, "adminUser", user.uid)),
       getDoc(doc(db, "users", user.uid)),
+      getDoc(doc(db, "approverOrganizations", user.uid)),
     ]);
     const adminProfile = adminProfileResult.status === "fulfilled" && adminProfileResult.value.exists()
       ? adminProfileResult.value.data()
@@ -244,6 +359,28 @@ import {
     const userProfile = userProfileResult.status === "fulfilled" && userProfileResult.value.exists()
       ? userProfileResult.value.data()
       : null;
+    const approverOrganizations = approverOrganizationsResult.status === "fulfilled" &&
+      approverOrganizationsResult.value.exists()
+      ? approverOrganizationsResult.value.data()
+      : null;
+    currentAdminOrganizationIds = new Set([
+      ...getOrganizationValues(approverOrganizations),
+      ...getOrganizationValues(userProfile),
+      ...getOrganizationValues(adminProfile),
+      ...getOrganizationValues(cachedProfile),
+    ]);
+    currentAdminOrganizationQueryValues = [
+      ...getRawOrganizationValues(approverOrganizations, ORGANIZATION_QUERY_FIELDS),
+      ...getRawOrganizationValues(adminProfile, ORGANIZATION_QUERY_FIELDS),
+      ...getRawOrganizationValues(userProfile, ORGANIZATION_QUERY_FIELDS),
+      ...getRawOrganizationValues(cachedProfile, ORGANIZATION_QUERY_FIELDS),
+    ].filter((value, index, values) => value && values.indexOf(value) === index);
+    if (approverOrganizationsResult.status === "rejected") {
+      debugLog("Could not read approverOrganizations for user.", {
+        uid: user.uid,
+        error: approverOrganizationsResult.reason,
+      });
+    }
     const profile = adminProfile || userProfile
       ? { ...(userProfile || {}), ...(adminProfile || {}) }
       : null;
@@ -261,6 +398,13 @@ import {
       uid: user.uid,
       email: user.email || cachedProfile.email || "",
     };
+  }
+
+  function isCurrentAdminOrganization(event) {
+    if (!isOrgAdviserReviewer(getAccountStage())) return true;
+    if (currentAdminOrganizationIds.size === 0) return false;
+    return getOrganizationValues(event, EVENT_ORGANIZATION_FIELDS)
+      .some((organizationId) => currentAdminOrganizationIds.has(organizationId));
   }
 
   function getFirestoreStageEntries(event) {
@@ -304,50 +448,144 @@ import {
 
   function getFirestoreCurrentStageKey(event) {
     if (!event || typeof event !== "object") return null;
-    if (["approved", "revision", "rejected", "cancelled"].includes(String(event.approvalStatus || event.status || "").trim().toLowerCase().replace(/[\s_-]+/g, " "))) return null;
-
-    const orderedStages = getConfiguredFirestoreStages(event);
-    const explicitStep = Number(event.approvalCurrentStep);
-    if (Number.isInteger(explicitStep) && explicitStep >= 1) {
-      const currentStage = orderedStages.find(({ step }) => step === explicitStep);
-      if (currentStage) return currentStage.key;
-    }
-
-    const currentStage = orderedStages.find(({ source }) => {
-      const status = String(source.status || "").trim().toLowerCase().replace(/[\s_-]+/g, " ");
-      return !["ok", "approved", "complete", "completed"].includes(status);
-    });
-    return currentStage?.key || null;
+    return getCurrentStageKey(event);
   }
 
-  function getFirestoreApprovalStages(event, currentStep) {
-    const stages = {};
-    getConfiguredFirestoreStages(event).forEach((stage) => {
-      const rawStatus = String(stage.source?.status || "").trim().toLowerCase().replace(/[\s_-]+/g, " ");
-      const status = ["ok", "approved", "complete", "completed"].includes(rawStatus)
-        ? "ok"
-        : ["review", "reviewing", "in review", "in progress"].includes(rawStatus) ||
-            (stage.step === currentStep && ["", "pending", "waiting", "wait"].includes(rawStatus))
-          ? "review"
-          : ["rev", "revision", "changes requested"].includes(rawStatus)
-            ? "rev"
-            : ["rej", "rejected"].includes(rawStatus)
-              ? "rej"
-              : ["wait", "waiting", "pending", ""].includes(rawStatus)
-                ? "wait"
-                : "wait";
-      stages[stage.key] = {
-        ...stage.source,
-        key: stage.key,
-        label: stage.label,
-        step: stage.step,
-        status,
-        note: stage.source?.note || "",
-        updatedAt: stage.source?.updatedAt || stage.source?.approvedAt || null,
-        approvedByName: stage.source?.approvedByName || stage.source?.decidedBy || stage.source?.rejectedByName || "",
-      };
+  function getNormalizedProposalWorkflow(event, fallbackStageIndex = null) {
+    const approvalHistory = normalizeProposalHistory(event);
+    const workflow = getEventStage({ ...event, approvalHistory });
+    const activeStages = getStages(event);
+    const hasStageHistory = approvalHistory.some((entry) => getHistoryStageKey(entry));
+    const explicitStageKey = activeStages.includes(event.approvalCurrentStage)
+      ? event.approvalCurrentStage
+      : null;
+    const fallbackStageKey = !explicitStageKey &&
+      Number.isInteger(fallbackStageIndex) &&
+      !hasStageHistory
+      ? activeStages[fallbackStageIndex] || null
+      : null;
+    const currentStageKey = explicitStageKey || fallbackStageKey || getCurrentStageKey({
+      ...event,
+      approvalHistory,
+    }) || workflow.currentStageKey;
+    const normalizedStageIndex = activeStages.indexOf(currentStageKey);
+    const currentStageIndex = normalizedStageIndex >= 0
+      ? normalizedStageIndex
+      : workflow.currentStageIndex;
+    const expectedStageIndex = currentStageIndex;
+    const rawStep = event.approvalCurrentStep ??
+      event.currentApprovalStep ??
+      event.currentStep ??
+      event.approval?.approvalCurrentStep ??
+      event.approval?.currentStep;
+    const storedStep = rawStep === null || rawStep === undefined || rawStep === ""
+      ? null
+      : Number(rawStep);
+    const zeroBasedMatches = Number.isInteger(storedStep) &&
+      storedStep === expectedStageIndex;
+    const oneBasedMatches = Number.isInteger(storedStep) &&
+      storedStep - 1 === expectedStageIndex;
+    const detectedBase = zeroBasedMatches ? 0 : oneBasedMatches ? 1 : null;
+    const eventId = String(event.id || event.eventId || "");
+    if (
+      DEBUG &&
+      eventId &&
+      storedStep !== null &&
+      !reportedStepNormalization.has(eventId)
+    ) {
+      if (detectedBase === 1) {
+        debugLog("Normalized a 1-based approvalCurrentStep while reading proposal.", {
+          eventId,
+          approvalCurrentStep: storedStep,
+          normalizedStep: expectedStageIndex,
+        });
+        reportedStepNormalization.add(eventId);
+      } else if (detectedBase === null) {
+        debugLog("approvalCurrentStep disagrees with approvalHistory; using history-derived stage.", {
+          eventId,
+          approvalCurrentStep: storedStep,
+          historyStageIndex: expectedStageIndex,
+        });
+        reportedStepNormalization.add(eventId);
+      }
+    }
+
+    return {
+      ...workflow,
+      approvalHistory,
+      currentStageIndex,
+      currentStageKey,
+      detectedStepBase: detectedBase,
+    };
+  }
+
+  function classifyProposalForCurrentAdmin(event, fallbackStageIndex = null, isAssignedQueueItem = false) {
+    const ownStage = getAccountStage();
+    if (!ownStage || !event || typeof event !== "object") return null;
+    const proposalStages = getStages(event);
+    const ownStageIndex = proposalStages.indexOf(ownStage.key);
+    if (ownStageIndex < 0) return null;
+
+    const statusValues = [event.status, event.approvalStatus]
+      .map((value) => String(value || "").trim().toLowerCase().replace(/[\s_-]+/g, " "));
+    if (statusValues.some((status) => ["draft", "withdrawn", "deleted", "paused"].includes(status))) {
+      return null;
+    }
+
+    const workflow = getNormalizedProposalWorkflow(event, fallbackStageIndex);
+    const ownHistory = workflow.approvalHistory.filter((entry) => {
+      const actorUid = String(
+        entry.decidedBy || entry.approvedBy || entry.uid || entry.userId || entry.actorUid || "",
+      );
+      return getHistoryStageKey(entry) === ownStage.key || actorUid === currentAdminUid;
     });
-    return stages;
+    const actionHistory = ownHistory.filter((entry) =>
+      ["approved", "rejected", "revision"].includes(normalizeHistoryDecision(entry.decision)),
+    );
+    const hasActed = actionHistory.length > 0;
+    const wasRejected = statusValues.includes("rejected") ||
+      workflow.approvalHistory.some((entry) =>
+        normalizeHistoryDecision(entry.decision) === "rejected",
+      );
+    const wasRevised = actionHistory.some((entry) =>
+      normalizeHistoryDecision(entry.decision) === "revision",
+    );
+    const currentStageIndex = proposalStages.indexOf(workflow.currentStageKey);
+    const hasMovedPastStage = currentStageIndex > ownStageIndex ||
+      workflow.isFullyApproved;
+    const currentStage = workflow.stages[workflow.currentStageIndex] || null;
+
+    if (wasRejected && (hasActed || hasMovedPastStage)) {
+      return { section: "reviewed", badge: "Rejected", workflow };
+    }
+    if (workflow.isFullyApproved) {
+      return { section: "reviewed", badge: "Approved", workflow };
+    }
+    if (wasRevised) {
+      return { section: "reviewed", badge: "Needs revision", workflow };
+    }
+    if (hasActed || hasMovedPastStage) {
+      return {
+        section: "reviewed",
+        badge: `Forwarded to ${currentStage?.label || "the next reviewer"}`,
+        workflow,
+      };
+    }
+    if (
+      workflow.currentStageKey === ownStage.key &&
+      (isAssignedQueueItem || isFirestoreActionRequired(event))
+    ) {
+      return { section: "action-required", badge: "Action required", workflow };
+    }
+    if (workflow.currentStageIndex < ownStageIndex) {
+      return { section: "incoming", badge: "Incoming", workflow };
+    }
+    return null;
+  }
+
+  function hasSkippedAdviserStage(proposal) {
+    return Array.isArray(proposal?.approvalSteps) &&
+      !getStages(proposal).includes("org_adv");
   }
 
   function getCurrentFirestoreStage(event) {
@@ -427,35 +665,22 @@ import {
       if (!snapshot.exists()) throw new Error("This proposal no longer exists.");
 
       const event = snapshot.data() || {};
-      const entries = getFirestoreStageEntries(event);
-      const configuredEntries = entries.length
-        ? entries
-        : DEFAULT_FIRESTORE_APPROVAL_STAGES.map((defaultStage, index) => [
-            defaultStage.id,
-            {
-              ...defaultStage,
-              step: index + 1,
-              status: index === 0 ? "Reviewing" : "Waiting",
-            },
-          ]);
-      const stageSource = findFirestoreStageSource(configuredEntries, stage);
-      if (!isCurrentUserAssignedToStage(event, stage)) {
-        throw new Error("This proposal is assigned to a different reviewer account.");
+      const eventStatuses = [event.status, event.approvalStatus]
+        .map((value) => String(value || "").trim().toLowerCase().replace(/[\s_-]+/g, " "));
+      if (eventStatuses.some((status) =>
+        ["approved", "published", "rejected", "revision", "cancelled"].includes(status),
+      )) {
+        throw new Error("This proposal is no longer awaiting an approval decision.");
       }
-      const stageStatus = String(stageSource?.status || "").trim().toLowerCase().replace(/[\s_-]+/g, " ");
-      const alreadyApplied = decision === "approve"
-        ? ["ok", "approved", "complete", "completed"].includes(stageStatus)
-        : stageStatus === "rejected" ||
-          stageStatus === "rejected";
+      const workflow = getEventStage(event);
       const currentStageKey = getFirestoreCurrentStageKey(event);
       if (currentStageKey !== stage.key) {
-        if (alreadyApplied) {
-          return {
-            complete: String(event.approvalStatus || event.status || "").toLowerCase() === "approved",
-            alreadyProcessed: true,
-          };
-        }
         throw new Error("This proposal is no longer waiting at your approval stage. Refresh the queue and try again.");
+      }
+      const currentStage = getConfiguredFirestoreStages(event)
+        .find((candidate) => candidate.key === stage.key);
+      if (!currentStage || !isCurrentUserAssignedToStage(event, currentStage)) {
+        throw new Error("This proposal is assigned to a different reviewer account.");
       }
 
       const now = Date.now();
@@ -463,98 +688,93 @@ import {
         currentAdminProfile,
         user.displayName || user.email || "Administrator",
       );
-      const stagePatch = decision === "approve"
-        ? {
-            status: "Approved",
-            approvedAt: now,
-            approvedBy: user.uid,
-            approvedByName: adminName,
-            note: "",
-            updatedAt: now,
-          }
+      const updates = decision === "approve"
+        ? buildApprovalUpdate(event, {
+            stageKey: stage.key,
+            decidedBy: user.uid,
+            decidedByName: adminName,
+            now,
+          })
         : {
-            status: "Rejected",
-            rejectedAt: now,
-            rejectedBy: user.uid,
-            rejectedByName: adminName,
-            note,
+            approvalHistory: [
+              ...(Array.isArray(event.approvalHistory) ? event.approvalHistory : []),
+              {
+                stage: stage.key,
+                stageLabel: stage.label,
+                decision: "rejected",
+                note,
+                decidedBy: user.uid,
+                decidedByName: adminName,
+                timestamp: now,
+              },
+            ],
+            approvalCurrentStage: currentStageKey,
+            approvalCurrentStep: workflow.currentStageIndex,
+            approvalStatus: "rejected",
+            status: "rejected",
             updatedAt: now,
           };
-      const approvalStages = Array.isArray(event.approvalStages)
-        ? [...event.approvalStages]
-        : entries.length
-          ? { ...(event.approvalStages || {}) }
-          : Object.fromEntries(configuredEntries);
-
-      if (Array.isArray(approvalStages)) {
-        const stageIndex = approvalStages.findIndex((entry) => entry === stageSource);
-        if (stageIndex >= 0) {
-          approvalStages[stageIndex] = { ...approvalStages[stageIndex], ...stagePatch };
-        } else {
-          approvalStages.push({ id: stage.key, key: stage.key, name: stage.label, ...stagePatch });
-        }
-      } else {
-        const stageEntry = configuredEntries.find(([, source]) => source === stageSource);
-        const stageId = stageEntry?.[0] || stage.key;
-        approvalStages[stageId] = { ...(stageSource || {}), ...stagePatch };
-      }
-
-      const history = Array.isArray(event.approvalHistory) ? [...event.approvalHistory] : [];
-      history.push({
-        stage: stage.key,
-        stageLabel: stage.label,
-        decision: decision === "approve" ? "Approved" : "Rejected",
-        note: decision === "reject" ? note : "",
-        decidedBy: user.uid,
-        decidedByName: adminName,
-        timestamp: now,
-      });
-
-      const updates = {
-        approvalStages,
-        approvalHistory: history,
-        updatedAt: now,
-      };
-      if (decision === "reject") {
-        updates.status = "rejected";
-        updates.approvalStatus = "rejected";
-      } else {
-        const configuredStages = getConfiguredFirestoreStages({
-          ...event,
-          approvalStages,
-        }).sort((a, b) => a.step - b.step);
-        const stageIndex = configuredStages.findIndex((item) => item.key === stage.key);
-        const nextStage = configuredStages[stageIndex + 1];
-        const approvedStatuses = ["ok", "approved", "complete", "completed"];
-        const allRequiredApproved = configuredStages.every((item) =>
-          item.required !== false && approvedStatuses.includes(
-            String(item.source?.status || "").trim().toLowerCase().replace(/[\s_-]+/g, " "),
-          ) || item.required === false,
-        );
-        if (nextStage && !allRequiredApproved) {
-          updates.approvalCurrentStep = nextStage.step;
-          updates.approvalStatus = "pending";
-          updates.status = "pending";
-        } else if (allRequiredApproved) {
-          updates.approvalCurrentStep = null;
-          updates.approvalStatus = "approved";
-          updates.status = "approved";
-        } else {
-          const nextRequiredStage = configuredStages.find((item) =>
-            item.required !== false && !approvedStatuses.includes(
-              String(item.source?.status || "").trim().toLowerCase().replace(/[\s_-]+/g, " "),
-            ),
-          );
-          updates.approvalCurrentStep = nextRequiredStage?.step || null;
-          updates.approvalStatus = "pending";
-          updates.status = "pending";
-        }
-      }
 
       transaction.update(eventRef, updates);
       return { complete: updates.approvalStatus === "approved", alreadyProcessed: false };
     });
   }
+
+  async function repairBadApprovals({ dryRun = true } = {}) {
+    const user = auth?.currentUser;
+    if (!db || !user || verifiedAdminProfileUid !== user.uid) {
+      throw new Error("Sign in with a verified Admin account before running this repair.");
+    }
+
+    const approvedSnapshot = await getDocs(query(
+      collection(db, "events"),
+      where("status", "==", "approved"),
+    ));
+    const candidates = approvedSnapshot.docs
+      .map((snapshot) => ({ id: snapshot.id, event: snapshot.data() || {} }))
+      .filter(({ event }) =>
+        !getEventStage(event).stages.find((stage) => stage.key === "osas")?.approved,
+      );
+    const candidateSummary = candidates.map(({ id, event }) => ({
+      id,
+      title: event.title || event.eventName || event.name || "Untitled event",
+      approvalCurrentStep: event.approvalCurrentStep ?? null,
+    }));
+
+    if (dryRun) {
+      console.info("Dry run: approved events missing OSAS approval that would be repaired:", candidateSummary);
+      return { dryRun: true, candidates: candidateSummary, changed: [] };
+    }
+
+    const changed = [];
+    for (const { id } of candidates) {
+      const eventRef = doc(db, "events", id);
+      const repaired = await runTransaction(db, async (transaction) => {
+        const snapshot = await transaction.get(eventRef);
+        if (!snapshot.exists()) return false;
+        const event = snapshot.data() || {};
+        if (
+          String(event.status || "").trim().toLowerCase() !== "approved" ||
+          getEventStage(event).stages.find((stage) => stage.key === "osas")?.approved
+        ) {
+          return false;
+        }
+        transaction.update(eventRef, {
+          status: "pending",
+          approvalStatus: "pending",
+          approvalCurrentStep: EVENT_APPROVAL_STAGES.length - 1,
+          updatedAt: Date.now(),
+        });
+        return true;
+      });
+      if (repaired) changed.push(id);
+    }
+
+    console.info("Approval repair completed:", changed);
+    return { dryRun: false, candidates: candidateSummary, changed };
+  }
+
+  window.repairBadApprovals = repairBadApprovals;
 
   function showToast(message) {
     if (!toastElement) return;
@@ -571,7 +791,7 @@ import {
     adminStartupExpired = true;
     showDashboardLoadError(new Error("Admin setup timed out."));
   }, 15000);
-  onAuthStateChanged(auth, async (user) => {
+  authStateHandler = async (user) => {
     if (adminStartupExpired) return;
     if (!user) {
       clearTimeout(adminStartupTimeout);
@@ -646,7 +866,8 @@ import {
       showDashboardLoadError(error);
     }
 
-  });
+  };
+  unsubscribeAuthState = onAuthStateChanged(auth, authStateHandler);
 
   function showDashboardLoadError(error) {
     console.error("Could not initialize the admin approval dashboard:", error);
@@ -705,6 +926,7 @@ import {
 
     if (!db) {
       firestorePendingEvents = [];
+      firestoreScopedEventIds = new Set();
       firestorePendingEventsLoaded = true;
       firestorePendingEventsError = "Firestore is not configured; submitted event proposals cannot be loaded.";
       if (!activeReviewEventId) renderReviewQueue();
@@ -712,13 +934,27 @@ import {
     }
 
     firestorePendingEvents = [];
+    firestoreScopedEventIds = new Set();
     firestorePendingEventsLoaded = false;
     firestorePendingEventsError = "";
-    const assignedStage = getAccountStage();
-    const isOrganizationAdviser = isOrgAdviserReviewer(assignedStage);
-    const assignedOrganizationCode = isOrganizationAdviser
-      ? getCurrentAdminOrganizationCode()
-      : "";
+    const isOrganizationAdviser = isOrgAdviserReviewer(getAccountStage());
+    if (
+      isOrganizationAdviser &&
+      (
+        currentAdminOrganizationIds.size === 0 ||
+        currentAdminOrganizationQueryValues.length === 0 ||
+        currentAdminOrganizationQueryValues.length > 30
+      )
+    ) {
+      firestorePendingEventsLoaded = true;
+      firestoreScopedEventIds = new Set();
+      debugLog("Failing closed: the adviser's organization scope could not be queried safely.", {
+        uid: currentAdminUid,
+        organizationIds: [...currentAdminOrganizationIds],
+      });
+      if (!activeReviewEventId) renderReviewQueue();
+      return;
+    }
     firestorePendingEventsTimeout = setTimeout(() => {
       firestorePendingEventsTimeout = null;
       if (firestorePendingEventsLoaded) return;
@@ -729,50 +965,54 @@ import {
     }, 5000);
 
     try {
-      const pendingEventConstraints = [where("status", "==", "pending")];
-      if (isOrganizationAdviser && assignedOrganizationCode) {
-        pendingEventConstraints.push(
-          where("organizationCode", "==", assignedOrganizationCode),
-        );
-      }
-      const pendingEventsQuery = query(
-        collection(db, "events"),
-        ...pendingEventConstraints,
-      );
-      console.log("[AdminApproval] Fetching pending Firestore proposals.", {
-        organizationScoped: isOrganizationAdviser,
-        hasOrganizationCode: Boolean(assignedOrganizationCode),
-      });
+      const pendingEventsQuery = isOrganizationAdviser
+        ? query(
+            collection(db, "events"),
+            currentAdminOrganizationQueryValues.length > 1
+              ? where("organizationCode", "in", currentAdminOrganizationQueryValues)
+              : where("organizationCode", "==", currentAdminOrganizationQueryValues[0]),
+          )
+        : query(collection(db, "events"), where("status", "==", "pending"));
       firestorePendingEventsUnsubscribe = onSnapshot(
         pendingEventsQuery,
         (snapshot) => {
           try {
-            console.log("[AdminApproval] Pending Firestore snapshot received.", {
-              count: snapshot.size,
+            const classifiedEvents = [];
+            const scopedEventIds = new Set();
+            snapshot.docs.forEach((eventSnapshot) => {
+              try {
+                const event = {
+                  ...(eventSnapshot.data() || {}),
+                  id: eventSnapshot.id,
+                };
+                if (
+                  isOrganizationAdviser &&
+                  !isCurrentAdminOrganization(event)
+                ) return;
+                scopedEventIds.add(eventSnapshot.id);
+                const classification = classifyProposalForCurrentAdmin(event);
+                if (!classification) return;
+                classifiedEvents.push({
+                  ...event,
+                  currentApprovalStage: classification.workflow.currentStageKey || null,
+                  pipelineStatus: classification.section,
+                  pipelineBadge: classification.badge,
+                  previewOnly: classification.section !== "action-required",
+                });
+              } catch (error) {
+                debugLog("Skipping malformed Firestore proposal.", {
+                  id: eventSnapshot.id,
+                  error,
+                });
+              }
             });
-            const pendingEvents = snapshot.docs.map((eventSnapshot) => ({
-              ...(eventSnapshot.data() || {}),
-              id: eventSnapshot.id,
-            }));
-            firestorePendingEvents = pendingEvents.map((event) => {
-              const currentStageKey = getFirestoreCurrentStageKey(event) ||
-                getConfiguredFirestoreStages(event).find((stage) => {
-                  const status = String(stage.source?.status || "")
-                    .trim()
-                    .toLowerCase()
-                    .replace(/[\s_-]+/g, " ");
-                  return !["ok", "approved", "complete", "completed"].includes(status);
-                })?.key;
-              return {
-                ...event,
-                currentApprovalStage: currentStageKey || null,
-                pipelineStatus: isFirestoreActionRequired(event) ? "action-required" : "incoming",
-              };
-            });
+            firestorePendingEvents = classifiedEvents;
+            firestoreScopedEventIds = scopedEventIds;
             firestorePendingEventsError = "";
           } catch (error) {
-            console.error("Could not process pending Firestore event proposals:", error);
+            debugLog("Could not process Firestore event proposals.", error);
             firestorePendingEvents = [];
+            firestoreScopedEventIds = new Set();
             firestorePendingEventsError = "Couldn't load proposals. Check your connection and permissions, then refresh.";
           }
           if (firestorePendingEventsTimeout) {
@@ -783,16 +1023,13 @@ import {
           if (!activeReviewEventId) renderReviewQueue();
         },
         (error) => {
-          console.log("[AdminApproval] Pending Firestore query failed.", {
-            code: error?.code || "unknown",
-            message: error?.message || String(error),
-          });
           console.error("Could not load pending Firestore event proposals:", error);
           if (firestorePendingEventsTimeout) {
             clearTimeout(firestorePendingEventsTimeout);
             firestorePendingEventsTimeout = null;
           }
           firestorePendingEvents = [];
+          firestoreScopedEventIds = new Set();
           firestorePendingEventsLoaded = true;
           firestorePendingEventsError = "Couldn't load proposals. Check your connection and permissions, then refresh.";
           if (!activeReviewEventId) renderReviewQueue();
@@ -805,6 +1042,7 @@ import {
         firestorePendingEventsTimeout = null;
       }
       firestorePendingEvents = [];
+      firestoreScopedEventIds = new Set();
       firestorePendingEventsLoaded = true;
       firestorePendingEventsError = "Couldn't load proposals. Check your connection and permissions, then refresh.";
       if (!activeReviewEventId) renderReviewQueue();
@@ -861,14 +1099,13 @@ import {
       const items = [];
       if (data && typeof data === "object") {
         Object.entries(data).forEach(([eventId, item]) => {
-          if (item && typeof item === "object") {
-            const assignedStageKey = getAccountStage()?.key || currentAdminKey;
-            if (
-              isOrgAdviserReviewer(getAccountStage() || { key: assignedStageKey }) &&
-              normalizeOrganizationCode(item.organizationCode) !==
-                getCurrentAdminOrganizationCode()
-            ) return;
+          try {
+            if (!item || typeof item !== "object") return;
+            if (!isCurrentAdminOrganization(item)) return;
+            const status = String(item.status || "pending").trim().toLowerCase();
+            if (["draft", "withdrawn", "deleted"].includes(status)) return;
             items.push({
+              ...item,
               eventId: item.eventId || eventId,
               name: item.name || item.title || `Event #${eventId}`,
               date: item.date || item.startAt || "Date TBA",
@@ -879,6 +1116,8 @@ import {
               paused: Boolean(item.paused || item.status === "paused"),
               updatedAt: item.updatedAt || Date.now(),
             });
+          } catch (error) {
+            debugLog("Skipping malformed RTDB queue proposal.", { eventId, error });
           }
         });
       }
@@ -1187,11 +1426,178 @@ import {
   function renderReviewQueue() {
     if (!root) return;
 
-    const firestoreEventIds = new Set(firestorePendingEvents.map((event) => String(event.id || "")));
-    const visibleQueueItems = queueItems.filter((item) => !firestoreEventIds.has(String(item.eventId || "")));
-    let cardsHtml = "";
-    if (visibleQueueItems.length === 0) {
-      cardsHtml = `
+    const legacyProposalEvents = [];
+    queueItems.forEach((item) => {
+      try {
+        const eventId = String(item.eventId || "");
+        if (!eventId || firestoreScopedEventIds.has(eventId) || !isCurrentAdminOrganization(item)) return;
+        const step = Number(item.step);
+        const fallbackStageIndex = Number.isInteger(step) && step >= 1 && step <= EVENT_APPROVAL_STAGES.length
+          ? step - 1
+          : 0;
+        const event = {
+          ...item,
+          id: eventId,
+          eventId,
+          eventName: item.name || item.title || `Event #${eventId}`,
+          status: item.status || "pending",
+        };
+        const classification = classifyProposalForCurrentAdmin(
+          event,
+          fallbackStageIndex,
+          true,
+        );
+        if (!classification) return;
+        legacyProposalEvents.push({
+          ...event,
+          queueSource: "rtdb",
+          currentApprovalStage: classification.workflow.currentStageKey || null,
+          pipelineStatus: classification.section,
+          pipelineBadge: classification.badge,
+          previewOnly: classification.section !== "action-required",
+        });
+      } catch (error) {
+        debugLog("Skipping malformed RTDB queue proposal.", {
+          eventId: item?.eventId || "",
+          error,
+        });
+      }
+    });
+
+    const proposalsById = new Map();
+    [...firestorePendingEvents, ...legacyProposalEvents].forEach((event) => {
+      const eventId = String(event.id || event.eventId || "");
+      if (eventId && !proposalsById.has(eventId)) proposalsById.set(eventId, event);
+    });
+    const proposals = [...proposalsById.values()];
+    const actionableEvents = proposals.filter((event) => event.pipelineStatus === "action-required");
+    const incomingEvents = proposals.filter((event) => event.pipelineStatus === "incoming");
+    const reviewedEvents = proposals.filter((event) => event.pipelineStatus === "reviewed");
+    const renderProposalCards = (events, section) => {
+      const cards = [];
+      events.forEach((event) => {
+        try {
+            const eventId = String(event.id || event.eventId);
+            const eventName = event.eventName || event.title || event.name || "Untitled Event";
+            const currentStage = event.currentApprovalStage
+              ? getStageLabel(event.currentApprovalStage)
+              : event.pipelineBadge === "Approved"
+                ? "Approval complete"
+                : "Approval status unavailable";
+            const adviserSkipMarker = hasSkippedAdviserStage(event)
+              ? "<small>Adviser step skipped by organizer</small>"
+              : "";
+            const readOnly = section !== "action-required";
+            const style = section === "action-required" ? "action" : "incoming";
+            const actionLabel = readOnly ? "Preview proposal" : "Review proposal";
+            const buttonAction = event.queueSource === "rtdb" ? "review" : "review-firestore";
+            const adminDocumentsLink = event.queueSource === "rtdb"
+              ? ""
+              : getAdminDocumentsLink(event.adminDocuments);
+            if (event.queueSource === "rtdb") {
+              cards.push(`
+                <article class="queue-card queue-card--${style}" data-event-id="${esc(eventId)}" data-read-only="${readOnly}" tabindex="0" aria-label="${readOnly ? "Preview" : "Review"} proposal ${esc(eventName)}">
+                  <div>
+                    <div class="queue-card-header">
+                      <span class="queue-step-tag">Currently with ${esc(currentStage)}</span>
+                      <span class="queue-pipeline-status queue-pipeline-status--${style}">${esc(event.pipelineBadge)}</span>
+                    </div>
+                    <h3 class="queue-card-title">${esc(eventName)}</h3>
+                    ${adviserSkipMarker}
+                    <div class="queue-card-meta">
+                      <div class="queue-card-meta-item"><span>${esc(formatQueueDate(event.date))}</span></div>
+                      <div class="queue-card-meta-item"><span>${esc(event.venue || event.location || "PUP Biñan Campus")}</span></div>
+                      <div class="queue-card-meta-item"><span>${esc(event.category || "Academic & Learning")}</span></div>
+                    </div>
+                  </div>
+                  <div class="queue-card-footer">
+                    <button type="button" class="btn-queue-review" data-action="${buttonAction}" data-id="${esc(eventId)}" data-read-only="${readOnly}">${actionLabel}</button>
+                  </div>
+                </article>
+              `);
+              return;
+            }
+            const eventDate = formatQueueDate(event.date || event.dateStart || event.startAt);
+            const eventVenue = event.venue || event.location || "Venue TBA";
+            cards.push(`
+              <article class="queue-card queue-card--${style}" data-firestore-event-id="${esc(eventId)}" data-read-only="${readOnly}" tabindex="0" aria-label="${readOnly ? "Preview" : "Review"} proposal ${esc(eventName)}">
+                <div>
+                  <div class="queue-card-header">
+                    <span class="queue-step-tag">Currently with ${esc(currentStage)}</span>
+                    <span class="queue-pipeline-status queue-pipeline-status--${style}">${esc(event.pipelineBadge)}</span>
+                  </div>
+                  <h3 class="queue-card-title">${esc(eventName)}</h3>
+                  ${adviserSkipMarker}
+                  <div class="queue-card-meta">
+                    <div class="queue-card-meta-item"><span>${esc(eventDate)}</span></div>
+                    <div class="queue-card-meta-item"><span>${esc(eventVenue)}</span></div>
+                  </div>
+                </div>
+                <div class="queue-card-footer">
+                  <button type="button" class="btn-queue-review" data-action="${buttonAction}" data-id="${esc(eventId)}" data-read-only="${readOnly}">${actionLabel}</button>
+                  ${
+                    adminDocumentsLink
+                      ? `<a class="btn-queue-review" href="${esc(adminDocumentsLink)}" target="_blank" rel="noopener noreferrer">Review admin documents</a>`
+                      : `<span role="status">No valid Google Drive link was provided.</span>`
+                  }
+                </div>
+              </article>
+            `);
+        } catch (error) {
+          debugLog("Skipping proposal that could not be rendered.", {
+            id: event?.id || event?.eventId || "",
+            error,
+          });
+        }
+      });
+      return {
+        count: cards.length,
+        html: cards.length ? `<div class="queue-cards-grid">${cards.join("")}</div>` : "",
+      };
+    };
+
+    const actionCards = renderProposalCards(actionableEvents, "action-required");
+    const incomingCards = renderProposalCards(incomingEvents, "incoming");
+    const reviewedCards = renderProposalCards(reviewedEvents, "reviewed");
+    updateQueueBadge(actionCards.count);
+    const actionSectionHtml = actionCards.count
+      ? `<section class="approval-pipeline-group" aria-label="Proposals requiring your action">
+          <div class="approval-pipeline-heading">
+            <div>
+              <h4>Require Your Action</h4>
+              <p>Proposals currently at your approval step.</p>
+            </div>
+            <span class="approval-pipeline-count">${actionCards.count}</span>
+          </div>
+          ${actionCards.html}
+        </section>`
+      : "";
+    const incomingSectionHtml = incomingCards.count
+      ? `<section class="approval-pipeline-group approval-pipeline-group--incoming" aria-label="Incoming and pending review proposals">
+          <div class="approval-pipeline-heading">
+            <div>
+              <h4>Incoming / Pending Review</h4>
+              <p>Preview submitted proposals not yet at your approval step.</p>
+            </div>
+            <span class="approval-pipeline-count">${incomingCards.count}</span>
+          </div>
+          ${incomingCards.html}
+        </section>`
+      : "";
+    const reviewedSectionHtml = reviewedCards.count
+      ? `<details class="approval-pipeline-group approval-pipeline-group--incoming">
+          <summary class="approval-pipeline-heading" style="cursor:pointer;list-style:none">
+            <div>
+              <h4>Reviewed by you</h4>
+              <p>Proposals you reviewed or forwarded.</p>
+            </div>
+            <span class="approval-pipeline-count">${reviewedCards.count}</span>
+          </summary>
+          ${reviewedCards.html}
+        </details>`
+      : "";
+    const nothingWaitingHtml = actionCards.count === 0
+      ? `
         <div class="queue-empty-box">
           <svg viewBox="0 0 24 24" fill="none" stroke="#a8a29e" stroke-width="1.5" width="40" height="40" style="margin-bottom:12px;">
             <circle cx="12" cy="12" r="10"/>
@@ -1200,144 +1606,33 @@ import {
           <h3>Nothing waiting on you</h3>
           <p>You have no event proposals currently awaiting your review.</p>
         </div>
-      `;
-    } else {
-      cardsHtml = `
-        <div class="queue-cards-grid">
-          ${visibleQueueItems
-            .map((item) => {
-              const isPaused = item.paused || item.status === "paused";
-              return `
-                <article class="queue-card" data-event-id="${esc(item.eventId)}" tabindex="0" aria-label="Open proposal review for ${esc(item.name)}">
-                  <div>
-                    <div class="queue-card-header">
-                      <span class="queue-step-tag">Step ${item.step}</span>
-                      ${
-                        isPaused
-                          ? `<span class="queue-paused-badge">Paused for revision</span>`
-                          : ""
-                      }
-                    </div>
-                    <h3 class="queue-card-title">${esc(item.name)}</h3>
-                    <div class="queue-card-meta">
-                      <div class="queue-card-meta-item">
-                        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" width="14" height="14">
-                          <rect x="2.5" y="3.5" width="15" height="13.5" rx="1.6"/>
-                          <path d="M2.5 8H17.5M6 2v3M14 2v3"/>
-                        </svg>
-                        <span>${esc(formatQueueDate(item.date))}</span>
-                      </div>
-                      <div class="queue-card-meta-item">
-                        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" width="14" height="14">
-                          <path d="M10 2a6 6 0 0 0-6 6c0 4.5 6 10 6 10s6-5.5 6-10a6 6 0 0 0-6-6Z"/>
-                          <circle cx="10" cy="8" r="2"/>
-                        </svg>
-                        <span>${esc(item.venue)}</span>
-                      </div>
-                      <div class="queue-card-meta-item">
-                        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" width="14" height="14">
-                          <circle cx="10" cy="10" r="7"/>
-                          <path d="M10 6v4l3 2"/>
-                        </svg>
-                        <span>${esc(item.category)}</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="queue-card-footer">
-                    ${
-                      isPaused
-                        ? `<span style="font-size:12px; color:#92400e; font-style:italic;">Awaiting organizer updates</span>`
-                        : `<button type="button" class="btn-queue-review" data-action="review" data-id="${esc(item.eventId)}">Review Proposal</button>`
-                    }
-                  </div>
-                </article>
-              `;
-            })
-            .join("")}
-        </div>
-      `;
-    }
-
-    const renderFirestoreProposalCards = (events, incoming) => events.length
-      ? `<div class="queue-cards-grid">
-          ${events.map((event) => {
-            const eventName = event.eventName || event.title || "Untitled Event";
-            const eventDate = formatQueueDate(event.date || event.dateStart || event.startAt);
-            const eventVenue = event.venue || event.location || "Venue TBA";
-            const adminDocumentsLink = getAdminDocumentsLink(event.adminDocuments);
-            const currentStage = event.currentApprovalStage
-              ? getStageLabel(event.currentApprovalStage)
-              : "Approval status unavailable";
-            return `
-              <article class="queue-card queue-card--${incoming ? "incoming" : "action"}" data-firestore-event-id="${esc(event.id)}" tabindex="0" aria-label="${incoming ? "Preview" : "Review"} proposal ${esc(eventName)}">
-                <div>
-                  <div class="queue-card-header">
-                    <span class="queue-step-tag">Currently with ${esc(currentStage)}</span>
-                    <span class="queue-pipeline-status queue-pipeline-status--${incoming ? "incoming" : "action"}">${incoming ? "Incoming" : "Action required"}</span>
-                  </div>
-                  <h3 class="queue-card-title">${esc(eventName)}</h3>
-                  <div class="queue-card-meta">
-                    <div class="queue-card-meta-item"><span>${esc(eventDate)}</span></div>
-                    <div class="queue-card-meta-item"><span>${esc(eventVenue)}</span></div>
-                  </div>
-                </div>
-                <div class="queue-card-footer">
-                  <button type="button" class="btn-queue-review" data-action="review-firestore" data-id="${esc(event.id)}">${incoming ? "Preview proposal" : "Review proposal"}</button>
-                  ${
-                    adminDocumentsLink
-                      ? `<a class="btn-queue-review" href="${esc(adminDocumentsLink)}" target="_blank" rel="noopener noreferrer">Review admin documents</a>`
-                      : `<span role="status">No valid Google Drive link was provided.</span>`
-                  }
-                </div>
-              </article>
-            `;
-          }).join("")}
-        </div>`
-      : `<div class="queue-empty-box"><span>${incoming ? "No incoming proposals." : "No proposals require a decision."}</span></div>`;
-
-    const actionableFirestoreEvents = firestorePendingEvents.filter((event) => event.pipelineStatus === "action-required");
-    const incomingFirestoreEvents = firestorePendingEvents.filter((event) => event.pipelineStatus === "incoming");
+      `
+      : "";
+    const firestoreStatusHtml = !firestorePendingEventsLoaded
+      ? `<div class="admin-loading">Loading pending Firestore proposals…</div>`
+      : firestorePendingEventsError
+        ? `<div class="queue-empty-box" role="alert"><p>${esc(firestorePendingEventsError)}</p></div>`
+        : "";
     const firestoreProposalsHtml = `
       <section class="recent-decisions-section approval-pipeline-section">
-        ${
-          !firestorePendingEventsLoaded
-            ? `<div class="admin-loading">Loading pending Firestore proposals…</div>`
-            : firestorePendingEventsError
-              ? `<div class="queue-empty-box" role="alert"><p>${esc(firestorePendingEventsError)}</p></div>`
-              : `
-                <section class="approval-pipeline-group" aria-label="Proposals requiring your action">
-                  <div class="approval-pipeline-heading">
-                    <div>
-                      <h4>Require Your Action</h4>
-                      <p>Proposals currently at your approval step.</p>
-                    </div>
-                    <span class="approval-pipeline-count">${actionableFirestoreEvents.length}</span>
-                  </div>
-                  ${renderFirestoreProposalCards(actionableFirestoreEvents, false)}
-                </section>
-                <section class="approval-pipeline-group approval-pipeline-group--incoming" aria-label="Incoming and pending review proposals">
-                  <div class="approval-pipeline-heading">
-                    <div>
-                      <h4>Incoming / Pending Review</h4>
-                      <p>Preview submitted proposals not currently assigned to your approval step.</p>
-                    </div>
-                    <span class="approval-pipeline-count">${incomingFirestoreEvents.length}</span>
-                  </div>
-                  ${renderFirestoreProposalCards(incomingFirestoreEvents, true)}
-                </section>
-              `
-        }
+        ${firestoreStatusHtml}
+        ${actionSectionHtml}${incomingSectionHtml}${reviewedSectionHtml}
       </section>
     `;
 
     // Recent Decisions HTML
     let recentHtml = "";
-    if (recentDecisions.length > 0) {
+    const visibleRecentDecisions = isOrgAdviserReviewer(getAccountStage())
+      ? []
+      : recentDecisions.filter((decision) =>
+          !proposalsById.has(String(decision.eventId || "")),
+        );
+    if (visibleRecentDecisions.length > 0) {
       recentHtml = `
         <section class="recent-decisions-section">
           <h3>Your Recent Decisions</h3>
           <div class="recent-decisions-list">
-            ${recentDecisions
+            ${visibleRecentDecisions
               .map((d) => {
                 const badgeClass =
                   d.decision === "Approved"
@@ -1378,7 +1673,7 @@ import {
         </div>
       </div>
 
-      ${cardsHtml}
+      ${nothingWaitingHtml}
       ${firestoreProposalsHtml}
       ${recentHtml}
     `;
@@ -1387,22 +1682,30 @@ import {
     root.querySelectorAll('[data-action="review"]').forEach((btn) => {
       btn.addEventListener("click", () => {
         const id = btn.dataset.id;
-        if (id) openReviewScreen(id);
+        if (id) openReviewScreen(id, { readOnly: btn.dataset.readOnly === "true" });
       });
     });
     root.querySelectorAll('[data-action="review-firestore"]').forEach((btn) => {
       btn.addEventListener("click", () => {
         const event = firestorePendingEvents.find((item) => item.id === btn.dataset.id);
-        if (event) openFirestoreProposalReview(event.id);
+        if (event) {
+          openFirestoreProposalReview(event.id, {
+            readOnly: btn.dataset.readOnly === "true",
+          });
+        }
       });
     });
 
     root.querySelectorAll(".queue-card").forEach((card) => {
       const openCard = () => {
         if (card.dataset.firestoreEventId) {
-          openFirestoreProposalReview(card.dataset.firestoreEventId);
+          openFirestoreProposalReview(card.dataset.firestoreEventId, {
+            readOnly: card.dataset.readOnly === "true",
+          });
         } else if (card.dataset.eventId) {
-          openReviewScreen(card.dataset.eventId);
+          openReviewScreen(card.dataset.eventId, {
+            readOnly: card.dataset.readOnly === "true",
+          });
         }
       };
       card.addEventListener("click", (event) => {
@@ -1420,7 +1723,7 @@ import {
   // =========================================================================
   // VIEW 2: REVIEW SCREEN
   // =========================================================================
-  function openReviewScreen(eventId) {
+  function openReviewScreen(eventId, { readOnly = false } = {}) {
     if (firestoreProposalLoadTimeout) {
       clearTimeout(firestoreProposalLoadTimeout);
       firestoreProposalLoadTimeout = null;
@@ -1430,6 +1733,7 @@ import {
       activeFirestoreEventUnsubscribe = null;
     }
     activeFirestoreReview = false;
+    activeReviewReadOnly = readOnly;
     firestoreProposalLoadError = "";
     activeReviewEventId = eventId;
     window.history.pushState(null, "", `AdminApproval.html?review=${encodeURIComponent(eventId)}`);
@@ -1445,8 +1749,7 @@ import {
       if (
         isOrgAdviserReviewer(getAccountStage() || { key: currentAdminKey }) &&
         activeEvent &&
-        getEventOrganizationCode(activeEvent) !==
-          getCurrentAdminOrganizationCode()
+        !isCurrentAdminOrganization(activeEvent)
       ) {
         showToast("This proposal is outside your assigned organization.");
         closeReviewScreen();
@@ -1462,37 +1765,34 @@ import {
     });
   }
 
-  function getFirestoreApproval(event) {
-    const requestedStep = Number(event.approvalCurrentStep);
+  function getFirestoreApproval(event, useNormalizedHistory = false) {
+    const workflow = useNormalizedHistory
+      ? getNormalizedProposalWorkflow(event)
+      : getEventStage(event);
     const configuredStages = getConfiguredFirestoreStages(event);
-    const currentStageKey = getFirestoreCurrentStageKey(event);
-    const currentStep = configuredStages.find((stage) => stage.key === currentStageKey)?.step ||
-      (requestedStep >= 1 ? requestedStep : 1);
     const members = {};
-    configuredStages.forEach((stage) => {
-      const source = stage.source;
-      const rawStatus = String(source?.status || "").trim().toLowerCase().replace(/[\s_-]+/g, " ");
-      const status = ["ok", "approved", "complete", "completed"].includes(rawStatus)
-        ? "ok"
-        : ["review", "reviewing", "in review", "in progress"].includes(rawStatus) ||
-            (stage.step === currentStep && ["", "pending", "waiting", "wait"].includes(rawStatus))
-          ? "review"
-          : ["rev", "revision", "changes requested"].includes(rawStatus)
-            ? "rev"
-            : ["rej", "rejected"].includes(rawStatus)
-              ? "rej"
-              : ["wait", "waiting", "pending", ""].includes(rawStatus)
-                ? "wait"
-                : "wait";
+    workflow.stages.forEach((stageState) => {
+      const stage = configuredStages.find((candidate) => candidate.key === stageState.key);
+      const assignment = getStageAssignment(event, stage);
+      const profileOwnsStage = verifiedAdminProfileUid &&
+        getApprovalStageForProfile(currentAdminProfile)?.key === stage.key;
+      const hasApprover = Boolean(assignment.uid || assignment.email || profileOwnsStage);
+      const historyEntry = stageState.approvedEntry;
       members[stage.key] = {
         key: stage.key,
         label: stage.label,
-        step: stage.step,
+        step: stageState.step,
         stage: stage.step,
-        status,
-        note: source?.note || "",
-        updatedAt: source?.updatedAt || source?.approvedAt || null,
-        approvedByName: source?.approvedByName || source?.decidedBy || source?.rejectedByName || "",
+        status: stageState.state === "approved"
+          ? "ok"
+          : stageState.state === "current" && hasApprover
+            ? "review"
+            : "wait",
+        note: stageState.state === "current" && !hasApprover
+          ? "No approver assigned"
+          : historyEntry?.note || "",
+        updatedAt: historyEntry?.timestamp || historyEntry?.at || historyEntry?.createdAt || null,
+        approvedByName: historyEntry?.decidedByName || historyEntry?.by || "",
       };
     });
 
@@ -1506,45 +1806,47 @@ import {
     }
 
     return {
-      status: event.approvalStatus || event.status || "pending",
+      status: workflow.isFullyApproved
+        ? "approved"
+        : ["approved"].includes(String(event.approvalStatus || event.status || "").trim().toLowerCase())
+          ? "pending"
+          : event.approvalStatus || event.status || "pending",
       submittedAt: event.approvalSubmittedAt || event.createdAt || null,
       members,
       files,
-      history: Array.isArray(event.approvalHistory) ? event.approvalHistory : [],
+      history: useNormalizedHistory
+        ? workflow.approvalHistory
+        : Array.isArray(event.approvalHistory) ? event.approvalHistory : [],
+      currentStep: workflow.currentStageIndex,
     };
   }
 
   function isFirestoreActionRequired(event) {
     const approval = getFirestoreApproval(event);
-    const members = Object.values(approval.members || {});
-    const activeStage = members.find((member) => member.status !== "ok");
+    const workflow = getEventStage(event);
     const currentStageKey = getFirestoreCurrentStageKey(event);
-    const explicitCurrentStep = Number(
-      event.currentStep ??
-      event.approvalCurrentStep ??
-      approval.currentStep ??
-      approval.approvalCurrentStep,
-    );
-    const declaredStageKey = currentStageKey ||
-      members.find((member) => Number(member.step) === explicitCurrentStep)?.key ||
-      members.find((member) => member.status === "review")?.key ||
-      null;
+    const activeStage = approval.members?.[currentStageKey];
     const assignedRole = getApprovalStageForProfile(currentAdminProfile);
+    const eventStatuses = [event.status, event.approvalStatus]
+      .map((value) => String(value || "").trim().toLowerCase().replace(/[\s_-]+/g, " "));
 
     return Boolean(
+      currentStageKey &&
       activeStage &&
       activeStage.status === "review" &&
-      approval.status !== "revision" &&
+      !eventStatuses.some((status) =>
+        ["approved", "published", "rejected", "revision", "cancelled"].includes(status),
+      ) &&
+      !["approved", "rejected", "revision", "cancelled"].includes(
+        String(approval.status || "").trim().toLowerCase().replace(/[\s_-]+/g, " "),
+      ) &&
       (!assignedRole || assignedRole.key === activeStage.key) &&
-      (!declaredStageKey || declaredStageKey === activeStage.key) &&
-      (!Number.isInteger(explicitCurrentStep) || explicitCurrentStep < 1 ||
-        explicitCurrentStep === activeStage.step) &&
       isCurrentUserAssignedToStage(event, activeStage) &&
       currentStageKey === activeStage.key
     );
   }
 
-  function openFirestoreProposalReview(eventId) {
+  function openFirestoreProposalReview(eventId, { readOnly = false } = {}) {
     if (firestoreProposalLoadTimeout) {
       clearTimeout(firestoreProposalLoadTimeout);
       firestoreProposalLoadTimeout = null;
@@ -1564,6 +1866,7 @@ import {
 
     activeReviewEventId = eventId;
     activeFirestoreReview = true;
+    activeReviewReadOnly = readOnly;
     activeEvent = null;
     activeApproval = null;
     firestoreProposalLoadError = "";
@@ -1578,14 +1881,28 @@ import {
       return;
     }
     const renderFirestoreEvent = (eventData) => {
+      if (
+        isOrgAdviserReviewer(getAccountStage()) &&
+        !isCurrentAdminOrganization(eventData)
+      ) {
+        activeEvent = null;
+        activeApproval = null;
+        firestoreProposalLoadError = "This proposal is outside your assigned organization.";
+        renderReviewScreen();
+        return;
+      }
+      const eventWithId = { ...eventData, id: eventId };
+      const classification = classifyProposalForCurrentAdmin(eventWithId);
+      activeReviewReadOnly = readOnly ||
+        classification?.section !== "action-required";
       activeEvent = {
-        ...eventData,
+        ...eventWithId,
         name: eventData.eventName || eventData.name || eventData.title || "Untitled Event",
         venue: eventData.venue || eventData.location || eventData.venueName || "Venue TBA",
         startAt: eventData.startAt || eventData.date || eventData.dateStart || "Date TBA",
         source: eventData.source || eventData.eventSource || eventData.campus || eventData.office || "Firestore submission",
       };
-      activeApproval = getFirestoreApproval(eventData);
+      activeApproval = getFirestoreApproval(eventWithId, true);
       firestoreProposalLoadError = "";
       renderReviewScreen();
     };
@@ -1658,6 +1975,7 @@ import {
       activeFirestoreEventUnsubscribe = null;
     }
     activeFirestoreReview = false;
+    activeReviewReadOnly = false;
     activeReviewEventId = null;
     activeEvent = null;
     activeApproval = null;
@@ -1695,7 +2013,10 @@ import {
     }
 
     const sourceMembers = activeApproval.members || {};
-    const members = Object.fromEntries(APPROVAL_ACCOUNT_STAGES.map((stage) => {
+    const proposalStageKeys = getStages(activeEvent);
+    const members = Object.fromEntries(proposalStageKeys.map((stageKey, index) => {
+      const stage = APPROVAL_ACCOUNT_STAGES.find((candidate) => candidate.key === stageKey);
+      if (!stage) return null;
       const sourceEntry = Object.entries(sourceMembers).find(([key, member]) =>
         [key, member.key, member.roleKey, member.id, member.label, member.name, member.reviewer]
           .some((value) => resolveApprovalStage(value)?.key === stage.key),
@@ -1707,31 +2028,32 @@ import {
         label: stage.key === "hap"
           ? "Head of Academic Programs, QAC Coordinator (HAP)"
           : stage.label,
-        step: stage.step,
-        stage: stage.step,
+        step: index + 1,
+        stage: index + 1,
         status: source.status || "wait",
       }];
-    }));
+    }).filter(Boolean));
     const sortedMembers = Object.values(members);
-
-    // Identify current admin's member entry
-    const firestoreCurrentStageKey = activeFirestoreReview
-      ? getFirestoreCurrentStageKey(activeEvent)
-      : null;
     const activeStage = sortedMembers.find((member) => member.status !== "ok") || null;
     const activeStageKey = activeStage?.key || null;
-    const explicitCurrentStep = Number(
-      activeEvent.currentStep ??
-      activeEvent.approvalCurrentStep ??
-      activeApproval.currentStep ??
-      activeApproval.approvalCurrentStep,
-    );
-    const declaredStageKey = firestoreCurrentStageKey ||
-      sortedMembers.find((member) => Number(member.step) === explicitCurrentStep)?.key ||
+    const legacyFallbackIndex = activeStage
+      ? proposalStageKeys.indexOf(activeStage.key)
+      : proposalStageKeys.length - 1;
+    const normalizedReviewWorkflow = getNormalizedProposalWorkflow({
+      ...activeEvent,
+      approvalHistory: Array.isArray(activeEvent.approvalHistory) && activeEvent.approvalHistory.length
+        ? activeEvent.approvalHistory
+        : activeApproval.history,
+      approvalCurrentStep: activeEvent.approvalCurrentStep ??
+        activeApproval.approvalCurrentStep ??
+        activeEvent.currentStep ??
+        activeApproval.currentStep,
+    }, legacyFallbackIndex);
+    const declaredStageKey = normalizedReviewWorkflow.currentStageKey ||
       sortedMembers.find((member) => member.status === "review")?.key ||
       null;
     const assignedRole = getApprovalStageForProfile(currentAdminProfile);
-    const isMyTurn = activeFirestoreReview
+    const isMyTurn = !activeReviewReadOnly && (activeFirestoreReview
       ? isFirestoreActionRequired(activeEvent)
       : Boolean(
           activeStage &&
@@ -1739,15 +2061,15 @@ import {
           activeApproval.status !== "revision" &&
           (!assignedRole || assignedRole.key === activeStage.key) &&
           (!declaredStageKey || declaredStageKey === activeStage.key) &&
-          (!Number.isInteger(explicitCurrentStep) || explicitCurrentStep < 1 ||
-            explicitCurrentStep === activeStage.step) &&
           isCurrentUserAssignedToStage(activeEvent, activeStage)
-        );
+        ));
 
     // Header Tag
     let turnTagHtml = "";
     if (isMyTurn) {
       turnTagHtml = `<span class="turn-badge">Your turn: Step ${activeStage.step}</span>`;
+    } else if (activeFirestoreReview && activeStage?.note === "No approver assigned") {
+      turnTagHtml = `<div class="not-waiting-notice">No approver assigned for Step ${activeStage.step}: ${esc(activeStage.label)}.</div>`;
     } else if (activeStage && !["approved", "rejected", "cancelled"].includes(
       String(activeApproval.status || "").toLowerCase(),
     )) {
@@ -1950,7 +2272,7 @@ import {
     const existingKeys = new Set(Object.keys(members));
     const availableToAdd = Object.entries(approverDirectory).filter(([k]) => !existingKeys.has(k));
 
-    let adminToolsHtml = activeFirestoreReview ? "" : `
+    let adminToolsHtml = activeFirestoreReview || activeReviewReadOnly ? "" : `
       <section class="admin-tools-card">
         <h4>Admin Tools</h4>
         <div style="font-size:13px; color:#57534e; margin-bottom:12px;">Manage approval chain steps for this event proposal.</div>
@@ -1992,6 +2314,7 @@ import {
 
         <section class="review-header-card">
           <div class="review-title-row">${turnTagHtml}</div>
+          ${hasSkippedAdviserStage(activeEvent) ? "<small>Adviser step skipped by organizer</small>" : ""}
           <div class="student-event-content">${renderEventDetails(activeEvent, filesList)}</div>
         </section>
 
@@ -2096,8 +2419,7 @@ import {
             }
             if (
               isOrgAdviserReviewer(stage) &&
-              getEventOrganizationCode(activeEvent) !==
-                getCurrentAdminOrganizationCode()
+              !isCurrentAdminOrganization(activeEvent)
             ) {
               throw new Error("This proposal is outside your assigned organization.");
             }
@@ -2122,6 +2444,8 @@ import {
               );
               firestoreResult.localFallback = true;
             }
+          } else if (decision === "approve") {
+            throw new Error("This legacy RTDB proposal cannot be approved by the Firestore client workflow.");
           } else if (functions && navigator.onLine) {
             const decideFn = httpsCallable(functions, "decideApproval");
             await decideFn({
@@ -2216,15 +2540,43 @@ import {
     }
   }
 
-  // Cleanup on leaving page
-  window.addEventListener("beforeunload", () => {
+  function cleanupPageListeners() {
     clearTimeout(adminStartupTimeout);
     clearTimeout(firestorePendingEventsTimeout);
     clearTimeout(firestoreProposalLoadTimeout);
-    if (queueListenerRef) off(queueListenerRef);
-    if (decisionsListenerRef) off(decisionsListenerRef);
-    if (activeEventRef) off(activeEventRef);
-    if (activeApprovalRef) off(activeApprovalRef);
-    if (activeFirestoreEventUnsubscribe) activeFirestoreEventUnsubscribe();
+    if (queueListenerRef) {
+      off(queueListenerRef);
+      queueListenerRef = null;
+    }
+    if (decisionsListenerRef) {
+      off(decisionsListenerRef);
+      decisionsListenerRef = null;
+    }
+    if (activeEventRef) {
+      off(activeEventRef);
+      activeEventRef = null;
+    }
+    if (activeApprovalRef) {
+      off(activeApprovalRef);
+      activeApprovalRef = null;
+    }
+    if (firestorePendingEventsUnsubscribe) {
+      firestorePendingEventsUnsubscribe();
+      firestorePendingEventsUnsubscribe = null;
+    }
+    if (activeFirestoreEventUnsubscribe) {
+      activeFirestoreEventUnsubscribe();
+      activeFirestoreEventUnsubscribe = null;
+    }
+    if (unsubscribeAuthState) {
+      unsubscribeAuthState();
+      unsubscribeAuthState = null;
+    }
+  }
+
+  window.addEventListener("pagehide", cleanupPageListeners);
+  window.addEventListener("pageshow", (event) => {
+    if (!event.persisted || !authStateHandler) return;
+    unsubscribeAuthState = onAuthStateChanged(auth, authStateHandler);
   });
 })();

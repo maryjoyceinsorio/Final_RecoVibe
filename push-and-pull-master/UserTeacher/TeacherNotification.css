@@ -15,6 +15,10 @@ body {
   background: var(--cream-50);
 }
 
+#notificationPage {
+  display: flex;
+}
+
 #notificationPage .sidebar .nav-icon {
   color: #d6ae4a;
 }

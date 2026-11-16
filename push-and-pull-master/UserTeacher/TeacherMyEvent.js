@@ -1024,7 +1024,7 @@ import { auth, rtdb, functions } from "../UserStudent/firebaseConfig.js";
     const roleEl = document.getElementById("userRole");
     const avatarEl = document.getElementById("userAvatar");
     if (nameEl) nameEl.textContent = name;
-    if (roleEl) roleEl.textContent = teacher.department || teacher.organization || "Faculty account";
+    if (roleEl) roleEl.textContent = "Teacher";
     if (avatarEl) {
       avatarEl.textContent = name.split(/\s+/).filter(Boolean).map((part) => part[0]).slice(0, 2).join("").toUpperCase();
     }

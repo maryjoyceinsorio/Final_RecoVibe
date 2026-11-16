@@ -11,7 +11,7 @@ service cloud.firestore {
     }
 
     function normalizeAccessKey(value) {
-      return value is string ? value.lower().replace("[^a-z0-9]", "") : "";
+      return value is string ? value.lower().replace(" ", "").replace("_", "").replace("-", "").replace(".", "") : "";
     }
 
     function normalizeOrganizationCode(value) {
@@ -24,6 +24,21 @@ service cloud.firestore {
       let status = normalizeAccessKey(profile.get("status", "Active"));
       return role in ["admin", "superadmin"]
         && !(status in ["disabled", "inactive", "suspended"]);
+    }
+
+    function isSuperAdminAccount() {
+      return (isAdminAccount()
+        && normalizeAccessKey(currentAdminProfile().get(
+          "role", currentAdminProfile().get("userRole", "")
+        )) == "superadmin")
+        || (signedIn() && request.auth.token.get("email", "") == "marv@gmail.com");
+    }
+
+    function isOsasAccount() {
+      let profile = currentAdminProfile();
+      let role = normalizeAccessKey(profile.get("role", profile.get("userRole", "")));
+      let status = normalizeAccessKey(profile.get("status", "Active"));
+      return role == "osas" && !(status in ["disabled", "inactive", "suspended"]);
     }
 
     function isOrganizationAdviser() {
@@ -41,17 +56,24 @@ service cloud.firestore {
       let organization = exists(adviserPath)
         ? get(adviserPath).data.get("organizationCode", "")
         : "";
-      let creatorUid = eventData.get("organizerUid", eventData.get("organizerId", eventData.get("createdBy", "__missing__")));
+      let creatorUid = eventData.get(
+        "organizerUid",
+        eventData.get("organizerId", eventData.get("createdBy", "__missing__"))
+      );
       let creatorOrganizationPath = /databases/$(database)/documents/eventOrganizations/$(creatorUid);
       let creatorProfilePath = /databases/$(database)/documents/adminUser/$(creatorUid);
       let creatorProfile = exists(creatorProfilePath) ? get(creatorProfilePath).data : {};
-      let creatorOrganization = creatorProfile.get("organizationCode", creatorProfile.get("orgCode", creatorProfile.get("organization", "")));
+      let creatorOrganization = creatorProfile.get(
+        "organizationCode",
+        creatorProfile.get("orgCode", creatorProfile.get("organization", ""))
+      );
       let verifiedCreatorOrganization = creatorOrganization != ""
         ? creatorOrganization
         : (exists(creatorOrganizationPath)
           ? get(creatorOrganizationPath).data.get("organizationCode", "")
           : "");
-      return organization != "" && normalizeOrganizationCode(verifiedCreatorOrganization) == normalizeOrganizationCode(organization)
+      return organization != ""
+        && normalizeOrganizationCode(verifiedCreatorOrganization) == normalizeOrganizationCode(organization)
         && (
           normalizeOrganizationCode(eventData.get("organizationCode", "")) == normalizeOrganizationCode(organization)
           || normalizeOrganizationCode(eventData.get("organizerOrganization", "")) == normalizeOrganizationCode(organization)
@@ -62,43 +84,48 @@ service cloud.firestore {
     }
 
     function isEventOrganizerAccount() {
-        let profile = currentAdminProfile();
-          let role = normalizeAccessKey(profile.get("role", profile.get("userRole", "")));
-          let organizationPath = /databases/$(database)/documents/eventOrganizations/$(request.auth.uid);
-          return exists(organizationPath)
-            || role in ["eventorganizer", "organizer", "eo"];
+      let profile = currentAdminProfile();
+      let role = normalizeAccessKey(profile.get("role", profile.get("userRole", "")));
+      let organizationPath = /databases/$(database)/documents/eventOrganizations/$(request.auth.uid);
+      return exists(organizationPath) || role in ["eventorganizer", "organizer", "eo"];
     }
 
     function organizerOrganizationMatches(eventData) {
-        let organizationPath = /databases/$(database)/documents/eventOrganizations/$(request.auth.uid);
-        let profile = currentAdminProfile();
-        let profileOrganization = profile.get("organizationCode", profile.get("orgCode", profile.get("organization", "")));
-        let organization = profileOrganization != ""
-          ? profileOrganization
-          : (exists(organizationPath)
-            ? get(organizationPath).data.get("organizationCode", "")
-            : "");
-        return organization != ""
-          && (
-            normalizeOrganizationCode(eventData.get("organizationCode", "")) == normalizeOrganizationCode(organization)
-            || normalizeOrganizationCode(eventData.get("organizerOrganization", "")) == normalizeOrganizationCode(organization)
-            || normalizeOrganizationCode(eventData.get("organization", "")) == normalizeOrganizationCode(organization)
-          );
+      let organizationPath = /databases/$(database)/documents/eventOrganizations/$(request.auth.uid);
+      let profile = currentAdminProfile();
+      let profileOrganization = profile.get(
+        "organizationCode", profile.get("orgCode", profile.get("organization", ""))
+      );
+      let organization = profileOrganization != ""
+        ? profileOrganization
+        : (exists(organizationPath)
+          ? get(organizationPath).data.get("organizationCode", "")
+          : "");
+      return organization != ""
+        && (
+          normalizeOrganizationCode(eventData.get("organizationCode", "")) == normalizeOrganizationCode(organization)
+          || normalizeOrganizationCode(eventData.get("organizerOrganization", "")) == normalizeOrganizationCode(organization)
+          || normalizeOrganizationCode(eventData.get("organization", "")) == normalizeOrganizationCode(organization)
+        );
     }
 
     function eventOwnerOrganizationMatches(eventData) {
-        let organizationPath = /databases/$(database)/documents/eventOrganizations/$(request.auth.uid);
-        let profile = currentAdminProfile();
-        let profileOrganization = profile.get("organizationCode", profile.get("orgCode", profile.get("organization", "")));
-        let organization = profileOrganization != ""
-          ? profileOrganization
-          : (exists(organizationPath)
-            ? get(organizationPath).data.get("organizationCode", "")
-            : "");
-        let eventOrganization = eventData.get("organizationCode", eventData.get("organizerOrganization", eventData.get("organization", "")));
-        return !isEventOrganizerAccount()
-          || (organization != "" && organization != "*"
-            && normalizeOrganizationCode(eventOrganization) == normalizeOrganizationCode(organization));
+      let organizationPath = /databases/$(database)/documents/eventOrganizations/$(request.auth.uid);
+      let profile = currentAdminProfile();
+      let profileOrganization = profile.get(
+        "organizationCode", profile.get("orgCode", profile.get("organization", ""))
+      );
+      let organization = profileOrganization != ""
+        ? profileOrganization
+        : (exists(organizationPath)
+          ? get(organizationPath).data.get("organizationCode", "")
+          : "");
+      let eventOrganization = eventData.get(
+        "organizationCode", eventData.get("organizerOrganization", eventData.get("organization", ""))
+      );
+      return !isEventOrganizerAccount()
+        || (organization != "" && organization != "*"
+          && normalizeOrganizationCode(eventOrganization) == normalizeOrganizationCode(organization));
     }
 
     function eventOwner(eventData) {
@@ -108,15 +135,20 @@ service cloud.firestore {
     }
 
     function eventIsPublished(eventData) {
-      return eventData.get("status", "") in ["approved", "Approved", "APPROVED", "published", "Published", "PUBLISHED", "completed", "Completed", "COMPLETED", "rescheduled", "Rescheduled", "RESCHEDULED"]
+      return eventData.get("status", "") in [
+          "approved", "Approved", "APPROVED", "published", "Published", "PUBLISHED",
+          "completed", "Completed", "COMPLETED", "rescheduled", "Rescheduled", "RESCHEDULED",
+          "cancelled", "Cancelled", "CANCELLED", "canceled", "Canceled"
+        ]
         || eventData.get("publicationStatus", "") in ["published", "Published", "PUBLISHED"]
         || eventData.get("published", false) == true
         || eventData.get("isPublished", false) == true;
     }
 
     function canReadEvent(eventData) {
-      return request.auth != null && (
-        (isOrganizationAdviser()
+      return signedIn() && (
+        isSuperAdminAccount()
+        || (isOrganizationAdviser()
           ? adviserOrganizationMatches(eventData)
           : (eventIsPublished(eventData)
             || (isEventOrganizerAccount()
@@ -126,43 +158,71 @@ service cloud.firestore {
     }
 
     function canManageEvent(eventData) {
-      return request.auth != null && (
+      return signedIn() && (
         (isOrganizationAdviser()
           ? adviserOrganizationMatches(eventData)
           : (eventOwner(eventData) || isAdminAccount()))
       );
     }
 
+    function isStaffAccount() {
+      let profile = currentAdminProfile();
+      let role = normalizeAccessKey(profile.get("role", profile.get("userRole", "")));
+      return signedIn()
+        && (
+          isAdminAccount()
+          || isEventOrganizerAccount()
+          || role in [
+            "teacher", "faculty", "adviser", "advisor", "orgadv", "hap", "osas",
+            "labhead", "qaccoordinator", "propertycustodian", "administrativeofficer"
+          ]
+        );
+    }
+
+    function canReadManagedEventRegistrations(eventId) {
+      let eventPath = /databases/$(database)/documents/events/$(eventId);
+      return isStaffAccount()
+        && exists(eventPath)
+        && canManageEvent(get(eventPath).data);
+    }
+
     match /users/{userId} {
       allow read: if true;
       allow write: if signedIn();
     }
+
     match /adminUser/{userId} {
-      allow read: if request.auth != null;
-      allow create, update, delete: if request.auth != null && isAdminAccount()
-        && normalizeAccessKey(currentAdminProfile().get("role", currentAdminProfile().get("userRole", ""))) == "superadmin";
+      allow read: if signedIn();
+      allow create, update, delete: if signedIn()
+        && isSuperAdminAccount();
+      allow update: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(["lastActiveAt", "isLoggedIn"]);
     }
+
     match /approverOrganizations/{userId} {
-      allow read: if request.auth != null && request.auth.uid == userId;
+      allow read: if signedIn() && request.auth.uid == userId;
       allow write: if false;
     }
+
     match /eventOrganizations/{userId} {
-      allow read: if request.auth != null && request.auth.uid == userId;
+      allow read: if signedIn() && request.auth.uid == userId;
       allow write: if false;
     }
+
     match /system_settings/{settingsId} {
-      allow read: if request.auth != null
-        && (isAdminAccount()
+      allow read: if signedIn()
+        && (
+          isAdminAccount()
           || isEventOrganizerAccount()
           || normalizeAccessKey(
             currentAdminProfile().get("role", currentAdminProfile().get("userRole", ""))
-          ) in ["teacher", "faculty"]);
-      allow create, update, delete: if request.auth != null
-        && isAdminAccount()
-        && normalizeAccessKey(
-          currentAdminProfile().get("role", currentAdminProfile().get("userRole", ""))
-        ) == "superadmin";
+          ) in ["teacher", "faculty"]
+        );
+      allow create, update, delete: if signedIn() && isSuperAdminAccount();
     }
+
     match /notifications/{notificationId} {
       function matchesStudentRecipient(recipient) {
         let profilePath = /databases/$(database)/documents/users/$(request.auth.uid);
@@ -186,7 +246,7 @@ service cloud.firestore {
         let userId = resource.data.get("userId", "");
         let organizerUid = resource.data.get("organizerUid", "");
         let organizerId = resource.data.get("organizerId", "");
-        return request.auth != null && (
+        return signedIn() && (
           recipientUid == request.auth.uid
           || matchesStudentRecipient(recipientUid)
           || recipientUserId == request.auth.uid
@@ -203,7 +263,7 @@ service cloud.firestore {
       }
 
       function isAdminNotification() {
-        return request.auth != null
+        return signedIn()
           && isAdminAccount()
           && resource.data.get("recipientRole", "") == "admin";
       }
@@ -213,7 +273,9 @@ service cloud.firestore {
       }
 
       allow read: if canManageNotification();
-      allow create: if false;
+      allow create: if signedIn()
+        && (isStaffAccount()
+          || request.resource.data.get("userId", "") == request.auth.uid);
       allow update: if canManageNotification()
         && request.resource.data.diff(resource.data).affectedKeys()
           .hasOnly(["read", "readAt", "deletedAt"])
@@ -228,40 +290,55 @@ service cloud.firestore {
         );
       allow delete: if canManageNotification();
     }
+
     match /events/{eventId} {
       allow read: if canReadEvent(resource.data);
+
       allow create: if canManageEvent(request.resource.data)
-        && (isOrganizationAdviser() || eventOwnerOrganizationMatches(request.resource.data));
-      allow update: if canManageEvent(resource.data) && canManageEvent(request.resource.data)
-        && (isOrganizationAdviser() || eventOwnerOrganizationMatches(request.resource.data));
+        && (
+          isOrganizationAdviser()
+          || eventOwnerOrganizationMatches(request.resource.data)
+        );
+
+      allow update: if (
+          canManageEvent(resource.data)
+          && canManageEvent(request.resource.data)
+          && (
+            isOrganizationAdviser()
+            || eventOwnerOrganizationMatches(request.resource.data)
+          )
+        );
+
       allow delete: if canManageEvent(resource.data)
-        && (isOrganizationAdviser() || eventOwnerOrganizationMatches(resource.data));
+        && (
+          isOrganizationAdviser()
+          || eventOwnerOrganizationMatches(resource.data)
+        );
 
       match /registrations/{userId} {
         function eventIsPublished() {
           let event = get(/databases/$(database)/documents/events/$(eventId)).data;
           let status = event.get("status", "");
           let publicationStatus = event.get("publicationStatus", "");
-          return status == "published"
-            || status == "Published"
-            || status == "PUBLISHED"
-            || publicationStatus == "published"
-            || publicationStatus == "Published"
-            || publicationStatus == "PUBLISHED"
+          return status in ["published", "Published", "PUBLISHED"]
+            || publicationStatus in ["published", "Published", "PUBLISHED"]
             || event.get("published", false) == true
             || event.get("isPublished", false) == true;
         }
 
-        allow read: if request.auth != null
-          && request.auth.uid == userId;
+        allow read: if signedIn()
+          && (
+            request.auth.uid == userId
+            || canReadManagedEventRegistrations(eventId)
+          );
 
-        allow create: if request.auth != null
+        allow create: if signedIn()
           && request.auth.uid == userId
           && eventIsPublished()
           && request.resource.data.uid == request.auth.uid
           && request.resource.data.status == "registered";
 
-        allow update: if request.auth != null
+        allow update: if signedIn()
           && request.auth.uid == userId
           && eventIsPublished()
           && resource.data.uid == request.auth.uid
@@ -281,8 +358,45 @@ service cloud.firestore {
     }
 
     match /{path=**}/registrations/{registrationId} {
-      allow read: if request.auth != null
+      allow read: if signedIn()
         && resource.data.uid == request.auth.uid;
+    }
+
+    match /audit_logs/{entryId} {
+      allow read: if isSuperAdminAccount();
+      allow create: if signedIn()
+        && (isStaffAccount()
+          || request.resource.data.get("userId", "") == request.auth.uid);
+      allow update, delete: if false;
+    }
+
+    match /correctionRequests/{requestId} {
+      allow create: if signedIn()
+        && request.resource.data.requesterUid == request.auth.uid
+        && request.resource.data.status == "pending"
+        && request.resource.data.reason is string
+        && request.resource.data.reason.size() >= 10
+        && request.resource.data.reason.size() <= 500
+        && request.resource.data.requestedValue is string
+        && request.resource.data.requestedValue.size() >= 1
+        && request.resource.data.requestedValue.size() <= 200;
+      allow read: if signedIn()
+        && (resource.data.get("requesterUid", "") == request.auth.uid
+          || isAdminAccount()
+          || isOsasAccount());
+      allow update: if signedIn()
+        && (isAdminAccount() || isOsasAccount())
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "status", "reviewedBy", "reviewedByName", "reviewedAt",
+          "reviewNote", "updatedAt"
+        ]);
+      allow delete: if false;
+    }
+
+    // Login page reads this before sign-in (maintenance flag only)
+    match /systemSettings/{settingsId} {
+      allow read: if true;
+      allow write: if isSuperAdminAccount();
     }
   }
 }

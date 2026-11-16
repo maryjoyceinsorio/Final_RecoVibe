@@ -13,6 +13,7 @@ import {
   getDoc,
   onSnapshot as onFirestoreSnapshot,
   query,
+  serverTimestamp,
   updateDoc,
   where,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -20,8 +21,10 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
 
 (() => {
   "use strict";
+  const DEBUG = false;
   let profile = {};
   const root = document.getElementById("notificationRoot"),
+    correctionPanel = document.getElementById("correctionReviewPanel"),
     lifetime = 30 * 86400000;
   let filter = "all",
     deleted = false,
@@ -30,6 +33,7 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
     undoTimer,
     currentAdminUid = null,
     currentAdminEmail = "",
+    currentAdminName = "",
     key = "",
     trashKey = "",
     currentAdminOrganizationCodes = [],
@@ -48,7 +52,26 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
     authStartupTimer = null,
     authStartupExpired = false,
     undoDeleteItem = null,
-    pendingWrites = new Set();
+    pendingWrites = new Set(),
+    correctionReviewNotes = new Map(),
+    correctionReviewErrors = new Map(),
+    correctionReviewPending = new Set(),
+    correctionPanelOpen = false,
+    correctionHistoryExpanded = false,
+    correctionPanelReturnFocus = null;
+  let notificationController = null,
+    sharedNotificationState = {
+      items: [],
+      allItems: [],
+      trash: [],
+      unreadCount: 0,
+      loading: true,
+      error: "",
+      correctionRequests: [],
+      correctionRequestsLoading: true,
+      correctionRequestsError: "",
+    },
+    authStateHandler = null;
   document.querySelector(".admin-logout").onclick = async (event) => {
     event.preventDefault();
     try {
@@ -244,7 +267,7 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
       currentAdminDepartmentCodes.includes(code),
     );
   }
-  function snapshots() {
+  function legacySnapshots() {
     const current = read(key, []),
       known = new Set(
         Array.isArray(current) ? current.map((item) => item.id) : [],
@@ -361,6 +384,34 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
         !deletedIds.has(String(item.id)) &&
         !permanentlyDeletedIds.has(String(item.id)),
     );
+  }
+
+  function snapshots() {
+    return sharedNotificationState.items;
+  }
+
+  async function startSharedNotificationData() {
+    notificationController?.stop();
+    try {
+      const { subscribeAdminNotifications } = await import("./AdminNotificationData.js");
+      notificationController = subscribeAdminNotifications((state) => {
+        sharedNotificationState = state;
+        firestoreNotificationsLoading = state.loading;
+        firestoreNotificationsError = state.error;
+        render();
+        renderCorrectionPanel();
+      });
+    } catch (error) {
+      sharedNotificationState = {
+        ...sharedNotificationState,
+        loading: false,
+        error: "Notifications are unavailable. Please retry.",
+        correctionRequestsLoading: false,
+        correctionRequestsError: "Correction requests are unavailable. Please retry.",
+      };
+      document.querySelectorAll("[data-notification-count]").forEach((badge) => { badge.hidden = true; });
+      render();
+    }
   }
 
   function subscribeToRtdbNotifications(uid) {
@@ -578,7 +629,10 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
     if (value && typeof value.toMillis === "function") return new Date(value.toMillis());
     if (value && typeof value.seconds === "number") return new Date(value.seconds * 1000);
     if (value instanceof Date) return Number.isFinite(value.getTime()) ? value : null;
-    if (typeof value === "number" && Number.isFinite(value)) return new Date(value);
+    if (typeof value === "number" && Number.isFinite(value)) {
+      const date = new Date(value);
+      return Number.isFinite(date.getTime()) ? date : null;
+    }
     if (typeof value === "string" && value.trim()) {
       const dateOnly = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
       if (dateOnly) return new Date(+dateOnly[1], +dateOnly[2] - 1, +dateOnly[3]);
@@ -603,6 +657,142 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
     const days = Math.floor(diff / 86400000);
     return days < 7 ? `${days} days ago` : `${Math.floor(days / 7)} weeks ago`;
   }
+  function correctionRequestTime(request) {
+    const millis = Number(request.createdAtMs);
+    if (Number.isFinite(millis)) return millis;
+    return notificationDate(request.createdAt)?.getTime() || 0;
+  }
+  function sortedCorrectionRequests(requests) {
+    return [...requests].sort((a, b) =>
+      correctionRequestTime(b) - correctionRequestTime(a) ||
+      (notificationDate(b.createdAt)?.getTime() || 0) - (notificationDate(a.createdAt)?.getTime() || 0),
+    );
+  }
+  function correctionRequestDate(request) {
+    const date = notificationDate(request.createdAtMs ?? request.createdAt);
+    return date
+      ? new Intl.DateTimeFormat("en-US", {
+          timeZone: "Asia/Manila",
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+        }).format(date)
+      : "Date unavailable";
+  }
+  function renderCorrectionPanel() {
+    if (!correctionPanel || !correctionPanelOpen) return;
+    const requests = sortedCorrectionRequests(sharedNotificationState.correctionRequests || []);
+    const pending = requests.filter((request) => String(request.status || "").trim().toLowerCase() === "pending");
+    const history = requests.filter((request) => ["resolved", "rejected"].includes(String(request.status || "").trim().toLowerCase()));
+    const reviewCards = pending.map((request) => {
+      const id = esc(request.id);
+      const isSaving = correctionReviewPending.has(request.id);
+      const error = correctionReviewErrors.get(request.id);
+      const note = correctionReviewNotes.get(request.id) || "";
+      return `<article class="correction-review-card">
+        <header><div><h3>${esc(request.requesterName || "Teacher")}</h3><p>${esc(request.requesterEmail || "")}</p></div><span class="correction-status is-pending">Pending</span></header>
+        <dl><div><dt>Role</dt><dd>${esc(request.role || "Teacher")}</dd></div><div><dt>Field</dt><dd>${esc(request.fieldLabel || request.field || "Detail")}</dd></div><div><dt>Current value</dt><dd>${esc(request.currentValue ?? "")}</dd></div><div><dt>Requested value</dt><dd>${esc(request.requestedValue ?? "")}</dd></div></dl>
+        <p class="correction-review-reason"><strong>Why it is wrong</strong><span>${esc(request.reason || "")}</span></p>
+        <label class="correction-review-note">Reviewer note (optional)<textarea maxlength="300" rows="2" data-review-note="${id}" ${isSaving ? "disabled" : ""}>${esc(note)}</textarea></label>
+        ${error ? `<p class="correction-review-error" role="alert">${esc(error.message)} <button type="button" data-review-retry="${id}" data-review-status="${esc(error.status)}">Retry</button></p>` : ""}
+        <div class="correction-review-actions"><button type="button" data-review-action="resolved" data-request-id="${id}" ${isSaving ? "disabled" : ""}>${isSaving ? "Saving..." : "Mark resolved"}</button><button type="button" class="is-reject" data-review-action="rejected" data-request-id="${id}" ${isSaving ? "disabled" : ""}>Reject</button></div>
+      </article>`;
+    }).join("");
+    const historyCards = history.map((request) => {
+      const status = String(request.status || "").trim().toLowerCase();
+      const statusLabel = status === "resolved" ? "Resolved" : "Rejected";
+      return `<article class="correction-history-card"><div><strong>${esc(request.requesterName || "Teacher")} - ${esc(request.fieldLabel || request.field || "Detail")}</strong><span>${esc(request.currentValue ?? "")} -&gt; ${esc(request.requestedValue ?? "")}</span><small>${esc(correctionRequestDate(request))}</small>${request.reviewNote ? `<p>${esc(request.reviewNote)}</p>` : ""}</div><span class="correction-status is-${status}">${statusLabel}</span></article>`;
+    }).join("");
+    const loadingMarkup = sharedNotificationState.correctionRequestsLoading
+      ? '<div class="correction-review-skeleton" role="status"><span></span><span></span><span></span></div>'
+      : "";
+    const errorMarkup = sharedNotificationState.correctionRequestsError
+      ? `<div class="correction-review-state" role="alert"><p>${esc(sharedNotificationState.correctionRequestsError)}</p><button type="button" data-retry-correction-requests>Retry</button></div>`
+      : "";
+    const body = sharedNotificationState.correctionRequestsLoading
+      ? loadingMarkup
+      : errorMarkup || (requests.length
+        ? `<p class="correction-review-hint">Update the teacher's record in User Management if you approve this.</p><section class="correction-pending-list" aria-label="Pending correction requests">${reviewCards || '<p class="correction-review-empty">No pending correction requests.</p>'}</section>${history.length ? `<details class="correction-history"${correctionHistoryExpanded ? " open" : ""}><summary>History (${history.length})</summary><div>${historyCards}</div></details>` : ""}`
+        : '<p class="correction-review-empty">No correction requests</p>');
+    correctionPanel.innerHTML = `<div class="correction-review-dialog" role="dialog" aria-modal="true" aria-labelledby="correctionReviewTitle"><header class="correction-review-header"><div><h2 id="correctionReviewTitle">Teacher correction requests</h2><p>Review and record a decision. Teacher records are not changed automatically.</p></div><button type="button" class="correction-review-close" data-close-correction-panel aria-label="Close review panel">&times;</button></header><div class="correction-review-content">${body}</div></div>`;
+    correctionPanel.querySelector("[data-close-correction-panel]").onclick = closeCorrectionPanel;
+    correctionPanel.onclick = (event) => {
+      if (event.target === correctionPanel) closeCorrectionPanel();
+    };
+    correctionPanel.querySelectorAll("[data-review-note]").forEach((textarea) => {
+      textarea.oninput = () => correctionReviewNotes.set(textarea.dataset.reviewNote, textarea.value);
+    });
+    correctionPanel.querySelectorAll("[data-review-action]").forEach((button) => {
+      button.onclick = () => reviewCorrectionRequest(button.dataset.requestId, button.dataset.reviewAction);
+    });
+    correctionPanel.querySelectorAll("[data-review-retry]").forEach((button) => {
+      button.onclick = () => reviewCorrectionRequest(button.dataset.reviewRetry, button.dataset.reviewStatus, true);
+    });
+    correctionPanel.querySelectorAll("[data-retry-correction-requests]").forEach((button) => {
+      button.onclick = () => notificationController
+        ? notificationController.retryCorrectionRequests()
+        : startSharedNotificationData();
+    });
+    const historyDetails = correctionPanel.querySelector(".correction-history");
+    if (historyDetails) {
+      historyDetails.ontoggle = () => { correctionHistoryExpanded = historyDetails.open; };
+    }
+  }
+  function openCorrectionPanel() {
+    correctionPanelReturnFocus = document.activeElement;
+    correctionPanelOpen = true;
+    correctionPanel.hidden = false;
+    renderCorrectionPanel();
+    correctionPanel.querySelector("[data-close-correction-panel]")?.focus();
+  }
+  function closeCorrectionPanel() {
+    correctionPanelOpen = false;
+    correctionPanel.hidden = true;
+    correctionPanelReturnFocus?.focus?.();
+  }
+  async function reviewCorrectionRequest(requestId, status, retry = false) {
+    const request = (sharedNotificationState.correctionRequests || []).find((item) => item.id === requestId);
+    if (!request || correctionReviewPending.has(requestId)) return;
+    if (status === "rejected" && !retry && !window.confirm("Reject this correction request?")) return;
+    const reviewNote = String(correctionReviewNotes.get(requestId) || "").trim().slice(0, 300);
+    correctionReviewPending.add(requestId);
+    correctionReviewErrors.delete(requestId);
+    renderCorrectionPanel();
+    try {
+      await updateDoc(doc(db, "correctionRequests", requestId), {
+        status,
+        reviewedBy: currentAdminUid,
+        reviewedByName: currentAdminName,
+        reviewedAt: serverTimestamp(),
+        reviewNote,
+        updatedAt: serverTimestamp(),
+      });
+      correctionReviewNotes.delete(requestId);
+      showCorrectionToast(status === "resolved" ? "Request marked resolved." : "Request rejected.");
+    } catch (error) {
+      if (DEBUG) console.debug("[correction-review] update failed", error.code || error);
+      const message = error.code === "permission-denied"
+        ? "You don't have permission to review this request."
+        : "Couldn't save the review. Check your connection and try again.";
+      correctionReviewErrors.set(requestId, { message, status });
+      showCorrectionToast(message, () => reviewCorrectionRequest(requestId, status, true));
+    } finally {
+      correctionReviewPending.delete(requestId);
+      renderCorrectionPanel();
+    }
+  }
+  function showCorrectionToast(message, retry) {
+    const toast = document.querySelector(".admin-toast");
+    if (!toast) return;
+    toast.innerHTML = `${esc(message)}${retry ? ' <button type="button">Retry</button>' : ""}`;
+    toast.hidden = false;
+    const button = toast.querySelector("button");
+    if (button) button.onclick = retry;
+    if (!retry) setTimeout(() => { toast.hidden = true; }, 5000);
+  }
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && correctionPanelOpen) closeCorrectionPanel();
+  });
   function notificationGroup(item) {
     const date = notificationDate(item.createdAt);
     if (!date) return "Earlier";
@@ -620,6 +810,7 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
       cancellation: "Cancellation",
       conflict: "Venue conflict",
       decision: "Review decision",
+      "correction-request": "Correction request",
     })[type] || "";
   }
   function notificationIcon(type) {
@@ -649,11 +840,9 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
   function render() {
     try {
       let live = snapshots(),
-        trash = read(trashKey, []);
-      trash = Array.isArray(trash)
-        ? trash.filter((item) => item.expiresAt > Date.now())
-        : [];
-      localStorage.setItem(trashKey, JSON.stringify(trash));
+        trash = sharedNotificationState.trash.filter((item) => item.expiresAt > Date.now());
+      const retainedTrash = read(trashKey, []).filter((item) => item.expiresAt > Date.now());
+      localStorage.setItem(trashKey, JSON.stringify(retainedTrash));
       const source = deleted ? trash : live;
       const visible = source.filter(
         (item) =>
@@ -665,7 +854,12 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
             filter === "all" ||
             (filter === "read" ? item.read : !item.read)),
       );
-      const unreadCount = live.filter((item) => !item.read).length;
+      const unreadCount = sharedNotificationState.unreadCount;
+      const pendingCorrectionCount = (sharedNotificationState.correctionRequests || [])
+        .filter((request) => String(request.status || "").trim().toLowerCase() === "pending").length;
+      const correctionReviewButton = deleted
+        ? ""
+        : `<button type="button" class="correction-review-open" data-open-corrections>Review correction requests${pendingCorrectionCount ? ` (${pendingCorrectionCount})` : ""}</button>`;
       const visibleMarkup = deleted
         ? ["Today", "This week", "Earlier"].map((group) => {
             const items = visible.filter((item) => notificationGroup(item) === group);
@@ -680,23 +874,20 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
               : "";
           }).join("");
       const emptyMarkup = `<div class="notification-state"><span class="notification-state-icon" aria-hidden="true">${notificationIcon("default")}</span><strong>${deleted ? "Recently Deleted is empty" : filter === "unread" ? "No unread notifications" : "You have no notifications"}</strong><p>${deleted ? "Notifications you delete will wait here for 30 days before they are removed." : filter === "unread" ? "Everything has been read. Nice work." : "New notifications will show up here."}</p></div>`;
-      root.innerHTML = `<section class="admin-notifications"><header class="notifications-header"><h1>Notifications</h1></header><div class="notification-controls"><nav class="notification-tabs" aria-label="Notification view"><button type="button" data-filter="all" class="${filter !== "unread" ? "is-active" : ""}" aria-pressed="${filter !== "unread"}">All</button><button type="button" data-filter="unread" class="${filter === "unread" ? "is-active" : ""}" aria-pressed="${filter === "unread"}">Unread <span>${unreadCount}</span></button></nav><label class="notification-read-filter">Show <select id="notificationReadFilter" aria-label="Show notifications"><option value="all" ${filter === "all" || filter === "unread" ? "selected" : ""}>All</option><option value="read" ${filter === "read" ? "selected" : ""}>Read</option></select></label><div class="notification-actions"><button type="button" id="markRead" ${deleted ? (trash.length ? "" : "disabled") : (unreadCount ? "" : "disabled")}>${deleted ? "Empty trash" : "Mark all as read"}</button><button type="button" id="toggleTrash" class="notification-trash-button${deleted ? " is-active" : ""}" aria-label="${deleted ? "Return to notifications" : "Open Recently Deleted"}" aria-pressed="${deleted}" title="Recently Deleted"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h12M8 6V4.5h4V6m-6.5 0 .7 10h7.6l-.7-10M8.5 9v4m3-4v4"/></svg></button></div></div><label class="notification-search"><span>Search notifications</span><input id="notificationSearch" type="search" placeholder="Search notifications" aria-label="Search notifications" value="${esc(search)}"></label><section class="admin-section"><div class="admin-cards">${visibleMarkup || emptyMarkup}</div></section></section>`;
-      if (firestoreNotificationsError) {
+      root.innerHTML = `<section class="admin-notifications"><header class="notifications-header"><h1>Notifications</h1>${correctionReviewButton}</header><div class="notification-controls"><nav class="notification-tabs" aria-label="Notification view"><button type="button" data-filter="all" class="${filter !== "unread" ? "is-active" : ""}" aria-pressed="${filter !== "unread"}">All</button><button type="button" data-filter="unread" class="${filter === "unread" ? "is-active" : ""}" aria-pressed="${filter === "unread"}">Unread <span>${unreadCount}</span></button></nav><label class="notification-read-filter">Show <select id="notificationReadFilter" aria-label="Show notifications"><option value="all" ${filter === "all" || filter === "unread" ? "selected" : ""}>All</option><option value="read" ${filter === "read" ? "selected" : ""}>Read</option></select></label><div class="notification-actions"><button type="button" id="markRead" ${deleted ? (trash.length ? "" : "disabled") : (unreadCount ? "" : "disabled")}>${deleted ? "Empty trash" : "Mark all as read"}</button><button type="button" id="toggleTrash" class="notification-trash-button${deleted ? " is-active" : ""}" aria-label="${deleted ? "Return to notifications" : "Open Recently Deleted"}" aria-pressed="${deleted}" title="Recently Deleted"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h12M8 6V4.5h4V6m-6.5 0 .7 10h7.6l-.7-10M8.5 9v4m3-4v4"/></svg></button></div></div><label class="notification-search"><span>Search notifications</span><input id="notificationSearch" type="search" placeholder="Search notifications" aria-label="Search notifications" value="${esc(search)}"></label><section class="admin-section"><div class="admin-cards">${visibleMarkup || emptyMarkup}</div></section></section>`;
+      if (sharedNotificationState.error) {
         root.insertAdjacentHTML(
           "afterbegin",
-          `<div class="admin-error" role="alert">${esc(firestoreNotificationsError)}${currentAdminUid ? ' <button class="admin-row-action" id="retryFirestoreNotifications">Retry</button>' : ""}</div>`,
+          `<div class="admin-error" role="alert">${esc(sharedNotificationState.error)}${currentAdminUid ? ' <button class="admin-row-action" id="retryFirestoreNotifications">Retry</button>' : ""}</div>`,
         );
-      } else if (firestoreNotificationsLoading) {
+      } else if (sharedNotificationState.loading) {
         root.insertAdjacentHTML(
           "afterbegin",
-          '<div class="admin-loading" role="status">Loading proposal notifications...</div>',
+          '<div class="admin-loading" role="status">Loading notifications...</div>',
         );
       }
-      document.querySelector("[data-notification-count]").textContent = String(unreadCount);
-      document.querySelector("[data-notification-count]").hidden = !live.some(
-        (item) => !item.read,
-      );
       wire();
+      renderCorrectionPanel();
     } catch (error) {
       root.innerHTML =
         '<div class="admin-error">Could not load notifications. <button class="admin-row-action" id="retryNotifications">Retry</button></div>';
@@ -705,9 +896,11 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
   }
   function save(list) {
     localStorage.setItem(key, JSON.stringify(list));
+    notificationController?.refresh();
   }
   function saveTrash(list) {
     localStorage.setItem(trashKey, JSON.stringify(list));
+    notificationController?.refresh();
   }
   function rememberPermanentDeletion(ids) {
     const storageKey = `recovibeAdminPermanentlyDeleted:${currentAdminUid}`;
@@ -715,31 +908,14 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
     const values = new Set(Array.isArray(saved) ? saved.map(String) : []);
     ids.forEach((id) => values.add(String(id)));
     localStorage.setItem(storageKey, JSON.stringify([...values]));
+    notificationController?.refresh();
   }
   async function setReadState(item, readState) {
     if (!item || pendingWrites.has(item.id)) return false;
     pendingWrites.add(item.id);
     render();
     try {
-      if (item.source === "firestore") {
-        await updateDoc(doc(db, "notifications", item.id), { read: readState });
-        firestoreNotifications = firestoreNotifications.map((entry) =>
-          entry.id === item.id ? { ...entry, read: readState } : entry,
-        );
-      } else if (item.source === "rtdb" && currentAdminUid && rtdb) {
-        await update(ref(rtdb, `notifications/${currentAdminUid}/${item.id}`), {
-          read: readState,
-        });
-        rtdbNotifications = rtdbNotifications.map((entry) =>
-          entry.id === item.id ? { ...entry, read: readState } : entry,
-        );
-      }
-      const localList = read(key, []);
-      const localItem = localList.find((entry) => entry.id === item.id);
-      if (localItem) {
-        localItem.read = readState;
-        save(localList);
-      }
+      if (notificationController) await notificationController.setReadState(item, readState);
       return true;
     } catch (error) {
       console.error("Could not update notification read state:", error);
@@ -772,12 +948,14 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
     }
   }
   function wire() {
+    const openCorrectionsButton = root.querySelector("[data-open-corrections]");
+    if (openCorrectionsButton) openCorrectionsButton.onclick = openCorrectionPanel;
     const retryFirestoreNotifications = root.querySelector(
       "#retryFirestoreNotifications",
     );
     if (retryFirestoreNotifications) {
       retryFirestoreNotifications.onclick = () =>
-        subscribeToFirestoreNotifications(currentAdminUid);
+        notificationController ? notificationController.retry() : startSharedNotificationData();
     }
     root.querySelector("#notificationSearch").oninput = (event) => {
       search = event.target.value;
@@ -800,7 +978,7 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
     };
     root.querySelector("#markRead").onclick = async () => {
       if (deleted) {
-        const trash = read(trashKey, []);
+        const trash = sharedNotificationState.trash;
         const count = trash.length;
         if (!count || !window.confirm(`Permanently delete all ${count} notifications? This cannot be undone.`)) return;
         root.querySelector("#markRead").disabled = true;
@@ -815,24 +993,7 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
       undoDeleteItem = null;
       root.querySelector("#markRead").disabled = true;
       try {
-        if (currentAdminUid && rtdb) {
-        const updates = {};
-        rtdbNotifications.forEach((it) => {
-          if (!it.read) updates[`notifications/${currentAdminUid}/${it.id}/read`] = true;
-        });
-        if (Object.keys(updates).length > 0) {
-            await update(ref(rtdb), updates);
-          }
-        }
-        if (db && currentAdminUid) {
-          await Promise.all(
-            firestoreNotifications
-              .filter((item) => !item.read)
-              .map((item) => updateDoc(doc(db, "notifications", item.id), { read: true })),
-          );
-        }
-        const localList = read(key, []);
-        save(localList.map((item) => ({ ...item, read: true })));
+        for (const item of unread) await setReadState(item, true);
         toastUndo("All notifications marked as read.");
       } catch (error) {
         console.error("Could not mark notifications as read:", error);
@@ -898,6 +1059,10 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
         if (!item) return;
         const updated = await setReadState(item, true);
         if (!updated) return;
+        if (item.type === "correction-request") {
+          openCorrectionPanel();
+          return;
+        }
         const proposalId = item.proposalId || item.eventId;
         if (proposalId) {
           const reviewUrl = new URL("AdminApproval.html", window.location.href);
@@ -992,7 +1157,7 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
   }, 15000);
   let stopAuthListener = null;
   if (auth) {
-    stopAuthListener = onAuthStateChanged(auth, async (user) => {
+    authStateHandler = async (user) => {
       if (authStartupExpired) return;
       if (user) {
         try {
@@ -1017,7 +1182,12 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
           }
           profile = { ...userProfile, ...adminProfile };
           const role = String(profile.role || profile.userRole || "").trim().toLowerCase().replace(/[\s_-]+/g, "");
-          if (role !== "admin") {
+          const canAccessNotifications = ["admin", "superadmin", "systemadmin", "systemwideadmin"].includes(role) ||
+            profile.isSuperAdmin === true ||
+            profile.isSystemAdmin === true ||
+            role === "osas" ||
+            getApprovalPosition(profile).toLowerCase().includes("osas");
+          if (!canAccessNotifications) {
             clearTimeout(authStartupTimer);
             authStartupTimer = null;
             await signOut(auth);
@@ -1025,6 +1195,7 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
             return;
           }
           const name = profile.name || [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(" ") || user.displayName || user.email?.split("@")[0] || "";
+          currentAdminName = String(name).trim();
           document.querySelector("[data-name]").textContent = name.toUpperCase();
           document.querySelector("[data-avatar]").textContent = name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
           const roleElement = document.querySelector("[data-role]");
@@ -1042,110 +1213,36 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
         currentAdminEmail = String(user.email || "").trim().toLowerCase();
         key = `recovibeAdminNotifications:${currentAdminUid}`;
         trashKey = `recovibeAdminDeletedNotifications:${currentAdminUid}`;
-        currentAdminOrganizationCodes = getNotificationProfileValues(profile, [
-          "organizationCode",
-          "organizationId",
-          "orgCode",
-          "orgId",
-          "organization",
-          "organizationName",
-          "orgName",
-          "organizations",
-          "courseOrganization",
-          "courseOrganizations",
-        ]);
-        currentAdminDepartmentCodes = getNotificationProfileValues(profile, [
-          "departmentCode",
-          "departmentId",
-          "department",
-          "departments",
-          "departmentIds",
-          "course",
-        ]);
-        if (db) {
-          try {
-            const [adminProfileSnapshot, approverOrganizationSnapshot] =
-              await Promise.all([
-                getDoc(doc(db, "adminUser", user.uid)),
-                getDoc(doc(db, "approverOrganizations", user.uid)),
-              ]);
-            if (authStartupExpired) return;
-            if (auth.currentUser?.uid !== user.uid) return;
-            const adminProfile = adminProfileSnapshot.exists()
-              ? adminProfileSnapshot.data() || {}
-              : {};
-            const approverOrganization = approverOrganizationSnapshot.exists()
-              ? approverOrganizationSnapshot.data() || {}
-              : {};
-            currentAdminOrganizationCodes = [
-              ...new Set([
-                ...currentAdminOrganizationCodes,
-                ...getNotificationProfileValues(adminProfile, [
-                  "organizationCode",
-                  "organizationId",
-                  "orgCode",
-                  "orgId",
-                  "organization",
-                  "organizationName",
-                  "orgName",
-                  "organizations",
-                  "courseOrganization",
-                  "courseOrganizations",
-                ]),
-                ...getNotificationProfileValues(approverOrganization, [
-                  "organizationCode",
-                  "organizationId",
-                  "orgCode",
-                  "orgId",
-                  "organization",
-                  "organizationName",
-                  "orgName",
-                  "organizations",
-                ]),
-              ]),
-            ];
-            currentAdminDepartmentCodes = [
-              ...new Set([
-                ...currentAdminDepartmentCodes,
-                ...getNotificationProfileValues(adminProfile, [
-                  "departmentCode",
-                  "departmentId",
-                  "department",
-                  "departments",
-                  "departmentIds",
-                  "course",
-                ]),
-              ]),
-            ];
-          } catch (error) {
-            if (authStartupExpired) return;
-            console.error("Could not load the signed-in admin's organization profile:", error);
-          }
-        }
         clearTimeout(authStartupTimer);
         authStartupTimer = null;
         if (auth.currentUser?.uid !== user.uid) return;
-        render();
-        subscribeToRtdbNotifications(user.uid);
-        subscribeToFirestoreNotifications(user.uid);
+        if (!notificationController) await startSharedNotificationData();
         subscribeToQueue(user.uid);
       } else {
         clearTimeout(authStartupTimer);
         authStartupTimer = null;
         location.replace("AdminLogin.html");
       }
-    });
+    };
+    stopAuthListener = onAuthStateChanged(auth, authStateHandler);
   } else {
     clearTimeout(authStartupTimer);
     authStartupTimer = null;
     location.replace("AdminLogin.html");
   }
-  window.addEventListener("beforeunload", () => {
+  const stopPageListeners = () => {
     clearTimeout(authStartupTimer);
     clearTimeout(firestoreLoadTimer);
     if (notifListenerRef) off(notifListenerRef);
     if (queueListenerRef) off(queueListenerRef);
     firestoreNotifUnsubscribes.forEach((unsubscribe) => unsubscribe());
     stopAuthListener?.();
+    stopAuthListener = null;
+  };
+  window.addEventListener("pagehide", stopPageListeners);
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted && auth && !stopAuthListener) {
+      stopAuthListener = onAuthStateChanged(auth, authStateHandler);
+    }
   });
 })();

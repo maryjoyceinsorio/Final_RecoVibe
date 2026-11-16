@@ -1,8 +1,7 @@
-import { auth, authReady, db, rtdb, functions, isFirebaseConfigured, isRtdbConfigured } from "../UserStudent/firebaseConfig.js";
+import { auth, authReady, db, rtdb, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
 import { onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import { ref, onValue, off, get, child, set } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
-import { collection, getDocs, doc, getDoc, query, where } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
+import { ref, onValue, off, get, set } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+import { collection, getDocs, doc, getDoc, or, query, serverTimestamp, updateDoc, where } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 // DOM Element References
 const organizerTodayDate = document.getElementById("organizerTodayDate");
@@ -86,39 +85,127 @@ let organizerUid = "";
 let organizerDisplayName = "";
 let eventsRefreshTimer = null;
 let eventLoadInProgress = false;
+function showEventLoadFailure(error) {
+  const details = {
+    code: error?.code || "unknown",
+    message: error?.message || String(error),
+  };
+  console.error("[Scan Attendance] Published event load failed:", details, error);
+  if (eventSelect) {
+    eventSelect.disabled = false;
+    eventSelect.replaceChildren(
+      new Option("Failed to load events", ""),
+      new Option("Retry loading events", "__retry__"),
+    );
+    eventSelect.value = "";
+    eventSelect.onchange = (event) => {
+      if (event.target.value === "__retry__") loadEventsList();
+    };
+  }
+  if (scanEmptyEventsBox) {
+    scanEmptyEventsBox.hidden = false;
+    scanEmptyEventsBox.querySelector("h3")?.replaceChildren(document.createTextNode("Failed to load events"));
+    scanEmptyEventsBox.querySelector("p")?.replaceChildren(document.createTextNode("Check your connection and choose retry above."));
+  }
+}
+
+function withTimeout(operation, timeoutMs, message) {
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([operation, timeout]).finally(() => window.clearTimeout(timeoutId));
+}
 const scanUrlParams = new URLSearchParams(window.location.search);
 const requestedEventId = scanUrlParams.get("eventId")?.trim() || "";
-const requestedEventContext = {
-  id: requestedEventId,
-  name: scanUrlParams.get("eventName")?.trim() || "",
-  dateISO: scanUrlParams.get("eventDate")?.trim() || "",
-  startAt: scanUrlParams.get("eventTime")?.trim() || "",
-  venue: scanUrlParams.get("eventVenue")?.trim() || "",
-  status: "published",
-  allowWalkIn: false,
-};
-if (false && requestedEventContext.id && requestedEventContext.name) {
-  const dateLabel = requestedEventContext.dateISO ? ` (${requestedEventContext.dateISO})` : "";
-  eventSelect?.replaceChildren(new Option(
-    `${requestedEventContext.name}${dateLabel}`,
-    requestedEventContext.id,
-    true,
-    true,
-  ));
-  if (metaDateTime) {
-    metaDateTime.textContent = requestedEventContext.dateISO
-      ? `${requestedEventContext.dateISO}${requestedEventContext.startAt ? ` · ${requestedEventContext.startAt}` : ""}`
-      : requestedEventContext.startAt || "Date TBA";
-  }
-  if (metaVenue) metaVenue.textContent = requestedEventContext.venue || "PUP Biñan Campus";
-}
+console.log("[Scan Attendance] URL eventId:", requestedEventId || "(none)");
 let activeAttendanceRef = null;
+let activeEventAttendanceRef = null;
 let currentAttendanceRows = [];
 let currentAbsentRows = [];
 let currentRosterTab = "checkedIn"; // "checkedIn" | "absent"
 let html5QrCodeInstance = null;
 let cameraStatus = "uninitialized"; // 'uninitialized' | 'running' | 'paused' | 'stopped'
 let currentFacingMode = "environment"; // 'environment' | 'user'
+
+function normalizeEventDate(value) {
+  const resolved = value && typeof value.toDate === "function" ? value.toDate() : value;
+  if (resolved instanceof Date) {
+    if (Number.isNaN(resolved.getTime())) return "";
+    return `${resolved.getFullYear()}-${String(resolved.getMonth() + 1).padStart(2, "0")}-${String(resolved.getDate()).padStart(2, "0")}`;
+  }
+  const text = String(resolved || "").trim();
+  const match = /^(\d{4})[-\/]?(\d{2})[-\/]?(\d{2})/.exec(text);
+  return match ? `${match[1]}-${match[2]}-${match[3]}` : "";
+}
+
+function normalizeEventTime(value) {
+  const resolved = value && typeof value.toDate === "function" ? value.toDate() : value;
+  const date = resolved instanceof Date
+    ? resolved
+    : typeof resolved === "string" && /^\d{4}-\d{2}-\d{2}T/.test(resolved)
+      ? new Date(resolved)
+      : null;
+  if (date && !Number.isNaN(date.getTime())) {
+    return date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  }
+  return String(resolved || "").trim();
+}
+
+function eventIsOwnedByOrganizer(data) {
+  return [data.createdBy, data.organizerId, data.organizerUid]
+    .some((id) => String(id || "") === String(organizerUid));
+}
+
+function eventIsScanReady(data) {
+  const statuses = [
+    data.status,
+    data.publicationStatus,
+    data.eventStatus,
+    data.approvalStatus,
+    data.approval?.status,
+    data.approvalData?.status,
+  ].map((value) => String(value || "").trim().toLowerCase().replace(/[\s_-]+/g, " "));
+  if (statuses.includes("cancelled") || statuses.includes("canceled") || statuses.includes("rejected")) {
+    return false;
+  }
+  return statuses.includes("published") ||
+    statuses.includes("completed") ||
+    [data.published, data.isPublished, data.isLive].some((value) =>
+      value === true || value === 1 || ["true", "yes", "1"].includes(String(value || "").trim().toLowerCase()),
+    );
+}
+
+function normalizeAttendanceEvent(id, data) {
+  const schedule = data.schedule && typeof data.schedule === "object" ? data.schedule : {};
+  const rawStart =
+    data.startAt || data.startTime || data.timeStart ||
+    schedule.timeStart || schedule.startTime || schedule.start || data.time || "";
+  const rawEnd = data.endAt || data.endTime || data.timeEnd ||
+    schedule.timeEnd || schedule.endTime || schedule.end || "";
+  const startDate = normalizeEventDate(
+    data.eventDate || data.dateISO || data.date || data.dateStart ||
+    schedule.date || schedule.startDate || rawStart,
+  );
+  const endDate = normalizeEventDate(
+    data.endDate || data.endDateISO || data.dateEnd || data.dateEndISO || startDate,
+  );
+  const timeRange = String(rawStart).match(/(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*(?:-|–|to)\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i);
+  const status = String(data.status || "").trim().toLowerCase();
+
+  return {
+    ...data,
+    id: String(id),
+    name: data.eventName || data.title || data.name || "Untitled event",
+    dateISO: startDate,
+    dateEndISO: endDate || startDate,
+    startAt: normalizeEventTime(timeRange ? timeRange[1] : rawStart),
+    endAt: normalizeEventTime(timeRange ? timeRange[2] : rawEnd),
+    venue: data.venue || data.location || data.venueOther || "—",
+    status: status === "completed" ? "completed" : "published",
+    allowWalkIn: Boolean(data.allowWalkIn),
+  };
+}
 
 let lastScannedText = "";
 let lastScannedTime = 0;
@@ -196,7 +283,9 @@ function renderOrganizerProfile() {
   let profile = {};
   try {
     profile = JSON.parse(localStorage.getItem("recovibeOrganizerProfile") || "{}");
-  } catch {}
+  } catch (registrationError) {
+    console.warn("[Scan Attendance] Registration lookup failed:", registrationError);
+  }
   organizerDisplayName = profile.fullName || profile.name ||
     [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(" ") ||
     auth?.currentUser?.displayName || auth?.currentUser?.email || "Event Organizer";
@@ -209,14 +298,19 @@ function renderOrganizerProfile() {
 }
 
 // Task 1: Auth & Role Guard (event organizers only)
-authReady.then(() => onAuthStateChanged(auth, async (user) => {
+withTimeout(authReady, 15000, "Timed out waiting for authentication to initialize.")
+  .then(() => onAuthStateChanged(auth, async (user) => {
   if (!user) {
     window.location.replace("EventOrganizerLogin.html");
     return;
   }
 
   try {
-    const roleSnap = await get(ref(rtdb, `roles/${user.uid}`));
+    const roleSnap = await withTimeout(
+      get(ref(rtdb, `roles/${user.uid}`)),
+      15000,
+      "Timed out verifying the event organizer role.",
+    );
     if (roleSnap.val() !== "event_organizer") {
       window.location.replace("EventOrganizerLogin.html");
       return;
@@ -231,13 +325,10 @@ authReady.then(() => onAuthStateChanged(auth, async (user) => {
   renderOrganizerProfile();
 
   initApp().catch((error) => {
-    console.error("Could not initialize attendance events:", error);
-    if (eventSelect) {
-      eventSelect.replaceChildren(new Option("Couldn't load events. Please refresh.", ""));
-    }
+    showEventLoadFailure(error);
   });
 })).catch((error) => {
-  console.error("Could not restore organizer authentication state:", error);
+  showEventLoadFailure(error);
 });
 
 if (organizerLogout) {
@@ -440,99 +531,51 @@ if (btnWalkInConfirm) {
 async function loadEventsList() {
   if (eventLoadInProgress) return;
   eventLoadInProgress = true;
+  console.log("[Scan Attendance] Starting published event load", { organizerUid });
   if (eventSelect) eventSelect.replaceChildren(new Option("Loading published events...", ""));
 
-  const normalizeDate = (value) => {
-    const text = String(value || "").trim();
-    if (!text) return "";
-    const match = text.match(/^(\d{4})[-\/]?(\d{2})[-\/]?(\d{2})/);
-    return match ? `${match[1]}-${match[2]}-${match[3]}` : "";
-  };
-  const normalizeTime = (value) => {
-    const match = String(value || "").trim().match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
-    if (!match) return null;
-    let hour = Number(match[1]);
-    const minute = Number(match[2] || 0);
-    const meridiem = String(match[3] || "").toLowerCase();
-    if (meridiem === "pm" && hour < 12) hour += 12;
-    if (meridiem === "am" && hour === 12) hour = 0;
-    if (hour > 23 || minute > 59) return null;
-    return hour * 60 + minute;
-  };
-  const eventIsOwnedByOrganizer = (data) =>
-    [data.createdBy, data.organizerId, data.organizerUid].some((id) => String(id || "") === String(organizerUid));
-  const eventIsPublished = (data) => String(data.status || "").trim().toLowerCase() === "published";
-  const eventIsHappeningNow = (event) => {
-    const now = new Date();
-    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-    if (!event.dateISO || !event.dateEndISO || today < event.dateISO || today > event.dateEndISO) return false;
-    if (event.startMinutes === null && event.endMinutes === null) return true;
-    const minutes = now.getHours() * 60 + now.getMinutes();
-    return (event.startMinutes === null || minutes >= event.startMinutes) &&
-      (event.endMinutes === null || minutes <= event.endMinutes);
-  };
-  const normalizeEvent = (id, data) => {
-    const startAt = data.startAt || data.startTime || data.timeStart || data.time || "";
-    const endAt = data.endAt || data.endTime || data.timeEnd || "";
-    const startDate = normalizeDate(data.eventDate || data.dateISO || data.date || data.dateStart || startAt);
-    const endDate = normalizeDate(data.endDate || data.endDateISO || data.dateEnd || data.dateEndISO || startDate);
-    const timeRange = String(startAt).match(/(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*(?:-|–|to)\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i);
-    const startTime = timeRange ? timeRange[1] : startAt;
-    const endTime = timeRange ? timeRange[2] : endAt;
-    return {
-      ...data,
-      id: String(id),
-      name: data.eventName || data.title || data.name || "Untitled event",
-      dateISO: startDate,
-      dateEndISO: endDate || startDate,
-      startAt: startTime,
-      endAt: endTime,
-      startMinutes: normalizeTime(startTime),
-      endMinutes: normalizeTime(endTime),
-      venue: data.venue || data.location || "—",
-      status: String(data.status || "").trim().toLowerCase(),
-      allowWalkIn: Boolean(data.allowWalkIn),
-    };
-  };
-
   try {
+    if (!isFirebaseConfigured || !db || !organizerUid) {
+      throw new Error("Firestore is not configured.");
+    }
     const eventsMap = new Map();
-    if (db) {
-      const eventSnapshot = await getDocs(query(
+    const eventSnapshot = await withTimeout(
+      getDocs(query(
         collection(db, "events"),
-        where("status", "==", "published"),
-      ));
-      eventSnapshot.docs.forEach((eventDocument) => {
-        const data = eventDocument.data();
-        if (eventIsOwnedByOrganizer(data) && eventIsPublished(data)) {
-          const event = normalizeEvent(eventDocument.id, data);
-          if (eventIsHappeningNow(event)) eventsMap.set(event.id, event);
-        }
-      });
-    }
-    if (rtdb) {
-      const snapshot = await get(ref(rtdb, "events"));
-      Object.entries(snapshot.val() || {}).forEach(([id, data]) => {
-        if (!data || !eventIsOwnedByOrganizer(data) || !eventIsPublished(data)) return;
-        const event = normalizeEvent(id, data);
-        if (eventIsHappeningNow(event)) eventsMap.set(event.id, event);
-      });
-    }
+        or(
+          where("organizerUid", "==", organizerUid),
+          where("organizerId", "==", organizerUid),
+          where("createdBy", "==", organizerUid),
+        ),
+      )),
+      15000,
+      "Timed out loading your events.",
+    );
+    eventSnapshot.docs.forEach((eventDocument) => {
+      const data = eventDocument.data();
+      if (eventIsOwnedByOrganizer(data) && eventIsScanReady(data)) {
+        const event = normalizeAttendanceEvent(eventDocument.id, data);
+        eventsMap.set(event.id, event);
+      }
+    });
     currentEvents = [...eventsMap.values()];
-    populateEventDropdown();
-  } catch (error) {
-    console.error("Could not load published attendance events:", error);
-    currentEvents = [];
-    populateEventDropdown();
-    if (eventSelect) {
-      eventSelect.disabled = false;
-      eventSelect.replaceChildren(new Option("Couldn't load events. Click to retry", "__retry__"));
-      eventSelect.onchange = () => loadEventsList();
+    console.log("[Scan Attendance] Published events found:", currentEvents.length);
+    await populateEventDropdown();
+    if (requestedEventId && String(currentEventId) !== requestedEventId) {
+      await showEventDetails(requestedEventId);
     }
-    if (scanEmptyEventsBox) {
-      scanEmptyEventsBox.hidden = false;
-      scanEmptyEventsBox.querySelector("h3")?.replaceChildren(document.createTextNode("Couldn't load published events"));
-      scanEmptyEventsBox.querySelector("p")?.replaceChildren(document.createTextNode("Check your connection and choose retry above."));
+  } catch (error) {
+    currentEvents = [];
+    if (requestedEventId) {
+      try {
+        await showEventDetails(requestedEventId);
+        console.warn("[Scan Attendance] Event list query failed; loaded the URL event directly:", error);
+      } catch (eventError) {
+        console.error("[Scan Attendance] Event list and URL event reads failed:", error, eventError);
+        showEventLoadFailure(eventError);
+      }
+    } else {
+      showEventLoadFailure(error);
     }
   } finally {
     eventLoadInProgress = false;
@@ -670,10 +713,18 @@ async function loadEventsList() {
   */
 }
 
-function populateEventDropdown() {
+async function populateEventDropdown() {
   const scanEventCard = document.querySelector(".scan-event-card");
   const scanLayoutGrid = document.querySelector(".scan-layout-grid");
   const scanRosterSection = document.querySelector(".scan-attendance-list-section");
+
+  if (eventSelect) {
+    eventSelect.onchange = (event) => {
+      showEventDetails(event.target.value).catch((error) => {
+        showEventLoadFailure(error);
+      });
+    };
+  }
 
   const setAttendanceControlsDisabled = (disabled) => {
     [btnCompleteEvent, walkInToggle, btnToggleCamera, btnSwitchCamera, btnManualSubmit,
@@ -686,16 +737,22 @@ function populateEventDropdown() {
     currentEventId = null;
     stopCameraScanner();
     setAttendanceControlsDisabled(true);
-    if (eventSelect) eventSelect.replaceChildren(new Option("No published event is happening right now", ""));
+    if (eventSelect) {
+      eventSelect.disabled = false;
+      eventSelect.replaceChildren(new Option(
+        requestedEventId ? "Loading selected event..." : "No published events are available",
+        "",
+      ));
+    }
     if (metaDateTime) metaDateTime.textContent = "—";
     if (metaVenue) metaVenue.textContent = "—";
     if (metaCount) metaCount.textContent = "0 checked in";
     currentAttendanceRows = [];
     currentAbsentRows = [];
     updateRosterDisplay();
-    if (scanEmptyEventsBox) scanEmptyEventsBox.hidden = false;
-    if (scanEmptyEventsBox.querySelector("h3")) scanEmptyEventsBox.querySelector("h3").textContent = "No published event is happening right now";
-    if (scanEmptyEventsBox.querySelector("p")) scanEmptyEventsBox.querySelector("p").textContent = "Attendance controls will be enabled when one of your published events is in progress.";
+    if (scanEmptyEventsBox) scanEmptyEventsBox.hidden = Boolean(requestedEventId);
+    if (scanEmptyEventsBox.querySelector("h3")) scanEmptyEventsBox.querySelector("h3").textContent = "No published events are available";
+    if (scanEmptyEventsBox.querySelector("p")) scanEmptyEventsBox.querySelector("p").textContent = "Published events will appear here when they are ready for attendance.";
     if (scanEventCard) scanEventCard.style.display = "";
     if (scanLayoutGrid) scanLayoutGrid.style.display = "";
     if (scanRosterSection) scanRosterSection.style.display = "";
@@ -709,12 +766,24 @@ function populateEventDropdown() {
   setAttendanceControlsDisabled(false);
 
   if (!eventSelect) return;
-  eventSelect.innerHTML = "";
+  eventSelect.replaceChildren(new Option("Select an event", ""));
+  currentEvents.forEach((event) => {
+    const option = document.createElement("option");
+    option.value = event.id;
+    option.textContent = event.name;
+    eventSelect.appendChild(option);
+  });
 
   let bestMatchEvent = null;
 
   if (requestedEventId) {
     bestMatchEvent = currentEvents.find((e) => String(e.id) === requestedEventId);
+    if (!bestMatchEvent) {
+      eventSelect.options[0].textContent = "Loading selected event...";
+      return;
+    }
+  } else if (currentEventId) {
+    bestMatchEvent = currentEvents.find((event) => String(event.id) === String(currentEventId));
   }
 
   const nowForSelection = new Date();
@@ -738,45 +807,74 @@ function populateEventDropdown() {
     bestMatchEvent = currentEvents.find((e) => e.status === "published") || currentEvents[0];
   }
 
-  currentEvents.forEach((event) => {
-    const opt = document.createElement("option");
-    opt.value = event.id;
-    const dateLabel = event.dateISO ? ` (${event.dateISO})` : "";
-    const statusLabel = event.status === "completed" ? " [Completed]" : "";
-    opt.textContent = `${event.name}${dateLabel}${statusLabel}`;
-    eventSelect.appendChild(opt);
-  });
-
   if (bestMatchEvent) {
     eventSelect.value = bestMatchEvent.id;
     if (String(currentEventId) !== String(bestMatchEvent.id)) {
-      selectEvent(bestMatchEvent.id);
+      await showEventDetails(bestMatchEvent.id);
     }
   }
-
-  eventSelect.onchange = (e) => {
-    selectEvent(e.target.value);
-  };
 }
 
-async function selectEvent(eventId) {
+async function showEventDetails(eventId) {
   if (!eventId) return;
+  console.log("[Scan Attendance] Loading event details:", eventId);
   await stopCameraScanner();
   dismissBanner();
-  currentEventId = eventId;
-  const ev = currentEvents.find((e) => String(e.id) === String(eventId));
-  if (!ev) return;
+  const eventSnapshot = await withTimeout(
+    getDoc(doc(db, "events", String(eventId))),
+    15000,
+    "Timed out loading the selected event.",
+  );
+  if (!eventSnapshot.exists()) {
+    throw Object.assign(new Error("The selected event no longer exists."), { code: "not-found" });
+  }
 
-  const nowForSelection = new Date();
-  const todayStr = `${nowForSelection.getFullYear()}-${String(nowForSelection.getMonth() + 1).padStart(2, "0")}-${String(nowForSelection.getDate()).padStart(2, "0")}`;
+  const eventData = eventSnapshot.data();
+  if (!eventIsOwnedByOrganizer(eventData) || !eventIsScanReady(eventData)) {
+    throw Object.assign(new Error("This event is not available for attendance."), { code: "permission-denied" });
+  }
+  const ev = normalizeAttendanceEvent(eventSnapshot.id, eventData);
+  const existingIndex = currentEvents.findIndex((event) => String(event.id) === String(eventId));
+  if (existingIndex >= 0) currentEvents[existingIndex] = ev;
+  else currentEvents.push(ev);
+  currentEventId = String(eventId);
+  if (eventSelect) {
+    if (
+      eventSelect.options.length === 1 &&
+      !eventSelect.options[0].value &&
+      eventSelect.options[0].textContent.toLowerCase().includes("loading")
+    ) {
+      eventSelect.replaceChildren(new Option("Select an event", ""));
+    }
+    let option = Array.from(eventSelect.options).find((item) => item.value === currentEventId);
+    if (!option) {
+      option = new Option(ev.name, currentEventId);
+      eventSelect.appendChild(option);
+    } else {
+      option.textContent = ev.name;
+    }
+    eventSelect.disabled = false;
+    eventSelect.value = currentEventId;
+  }
+  if (scanEmptyEventsBox) scanEmptyEventsBox.hidden = true;
+  const scanEventCard = document.querySelector(".scan-event-card");
+  const scanLayoutGrid = document.querySelector(".scan-layout-grid");
+  const scanRosterSection = document.querySelector(".scan-attendance-list-section");
+  if (scanEventCard) scanEventCard.style.display = "";
+  if (scanLayoutGrid) scanLayoutGrid.style.display = "";
+  if (scanRosterSection) scanRosterSection.style.display = "";
+  [btnCompleteEvent, walkInToggle, btnToggleCamera, btnSwitchCamera, btnManualSubmit,
+    manualStudentNo, btnExportCsv].forEach((control) => {
+    if (control) control.disabled = false;
+  });
+
   const dateFormatted = ev.dateISO || "Date TBA";
-  const timeFormatted = ev.startAt ? ` · ${ev.startAt}` : "";
+  const timeRange = [ev.startAt, ev.endAt].filter(Boolean).join(" - ");
+  const timeFormatted = timeRange ? ` · ${timeRange}` : "";
   if (metaDateTime) metaDateTime.textContent = `${dateFormatted}${timeFormatted}`;
   if (metaVenue) metaVenue.textContent = ev.venue || "PUP Biñan Campus";
 
   const isCompleted = ev.status === "completed";
-  const scanLayoutGrid = document.querySelector(".scan-layout-grid");
-
   if (isCompleted) {
     if (btnCompleteEvent) btnCompleteEvent.hidden = true;
     if (walkInToggle) walkInToggle.disabled = true;
@@ -818,6 +916,10 @@ function subscribeAttendance(eventId, isCompleted) {
     off(activeAttendanceRef);
     activeAttendanceRef = null;
   }
+  if (activeEventAttendanceRef) {
+    off(activeEventAttendanceRef);
+    activeEventAttendanceRef = null;
+  }
 
   currentAttendanceRows = [];
   currentAbsentRows = [];
@@ -832,8 +934,10 @@ function subscribeAttendance(eventId, isCompleted) {
     return;
   }
 
-  activeAttendanceRef = ref(rtdb, `attendance/${eventId}`);
-  onValue(activeAttendanceRef, async (snapshot) => {
+  let legacyRows = [];
+  let eventRows = [];
+  const applyAttendanceSnapshot = async (snapshot, source) => {
+    if (String(currentEventId) !== String(eventId)) return;
     const data = snapshot.val();
     const rows = [];
     if (data && typeof data === "object") {
@@ -852,15 +956,37 @@ function subscribeAttendance(eventId, isCompleted) {
       });
     }
 
-    // Sort newest first
-    rows.sort((a, b) => Number(b.scannedAt) - Number(a.scannedAt));
-    currentAttendanceRows = rows;
+    if (source === "event") eventRows = rows;
+    else legacyRows = rows;
 
-    await refreshAbsentRows(eventId, rows);
+    const mergedRows = new Map(eventRows.map((row) => [String(row.uid), row]));
+    legacyRows.forEach((row) => {
+      mergedRows.set(String(row.uid), { ...mergedRows.get(String(row.uid)), ...row });
+    });
+    const checkedInRows = [...mergedRows.values()]
+      .sort((a, b) => Number(b.scannedAt) - Number(a.scannedAt));
+    currentAttendanceRows = checkedInRows;
+
+    await refreshAbsentRows(eventId, checkedInRows);
     updateRosterDisplay();
-  }, (err) => {
-    console.warn("RTDB attendance listener notice:", err);
-  });
+  };
+  const handleAttendanceError = (error) => {
+    console.error("[Scan Attendance] Realtime attendance listener failed:", {
+      code: error?.code || "unknown",
+      message: error?.message || String(error),
+      eventId,
+    }, error);
+  };
+
+  activeAttendanceRef = ref(rtdb, `attendance/${eventId}`);
+  onValue(activeAttendanceRef, (snapshot) => {
+    applyAttendanceSnapshot(snapshot, "legacy");
+  }, handleAttendanceError);
+
+  activeEventAttendanceRef = ref(rtdb, `events/${eventId}/attendance`);
+  onValue(activeEventAttendanceRef, (snapshot) => {
+    applyAttendanceSnapshot(snapshot, "event");
+  }, handleAttendanceError);
 }
 
 async function refreshAbsentRows(eventId, checkedInRows) {
@@ -1192,16 +1318,17 @@ if (btnConfirmCompleteModal) {
     btnConfirmCompleteModal.textContent = "Completing...";
 
     try {
-      if (functions && navigator.onLine) {
-        const compFn = httpsCallable(functions, "completeEvent");
-        await compFn({ eventId: currentEventId });
-      } else if (rtdb) {
-        await set(ref(rtdb, `events/${currentEventId}/status`), "completed");
-        await set(ref(rtdb, `events/${currentEventId}/completedAt`), Date.now());
+      if (!db) {
+        throw new Error("Firestore must be configured to complete this event.");
       }
+      const completedAt = Date.now();
+      await updateDoc(doc(db, "events", currentEventId), {
+        status: "completed",
+        completedAt: serverTimestamp(),
+      });
 
       ev.status = "completed";
-      ev.completedAt = Date.now();
+      ev.completedAt = completedAt;
 
       // Keep only this page's organizer-side cache in sync; the authoritative status is saved above.
       ["recovibeOrganizerEvents"].forEach((key) => {
@@ -1491,11 +1618,6 @@ function applyWalkInState(newState) {
     try {
       localStorage.setItem(`recovibe_walkin_${currentEventId}`, isWalkInAllowed ? "true" : "false");
     } catch {}
-    if (rtdb) {
-      try {
-        set(ref(rtdb, `events/${currentEventId}/allowWalkIn`), isWalkInAllowed);
-      } catch {}
-    }
   }
 }
 
@@ -1597,7 +1719,7 @@ function onScanFailure() {
   // Ignored per-frame failures during standard viewfinder scanning
 }
 
-// Attendance Processor (Callable with Local Fallback)
+// Attendance is processed in the client and stored in Realtime Database.
 async function processAttendance({ eventId, token, allowWalkIn }) {
   if (!eventId) {
     alert("Please select an active event first.");
@@ -1605,56 +1727,8 @@ async function processAttendance({ eventId, token, allowWalkIn }) {
   }
 
   try {
-    let result = null;
-
-    if (functions && navigator.onLine) {
-      try {
-        const recordCallable = httpsCallable(functions, "recordAttendance");
-        const resp = await recordCallable({
-          eventId,
-          token,
-          allowWalkIn: Boolean(allowWalkIn),
-        });
-        result = resp.data;
-      } catch (callErr) {
-        // Inspect callable error
-        const msg = callErr.message || "";
-        const code = callErr.code || "";
-
-        if (code === "functions/failed-precondition" || msg.toLowerCase().includes("replaced")) {
-          showResultBanner({
-            type: "replaced",
-            title: "Replaced QR code",
-            name: "",
-            meta: "",
-            note: "This QR code was replaced. Ask the student to download their new one.",
-          });
-          return;
-        }
-
-        if (code === "functions/permission-denied") {
-          showResultBanner({
-            type: "error",
-            title: "Permission denied",
-            name: "",
-            meta: "",
-            note: "Only event organizers and administrators can record attendance.",
-          });
-          return;
-        }
-
-        // Rethrow other errors to handle below
-        throw callErr;
-      }
-    }
-
-    // Fallback simulation / processing if callable returned or was offline
-    if (!result) {
-      result = await handleLocalAttendanceProcessing(eventId, token, allowWalkIn);
-    }
-
+    const result = await handleLocalAttendanceProcessing(eventId, token, allowWalkIn);
     handleAttendanceResult(result, token);
-
   } catch (err) {
     console.error("Attendance scan error:", err);
     const msg = err.message || "An unexpected error occurred during check-in.";
@@ -1668,64 +1742,74 @@ async function processAttendance({ eventId, token, allowWalkIn }) {
   }
 }
 
-// Local Fallback Processor (for offline / client-direct RTDB mode)
+// Firestore is used for student lookup; attendance is written directly to RTDB.
 async function handleLocalAttendanceProcessing(eventId, token, allowWalkIn) {
-  const normalizedStudentNo = formatStudentNo(token);
-  if (!STUDENT_NO_REGEX.test(normalizedStudentNo)) {
-    return { status: "invalid_format", student: { studentNo: normalizedStudentNo } };
+  if (!db || !rtdb || !auth?.currentUser) {
+    throw new Error("Sign in and connect to Firebase before recording attendance.");
   }
-  let uid = "";
+
+  const rawToken = String(token || "").trim();
+  const normalizedStudentNo = formatStudentNo(rawToken);
+  const hasStudentNumber = STUDENT_NO_REGEX.test(normalizedStudentNo);
+  if (!hasStudentNumber && !rawToken) {
+    return { status: "invalid_format", student: { studentNo: "" } };
+  }
+
+  let studentDocument = null;
   let studentData = null;
 
-  // The QR code contains the normalized student number.
-
-  // Check if student is already checked in
-  const existingRow = currentAttendanceRows.find((r) => r.uid === uid || r.studentNo === uid);
-  if (existingRow) {
-    return {
-      status: "already",
-      student: {
-        name: existingRow.name,
-        studentNo: existingRow.studentNo,
-        organization: existingRow.organization,
-      },
-      scannedAt: existingRow.scannedAt,
-    };
-  }
-
-  // Lookup student details from Firestore or local storage
-  /*
-    organization: "PUP Biñan",
-  */
-
-  if (db) {
-    try {
-      const studentSnap = await getDocs(query(collection(db, "users"), where("studentNumber", "==", normalizedStudentNo)));
-      if (!studentSnap.empty) {
-        const studentDoc = studentSnap.docs[0];
-        const d = studentDoc.data() || {};
-        uid = studentDoc.id;
-        studentData = {
-          name: d.fullName || `${d.firstName || ""} ${d.lastName || ""}`.trim(),
-          studentNo: formatStudentNo(d.studentNumber || d.studentId || normalizedStudentNo),
-          organization: d.organization || "PUP Biñan",
-        };
-        studentData.organization = d.organization || d.courseOrganization || d.department || "";
-      }
-    } catch (lookupErr) {
-      console.warn("Student lookup notice:", lookupErr);
+  if (hasStudentNumber) {
+    let studentSnapshot = await getDocs(query(
+      collection(db, "users"),
+      where("studentNumber", "==", normalizedStudentNo),
+    ));
+    if (studentSnapshot.empty) {
+      studentSnapshot = await getDocs(query(
+        collection(db, "users"),
+        where("studentId", "==", normalizedStudentNo),
+      ));
     }
+    studentDocument = studentSnapshot.docs[0] || null;
+  } else {
+    const studentSnapshot = await getDoc(doc(db, "users", rawToken));
+    studentDocument = studentSnapshot.exists() ? studentSnapshot : null;
   }
 
-  if (!studentData || !uid) {
+  if (!studentDocument) {
     return { status: "not_found", student: { studentNo: normalizedStudentNo } };
   }
+  const uid = studentDocument.id;
+  const studentProfile = studentDocument.data() || {};
+  studentData = {
+    name: studentProfile.fullName ||
+      `${studentProfile.firstName || ""} ${studentProfile.lastName || ""}`.trim() ||
+      studentProfile.name ||
+      "Student",
+    studentNo: formatStudentNo(
+      studentProfile.studentNumber || studentProfile.studentId || normalizedStudentNo,
+    ),
+    organization: studentProfile.organization ||
+      studentProfile.courseOrganization ||
+      studentProfile.department ||
+      "PUP Biñan",
+  };
 
   const knownAttendance = currentAttendanceRows.find((r) =>
     String(r.uid || "") === uid || stripStudentNo(r.studentNo) === stripStudentNo(normalizedStudentNo)
   );
   if (knownAttendance) {
     return { status: "already", student: knownAttendance, scannedAt: knownAttendance.scannedAt };
+  }
+  const existingAttendanceSnapshot = await get(
+    ref(rtdb, `events/${eventId}/attendance/${uid}`),
+  );
+  if (existingAttendanceSnapshot.exists()) {
+    const existingAttendance = existingAttendanceSnapshot.val() || {};
+    return {
+      status: "already",
+      student: { ...studentData, ...existingAttendance },
+      scannedAt: existingAttendance.scannedAt,
+    };
   }
 
   // Check registration from the selected event's existing registration records.
@@ -1760,7 +1844,9 @@ async function handleLocalAttendanceProcessing(eventId, token, allowWalkIn) {
           });
         }
       }
-    } catch {}
+    } catch (registrationError) {
+      console.warn("[Scan Attendance] Registration lookup failed:", registrationError);
+    }
   }
 
   if (!isRegistered && !allowWalkIn) {
@@ -1784,12 +1870,14 @@ async function handleLocalAttendanceProcessing(eventId, token, allowWalkIn) {
     organization: studentData.organization,
   };
 
-  if (rtdb) {
-    try {
-      await set(ref(rtdb, `attendance/${eventId}/${uid}`), attendanceRow);
-    } catch (setErr) {
-      console.warn("RTDB write notice:", setErr);
-    }
+  await set(ref(rtdb, `events/${eventId}/attendance/${uid}`), {
+    scannedAt: now,
+    walkIn: isWalkIn,
+  });
+  try {
+    await set(ref(rtdb, `attendance/${eventId}/${uid}`), attendanceRow);
+  } catch (mirrorError) {
+    console.warn("[Scan Attendance] Legacy RTDB attendance mirror failed:", mirrorError);
   }
 
   // If registered student checked in, remove from absent rows
@@ -1802,7 +1890,10 @@ async function handleLocalAttendanceProcessing(eventId, token, allowWalkIn) {
   }
 
   // Update local list
-  currentAttendanceRows.unshift({ uid, ...attendanceRow });
+  currentAttendanceRows = [
+    { uid, ...attendanceRow },
+    ...currentAttendanceRows.filter((row) => row.uid !== uid),
+  ];
   updateRosterDisplay();
   try {
     localStorage.setItem(`recovibe_attendance_${eventId}`, JSON.stringify(currentAttendanceRows));
@@ -2031,27 +2122,7 @@ if (btnAcceptManualConfirm) {
     }
 
     try {
-      let result = null;
-
-      if (functions && navigator.onLine) {
-        try {
-          const manualCallable = httpsCallable(functions, "recordAttendanceByStudentNo");
-          const resp = await manualCallable({
-            eventId: currentEventId,
-            studentNo,
-            allowWalkIn,
-          });
-          result = resp.data;
-        } catch (fnErr) {
-          console.warn("recordAttendanceByStudentNo callable notice:", fnErr);
-        }
-      }
-
-      if (!result) {
-        // Fallback local lookup
-        result = await handleLocalAttendanceProcessing(currentEventId, studentNo, allowWalkIn);
-      }
-
+      const result = await handleLocalAttendanceProcessing(currentEventId, studentNo, allowWalkIn);
       handleAttendanceResult(result, studentNo);
       if (manualStudentNo) manualStudentNo.value = "";
     } catch (err) {

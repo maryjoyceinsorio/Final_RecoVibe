@@ -288,7 +288,7 @@
             <div class="avatar" id="organizerAvatar"></div>
             <div class="user-meta">
               <div class="user-name" id="organizerName"></div>
-              <div class="user-role" id="organizerRole"></div>
+              <div class="user-role" id="organizerRole">Teacher</div>
             </div>
           </div>
           <a
@@ -492,6 +492,16 @@
                 </button>
               </div>
             </article>
+            <article class="profile-card full-width-card correction-requests-card" id="correctionRequestsCard">
+              <div class="card-header-flex">
+                <h2 class="card-title">My correction requests</h2>
+              </div>
+              <div id="correctionRequestsContent" aria-live="polite">
+                <div class="correction-request-skeleton" aria-hidden="true">
+                  <span></span><i></i><i></i>
+                </div>
+              </div>
+            </article>
           </section>
         </div>
       </main>
@@ -500,7 +510,7 @@
     <!-- Request a Correction Modal Dialog -->
     <div class="correction-modal-overlay" id="correctionModalOverlay" role="dialog" aria-modal="true" aria-labelledby="correctionModalTitle" hidden>
       <div class="correction-modal-backdrop" id="correctionModalBackdrop"></div>
-      <div class="correction-modal-dialog">
+      <div class="correction-modal-dialog" role="document">
         <button type="button" class="modal-close-btn" id="closeCorrectionModal" aria-label="Close dialog">&times;</button>
         <h2 class="modal-title" id="correctionModalTitle">Request a correction</h2>
         <p class="correction-modal-desc">Tell the administration which faculty record needs to be updated and what it should say.</p>
@@ -510,24 +520,37 @@
             <label for="correctionFieldSelect">Which detail is wrong?</label>
             <select id="correctionFieldSelect" required class="card-input">
               <option value="">Select a detail</option>
-              <option value="Teacher ID">Teacher ID / Employee Number</option>
-              <option value="Department">Department</option>
-              <option value="Designation">Designation / Role</option>
-              <option value="Campus">Campus</option>
+              <option value="teacherId">Teacher ID</option>
+              <option value="department">Department</option>
+              <option value="designation">Designation</option>
+              <option value="campus">Campus</option>
             </select>
             <div class="field-error" id="errCorrectionField" role="alert">Please select which detail is wrong.</div>
           </div>
 
-          <div class="form-field" id="field-correction-message">
-            <label for="correctionMessageInput">Tell administration what it should say</label>
-            <textarea id="correctionMessageInput" required minlength="10" rows="4" placeholder="Explain the correct details (at least 10 characters)..." class="card-input"></textarea>
-            <div class="field-helper">Minimum 10 characters.</div>
-            <div class="field-error" id="errCorrectionMessage" role="alert">Please provide at least 10 characters explaining the correction.</div>
+          <div class="form-field">
+            <label for="correctionCurrentValue">Current value</label>
+            <input id="correctionCurrentValue" class="card-input" type="text" readonly />
           </div>
 
+          <div class="form-field">
+            <label for="correctionRequestedValue">Correct value</label>
+            <input id="correctionRequestedValue" class="card-input" type="text" required maxlength="200" />
+            <div class="field-error" id="errCorrectionValue" role="alert">Enter the correct value (up to 200 characters), different from the current value.</div>
+          </div>
+
+          <div class="form-field">
+            <label for="correctionReason">Why is it wrong?</label>
+            <textarea id="correctionReason" required minlength="10" maxlength="500" rows="4" class="card-input"></textarea>
+            <div class="field-helper"><span id="correctionReasonCount">0</span> / 500 characters (minimum 10).</div>
+            <div class="field-error" id="errCorrectionReason" role="alert">Explain why this detail is wrong in 10 to 500 characters.</div>
+          </div>
+
+          <p class="correction-submit-status" id="correctionSubmitStatus" role="alert" aria-live="polite"></p>
+          <button type="button" class="correction-retry-button" id="correctionRetryButton" hidden>Retry</button>
           <div class="modal-footer">
             <button type="button" class="btn-secondary" id="btnCancelCorrection">Cancel</button>
-            <button type="submit" class="btn-primary" id="btnSendCorrection">Send request</button>
+            <button type="submit" class="btn-primary" id="btnSendCorrection">Submit request</button>
           </div>
         </form>
       </div>
@@ -562,7 +585,7 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script src="TeacherProfile.js"></script>
+    <script type="module" src="TeacherProfile.js"></script>
     <script src="TeacherNotification.js"></script>
   </body>
 </html>

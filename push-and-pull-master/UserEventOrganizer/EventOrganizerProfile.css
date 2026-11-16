@@ -721,3 +721,126 @@
     width: 100%;
   }
 }
+
+.cr-card {
+  min-width: 0;
+}
+
+.cr-list-content {
+  display: grid;
+  gap: 12px;
+}
+
+.cr-request-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 16px;
+  padding: 14px 0;
+  border-top: 1px solid var(--border-card);
+}
+
+.cr-request-item:first-child {
+  border-top: 0;
+}
+
+.cr-request-field,
+.cr-request-values,
+.cr-request-date,
+.cr-request-note,
+.cr-state,
+.cr-submit-status {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.cr-request-field {
+  color: var(--text-dark);
+  font-weight: 700;
+}
+
+.cr-request-values,
+.cr-request-date,
+.cr-request-note,
+.cr-state {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.cr-request-date {
+  grid-column: 1;
+  font-size: 12px;
+}
+
+.cr-request-note {
+  grid-column: 1 / -1;
+}
+
+.cr-status-pill {
+  align-self: start;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: var(--gold-chip-bg);
+  color: var(--gold-chip-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.cr-status-pill.cr-is-approved {
+  background: #e8f4ec;
+  color: #26734a;
+}
+
+.cr-status-pill.cr-is-rejected {
+  background: #f8e9e9;
+  color: #a3333c;
+}
+
+.cr-submit-status {
+  min-height: 1.3em;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.cr-submit-status.cr-is-error {
+  color: #a3333c;
+}
+
+.cr-counter {
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: right;
+}
+
+.cr-retry-button {
+  justify-self: start;
+  min-height: 40px;
+  padding: 8px 14px;
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-btn);
+  background: var(--card-white);
+  color: var(--maroon-primary);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.cr-field .cr-input {
+  width: 100%;
+}
+
+@media (max-width: 560px) {
+  .cr-request-item {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .cr-status-pill {
+    justify-self: start;
+    grid-row: 1;
+  }
+
+  .cr-request-date,
+  .cr-request-note {
+    grid-column: 1;
+  }
+}

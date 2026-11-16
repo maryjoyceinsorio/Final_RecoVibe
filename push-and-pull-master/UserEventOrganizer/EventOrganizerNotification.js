@@ -1,26 +1,24 @@
 const notificationStorageKey = "recovibeOrganizerNotifications";
 const deletedNotificationStorageKey = "recovibeOrganizerDeletedNotifications";
 const deletedNotificationLifetime = 30 * 24 * 60 * 60 * 1000;
-const organizerId = localStorage.getItem("recovibeOrganizerId");
-const organizerIdentifiers = new Set(
-  [organizerId].filter(Boolean).map((value) => String(value).trim().toLowerCase()),
-);
-let organizerProfile = {};
-try {
-  organizerProfile = JSON.parse(localStorage.getItem("recovibeOrganizerProfile") || "{}");
-} catch (error) {
-  console.error("[OrganizerNotifications] Could not read organizer profile:", error);
-}
-const firestoreNotifications = new Map();
-let firestoreNotificationUnsubscribers = [];
-let authStateUnsubscribe = null;
+const DEBUG = false;
+let currentOrganizerUid = "";
+let organizerIdentifiers = new Set();
+const organizerProfile = {};
 let firestoreNotificationError = "";
-const savedNotifications = JSON.parse(
-  localStorage.getItem(notificationStorageKey) || "[]",
-);
-let deletedNotifications = JSON.parse(
-  localStorage.getItem(deletedNotificationStorageKey) || "[]",
-).map((item) => {
+function debug(...args) {
+  if (DEBUG) console.debug("[OrganizerNotifications]", ...args);
+}
+function readLocalArray(key) {
+  try {
+    const value = JSON.parse(localStorage.getItem(key) || "[]");
+    return Array.isArray(value) ? value : [];
+  } catch (error) {
+    debug(`Could not read ${key}:`, error);
+    return [];
+  }
+}
+let deletedNotifications = readLocalArray(deletedNotificationStorageKey).map((item) => {
   const deletedAt = Number(item.deletedAt) ||
     (item.expiresAt ? Number(item.expiresAt) - 7 * 86400000 : Date.now());
   return { ...item, deletedAt, expiresAt: deletedAt + deletedNotificationLifetime };
@@ -29,17 +27,19 @@ const normalizedNotificationStatus = (item) => {
   const statuses = [item.eventStatus, item.status, item.type, item.title, item.message]
     .filter(Boolean)
     .map((value) => String(value).trim().toLowerCase().replace(/[\s_-]+/g, " "));
+  if (statuses.some((status) => status.includes("revision") || status.includes("revise"))) return "Needs Revision";
+  if (statuses.some((status) => status.includes("resched"))) return "Rescheduled";
+  if (statuses.some((status) => status.includes("cancel"))) return "Cancelled";
+  if (statuses.some((status) => status.includes("publish"))) return "Published";
   if (statuses.some((status) => status.includes("approv"))) return "Approved";
-  if (statuses.some((status) => status.includes("reject"))) return "Rejected";
-  if (statuses.some((status) =>
-    status.includes("revision") || status.includes("revise") || status.includes("change"),
-  )) return "Needs Revision";
+  if (statuses.some((status) => status.includes("reject") || status.includes("denied"))) return "Rejected";
   return "";
 };
 const isEventStatusNotification = (item) =>
   Boolean(item.eventId && normalizedNotificationStatus(item));
 const belongsToCurrentOrganizer = (item) => {
   const recipients = [
+    item.ownerUid,
     item.organizerId,
     item.organizerUid,
     item.recipientUid,
@@ -95,7 +95,7 @@ const findNotificationEvent = (eventId) => {
       const cached = JSON.parse(localStorage.getItem(key) || "[]");
       if (Array.isArray(cached)) sources.push(cached);
     } catch (error) {
-      console.warn(`[OrganizerNotifications] Could not read ${key} for audience filtering:`, error);
+      debug(`Could not read ${key} for audience filtering:`, error);
     }
   });
   return sources.flat().find(
@@ -196,19 +196,12 @@ const isNotificationVisibleToOrganizer = (item) => {
   );
 };
 const belongsToVisibleOrganizer = (item) =>
-  belongsToCurrentOrganizer(item) && isNotificationVisibleToOrganizer(item);
+  Boolean(currentOrganizerUid) && String(item.ownerUid || "") === currentOrganizerUid;
 const normalizeNotification = (item, id = item.id) => {
   const eventStatus = normalizedNotificationStatus(item);
   const createdAt = item.createdAt?.toDate
     ? item.createdAt.toDate().toISOString()
     : item.createdAt || "";
-  const time = item.time ||
-    (createdAt
-      ? new Date(createdAt).toLocaleString("en-US", {
-          dateStyle: "medium",
-          timeStyle: "short",
-        })
-      : "Recently");
   return {
     ...item,
     id: String(id || item.id || ""),
@@ -216,29 +209,17 @@ const normalizeNotification = (item, id = item.id) => {
     eventId: item.eventId || "",
     title: item.title || (eventStatus ? `Event ${eventStatus}` : "Notification"),
     message: item.message || "",
-    type: ["green", "red"].includes(item.type)
-      ? item.type
-      : eventStatus === "Approved"
-        ? "green"
-        : eventStatus === "Rejected"
-          ? "red"
-          : "yellow",
+    type: item.type || (eventStatus ? eventStatus.toLowerCase() : "default"),
     read: item.read === true || item.isRead === true,
-    organizerId: item.organizerId || item.organizerUid || item.recipientUid || item.recipientId || organizerId,
+    ownerUid: item.ownerUid || currentOrganizerUid,
+    organizerId: item.organizerId || currentOrganizerUid,
     createdAt,
-    time,
+    source: item.source || "derived",
   };
 };
-let notifications = Array.isArray(savedNotifications)
-  ? savedNotifications.filter(
-      (item) => isEventStatusNotification(item) && belongsToVisibleOrganizer(item),
-    )
-  : [];
-notifications = notifications.map((item) => normalizeNotification(item));
+let notifications = [];
 deletedNotifications = deletedNotifications.filter(
-  (item) =>
-    isEventStatusNotification(item) &&
-    belongsToVisibleOrganizer(item),
+  (item) => item.expiresAt > Date.now(),
 );
 deletedNotifications = deletedNotifications.map((item) => normalizeNotification(item));
 
@@ -344,7 +325,7 @@ async function updateOrganizerFirestoreRead(item, read) {
     import("https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js"),
   ]);
   const user = config.auth?.currentUser;
-  if (!user || !organizerIdentifiers.has(String(user.uid))) {
+  if (!user || user.uid !== currentOrganizerUid) {
     throw new Error("The signed-in organizer could not be verified.");
   }
   await firestoreModule.updateDoc(
@@ -360,7 +341,7 @@ async function permanentlyDeleteOrganizerNotification(item) {
     import("https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js"),
   ]);
   const user = config.auth?.currentUser;
-  if (!user || !organizerIdentifiers.has(String(user.uid))) {
+  if (!user || user.uid !== currentOrganizerUid) {
     throw new Error("The signed-in organizer could not be verified.");
   }
   await firestoreModule.deleteDoc(
@@ -375,6 +356,7 @@ async function setOrganizerNotificationRead(item, read) {
   try {
     await updateOrganizerFirestoreRead(item, read);
     item.read = Boolean(read);
+    window.OrganizerNotificationData?.setRead(item.id, read);
     saveNotifications();
     return true;
   } catch (error) {
@@ -388,189 +370,81 @@ async function setOrganizerNotificationRead(item, read) {
 }
 
 function refreshNotificationsFromStorage() {
-  const stored = JSON.parse(
-    localStorage.getItem(notificationStorageKey) || "[]",
-  );
+  const stored = readLocalArray(notificationStorageKey);
   notifications = Array.isArray(stored)
     ? stored.filter(
-        (item) => isEventStatusNotification(item) &&
-          belongsToVisibleOrganizer(item) &&
+        (item) => belongsToVisibleOrganizer(item) &&
           !deletedNotifications.some((deletedItem) => deletedItem.id === item.id),
       )
     : [];
   notifications = notifications.map((item) => normalizeNotification(item));
+  notifications.sort((first, second) =>
+    (notificationDate(second.createdAt)?.getTime() || 0) -
+    (notificationDate(first.createdAt)?.getTime() || 0),
+  );
   renderNotifications();
 }
 
 function saveNotifications() {
-  const stored = JSON.parse(
-    localStorage.getItem(notificationStorageKey) || "[]",
-  );
+  const stored = readLocalArray(notificationStorageKey);
   const others = Array.isArray(stored)
-    ? stored.filter((item) => !belongsToCurrentOrganizer(item) || !isNotificationVisibleToOrganizer(item))
+    ? stored.filter((item) => item.ownerUid && item.ownerUid !== currentOrganizerUid)
     : [];
+  notifications = notifications.map((item) => normalizeNotification(item));
   localStorage.setItem(
     notificationStorageKey,
-    JSON.stringify([...others, ...notifications]),
+    JSON.stringify([...others, ...notifications.map((item) => ({
+      ...item,
+      ownerUid: currentOrganizerUid,
+    }))]),
   );
   saveDeletedNotifications();
   window.dispatchEvent(new Event("recovibeOrganizerNotificationsChanged"));
 }
 
 function saveDeletedNotifications() {
-  const stored = JSON.parse(
-    localStorage.getItem(deletedNotificationStorageKey) || "[]",
-  );
+  const stored = readLocalArray(deletedNotificationStorageKey);
   const others = Array.isArray(stored)
-    ? stored.filter((item) => !belongsToCurrentOrganizer(item) || !isNotificationVisibleToOrganizer(item))
+    ? stored.filter((item) => item.ownerUid && item.ownerUid !== currentOrganizerUid)
     : [];
   localStorage.setItem(
     deletedNotificationStorageKey,
-    JSON.stringify([...others, ...deletedNotifications]),
+    JSON.stringify([...others, ...deletedNotifications.map((item) => ({
+      ...item,
+      ownerUid: currentOrganizerUid,
+    }))]),
   );
 }
 
-function addOrganizerIdentifiers(user, profile = {}) {
-  [
-    user?.uid,
-    user?.email,
-    profile.uid,
-    profile.userId,
-    profile.id,
-    profile.email,
-    profile.organizerId,
-    profile.organizerCode,
-    profile.organizerNumber,
-    profile.organizerNo,
-    profile.organizationCode,
-    profile.accountNumber,
-    profile.accountNo,
-  ]
-    .filter(Boolean)
-    .forEach((identifier) =>
-      organizerIdentifiers.add(String(identifier).trim().toLowerCase()),
-    );
-}
-
-function persistFirestoreNotifications() {
-  const stored = JSON.parse(localStorage.getItem(notificationStorageKey) || "[]");
-  const otherNotifications = Array.isArray(stored)
-    ? stored.filter((item) => !belongsToCurrentOrganizer(item) || !isNotificationVisibleToOrganizer(item))
-    : [];
-  const localNotifications = Array.isArray(stored)
-    ? stored.filter((item) => belongsToVisibleOrganizer(item) && item.source !== "firestore")
-    : [];
-  localStorage.setItem(
-    notificationStorageKey,
-    JSON.stringify([...firestoreNotifications.values(), ...localNotifications, ...otherNotifications]),
-  );
-  window.dispatchEvent(new Event("recovibeOrganizerNotificationsChanged"));
-}
-
-async function listenForFirestoreNotifications() {
-  try {
-    const [config, authModule, firestoreModule] = await Promise.all([
-      import("../UserStudent/firebaseConfig.js"),
-      import("https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js"),
-      import("https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js"),
-    ]);
-    if (!config.auth || !config.db) {
-      firestoreNotificationError = "Organizer notifications are unavailable because Firebase is not configured.";
-      renderNotifications();
-      return;
-    }
-    await config.authReady;
-
-    authStateUnsubscribe?.();
-    authStateUnsubscribe = authModule.onAuthStateChanged(config.auth, (user) => {
-      firestoreNotificationUnsubscribers.forEach((unsubscribe) => unsubscribe());
-      firestoreNotificationUnsubscribers = [];
-      firestoreNotifications.clear();
-      if (!user) {
-        firestoreNotificationError = "Sign in to load organizer notifications.";
-        persistFirestoreNotifications();
-        renderNotifications();
-        return;
-      }
-
-      let profile = {};
-      try {
-        profile = JSON.parse(localStorage.getItem("recovibeOrganizerProfile") || "{}");
-      } catch (error) {
-        console.error("[OrganizerNotifications] Could not read organizer profile:", error);
-      }
-      addOrganizerIdentifiers(user, profile);
-      const collectionRef = firestoreModule.collection(config.db, "notifications");
-      const querySnapshots = new Map();
-      const queries = [
-        firestoreModule.query(
-          collectionRef,
-          firestoreModule.where("recipientUid", "==", user.uid),
-        ),
-        firestoreModule.query(
-          collectionRef,
-          firestoreModule.where("recipientUserId", "==", user.uid),
-        ),
-        firestoreModule.query(
-          collectionRef,
-          firestoreModule.where("recipientId", "==", user.uid),
-        ),
-        firestoreModule.query(
-          collectionRef,
-          firestoreModule.where("userId", "==", user.uid),
-        ),
-        firestoreModule.query(
-          collectionRef,
-          firestoreModule.where("organizerUid", "==", user.uid),
-        ),
-        firestoreModule.query(
-          collectionRef,
-          firestoreModule.where("organizerId", "==", user.uid),
-        ),
-      ];
-      queries.forEach((notificationsQuery, queryIndex) => {
-        const unsubscribe = firestoreModule.onSnapshot(
-          notificationsQuery,
-          (snapshot) => {
-            const queryResults = new Map();
-            snapshot.docs.forEach((document) => {
-              const notification = normalizeNotification(
-                { ...document.data(), id: document.id, source: "firestore" },
-                document.id,
-              );
-              if (isEventStatusNotification(notification) && belongsToVisibleOrganizer(notification)) {
-                queryResults.set(document.id, notification);
-              }
-            });
-            querySnapshots.set(queryIndex, queryResults);
-            firestoreNotificationError = "";
-            firestoreNotifications.clear();
-            querySnapshots.forEach((results) => {
-              results.forEach((notification, id) => firestoreNotifications.set(id, notification));
-            });
-            persistFirestoreNotifications();
-          },
-          (error) => {
-            firestoreNotificationError = "Some notifications could not be loaded. Check your connection and try again.";
-            console.error("[OrganizerNotifications] Firestore notification listener failed:", {
-              queryIndex,
-              code: error?.code || "unknown",
-              message: error?.message || String(error),
-            });
-            renderNotifications();
-          },
-        );
-        firestoreNotificationUnsubscribers.push(unsubscribe);
-      });
-    });
-  } catch (error) {
-    firestoreNotificationError = "Notifications could not be initialized. Check your connection and try again.";
-    console.error("[OrganizerNotifications] Could not initialize Firestore notifications:", {
-      code: error?.code || "unknown",
-      message: error?.message || String(error),
-    });
+function connectToSharedNotifications() {
+  const service = window.OrganizerNotificationData;
+  if (!service) {
+    firestoreNotificationError = "Notifications could not be initialized. Please try again.";
     renderNotifications();
+    return;
   }
+  service.subscribe((state) => {
+    currentOrganizerUid = state.uid || "";
+    organizerIdentifiers = new Set(currentOrganizerUid ? [currentOrganizerUid.toLowerCase()] : []);
+    firestoreNotificationError = state.error || "";
+    notifications = (state.items || []).map((item) => normalizeNotification(item));
+    notifications.sort((first, second) =>
+      (notificationDate(second.createdAt)?.getTime() || 0) -
+      (notificationDate(first.createdAt)?.getTime() || 0),
+    );
+    try {
+      deletedNotifications = readLocalArray(deletedNotificationStorageKey)
+        .filter((item) => item.ownerUid === currentOrganizerUid && item.expiresAt > Date.now())
+        .map((item) => normalizeNotification(item));
+    } catch (error) {
+      console.error("[OrganizerNotifications] Could not restore deleted notifications:", error);
+    }
+    renderNotifications();
+  });
+}
+
+function serviceRetryNotifications() {
+  window.OrganizerNotificationData?.retry();
 }
 
 function renderDeletedNotifications() {
@@ -614,14 +488,14 @@ function renderNotifications() {
           ? `<section class="notification-group"><h2>${group.toUpperCase()}</h2><ul class="notification-list">${items.map((item) => renderNotificationCard(item)).join("")}</ul></section>`
           : "";
       }).join("")
-    : `<div class="notification-state"><span class="notification-state-icon" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M16 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M8 20a2 2 0 0 0 4 0"/></svg></span><strong>${activeFilter === "unread" ? "No unread notifications" : "You have no notifications"}</strong><p>${activeFilter === "unread" ? "Everything has been read. Nice work." : "New notifications will show up here."}</p></div>`);
+    : `<div class="notification-state"><span class="notification-state-icon" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M16 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M8 20a2 2 0 0 0 4 0"/></svg></span><strong>${activeFilter === "unread" ? "No unread notifications" : "No notifications yet"}</strong><p>${activeFilter === "unread" ? "Everything has been read. Nice work." : "New notifications will show up here."}</p></div>`);
 
   const unread = notifications.filter(
     (item) => !item.read && belongsToVisibleOrganizer(item),
   ).length;
   const badge = document.getElementById("navNotifBadge");
   if (badge) {
-    badge.textContent = unread > 99 ? "99+" : String(unread);
+    badge.textContent = unread > 9 ? "9+" : unread ? String(unread) : "";
     badge.hidden = unread === 0;
   }
 
@@ -837,9 +711,6 @@ function closeNotificationDetails() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-  const badge = document.getElementById("navNotifBadge");
-  if (badge) badge.hidden = true;
-
   const searchInput = document.getElementById("notificationSearch");
   const filterSelect = document.getElementById("notificationFilter");
   window.enhanceDropdownSelects?.("#notificationFilter");
@@ -899,7 +770,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (event.target.closest("[data-retry-notifications]")) {
         firestoreNotificationError = "";
         renderNotifications();
-        void listenForFirestoreNotifications();
+        serviceRetryNotifications();
         return;
       }
       const card = event.target.closest("[data-notification-id]");
@@ -1040,13 +911,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (deleteCloseButton)
     deleteCloseButton.addEventListener("click", closeDeleteConfirmation);
 
-  listenForFirestoreNotifications();
-  window.addEventListener("beforeunload", () => {
-    firestoreNotificationUnsubscribers.forEach((unsubscribe) => unsubscribe());
-    firestoreNotificationUnsubscribers = [];
-    authStateUnsubscribe?.();
-    authStateUnsubscribe = null;
-  });
+  connectToSharedNotifications();
 
   const viewEventButton = document.getElementById("notificationViewEvent");
   if (viewEventButton)

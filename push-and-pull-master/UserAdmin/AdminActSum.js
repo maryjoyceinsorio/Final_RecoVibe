@@ -10,6 +10,9 @@ import { auth, authReady, db, isFirebaseConfigured } from "../UserStudent/fireba
 
 (() => {
   "use strict";
+  import("./AdminNotificationData.js")
+    .then(({ startAdminNotificationBadge }) => startAdminNotificationBadge())
+    .catch(() => document.querySelectorAll("[data-notification-count]").forEach((badge) => { badge.hidden = true; }));
 
   const ROLE_NAME = "Admin";
 

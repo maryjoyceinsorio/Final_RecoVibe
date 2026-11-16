@@ -1,836 +1,887 @@
+import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {
+  onSnapshot,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import {
+  auth,
+  authReady,
+  db,
+  isFirebaseConfigured,
+} from "../UserStudent/firebaseConfig.js";
+import { teacherEventReadFilters, teacherEventsQuery } from "./TeacherEventQuery.js";
+
 (() => {
   "use strict";
 
-  let events = (
-    Array.isArray(window.RECOVIBE_EVENTS) ? [...window.RECOVIBE_EVENTS] : []
-  ).filter((event) => {
-    const s = String(event.status || "")
-      .trim()
-      .toLowerCase()
-      .replace(/[ _-]+/g, " ");
-    return (
-      ["approved", "published", "rescheduled"].includes(s) ||
-      event.published === true
-    );
-  });
-  try {
-    const teacherEvents = JSON.parse(
-      localStorage.getItem("recovibeTeacherEvents") || "[]",
-    );
-    if (Array.isArray(teacherEvents)) {
-      teacherEvents
-        .filter((event) => {
-          const s = String(event.status || "")
-            .trim()
-            .toLowerCase()
-            .replace(/[ _-]+/g, " ");
-          return (
-            ["approved", "published", "rescheduled"].includes(s) ||
-            event.published === true
-          );
-        })
-        .forEach((event) => {
-          const id = event.eventId || event.id;
-          if (!events.some((existing) => String(existing.id) === String(id))) {
-            events.push({
-              ...event,
-              id,
-              source: event.source || "PUP Biñan Campus",
-              desc: event.description || "",
-            });
-          }
-        });
-    }
-  } catch (error) {
-    console.warn("Teacher event records could not be loaded.", error);
-  }
-  const state = {
+  const DEBUG = false;
+  const TIME_ZONE = "Asia/Manila";
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const FILTER_DEFAULTS = {
     query: "",
-    type: "all",
+    scope: "all",
     source: "all",
     category: "all",
     date: "all",
     status: "all",
     availability: "all",
+    dateFrom: "",
+    dateTo: "",
   };
-  const currentEvents = document.getElementById("teacherCurrentEvents");
-  const upcomingEvents = document.getElementById("teacherUpcomingEvents");
-  const resultCount = document.getElementById("teacherResultCount");
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
-  const dateRangeBounds = (value) => {
-    const date = new Date(todayStart);
-    if (value === "today") return [date, date];
-    if (value === "tomorrow") {
-      date.setDate(date.getDate() + 1);
-      return [date, date];
-    }
-    if (value === "this_week") {
-      date.setDate(date.getDate() - date.getDay());
-      const end = new Date(date);
-      end.setDate(end.getDate() + 6);
-      return [date, end];
-    }
-    if (value === "this_weekend") {
-      if (date.getDay() === 0) return [date, date];
-      date.setDate(date.getDate() + 6 - date.getDay());
-      const end = new Date(date);
-      end.setDate(end.getDate() + 1);
-      return [date, end];
-    }
-    if (value === "next_week") {
-      date.setDate(date.getDate() + 7 - date.getDay());
-      const end = new Date(date);
-      end.setDate(end.getDate() + 6);
-      return [date, end];
-    }
-    if (value === "this_month")
-      return [
-        new Date(todayStart.getFullYear(), todayStart.getMonth(), 1),
-        new Date(todayStart.getFullYear(), todayStart.getMonth() + 1, 0),
-      ];
-    if (value === "next_month")
-      return [
-        new Date(todayStart.getFullYear(), todayStart.getMonth() + 1, 1),
-        new Date(todayStart.getFullYear(), todayStart.getMonth() + 2, 0),
-      ];
-    return null;
+  const state = { ...FILTER_DEFAULTS };
+  const elements = {
+    search: document.getElementById("teacherEventSearch"),
+    scope: document.getElementById("teacherScopeFilter"),
+    source: document.getElementById("teacherSourceFilter"),
+    category: document.getElementById("teacherCategoryFilter"),
+    date: document.getElementById("teacherDateFilter"),
+    dateRange: document.getElementById("teacherCustomRange"),
+    dateFrom: document.getElementById("teacherDateFrom"),
+    dateTo: document.getElementById("teacherDateTo"),
+    status: document.getElementById("teacherStatusFilter"),
+    availability: document.getElementById("teacherAvailabilityFilter"),
+    availabilityNote: document.getElementById("teacherAvailabilityNote"),
+    clear: document.getElementById("teacherClearFilters"),
+    notice: document.getElementById("teacherEventNotice"),
+    loadState: document.getElementById("teacherLoadState"),
+    current: document.getElementById("teacherCurrentEvents"),
+    all: document.getElementById("teacherUpcomingEvents"),
+    count: document.getElementById("teacherResultCount"),
+    detailsOverlay: document.getElementById("teacherEventOverlay"),
   };
 
-  const escapeHTML = (value) =>
-    String(value ?? "").replace(
-      /[&<>'"]/g,
-      (char) =>
-        ({
-          "&": "&amp;",
-          "<": "&lt;",
-          ">": "&gt;",
-          "'": "&#39;",
-          '"': "&quot;",
-        })[char],
-    );
-  const dateFor = (event) => new Date(`${event.dateISO}T00:00:00`);
-  const formatDate = (event) =>
-    dateFor(event).toLocaleDateString("en-US", {
-      month: "short",
+  let events = [];
+  let visibleEvents = [];
+  let eventsUnsubscribe = null;
+  let authUnsubscribe = null;
+  let timeoutId = null;
+  let minuteInterval = null;
+  let active = true;
+  let currentUser = null;
+  let activeReadUid = null;
+  let activeReadFilters = [];
+  let authGeneration = 0;
+  let loading = true;
+  let loadError = "";
+  let directEventHandled = false;
+  let searchTimer = null;
+
+  function debug(...args) {
+    if (DEBUG) console.debug("[Teacher Events]", ...args);
+  }
+
+  function escapeHTML(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (character) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    })[character]);
+  }
+
+  function normalizeStatus(event) {
+    return String(event?.status || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[\s_-]+/g, "");
+  }
+
+  function getManilaParts(timestamp) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: TIME_ZONE,
+      year: "numeric",
+      month: "numeric",
       day: "numeric",
-    });
-  const today = new Date();
-  const todayISO = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
-  const isCurrent = (event) => event.dateISO === todayISO;
-  const categoryMatches = {
-    "Academic & Learning": ["academic", "learning"],
-    "Tech & Innovation": ["tech", "innovation"],
-    "Leadership & Career": ["leadership", "career", "student development"],
-    "Sports & Fitness": ["sport", "fitness"],
-    "Music & Entertainment": ["music", "entertainment"],
-    "Orgs & Student Acts": ["org", "organization", "student act"],
-    "Social Events": ["social"],
-    "Community & Outreach": ["community", "outreach"],
-    Competitions: ["competition", "hackathon"],
-    "Seminars & Workshops": ["seminar", "workshop"],
-    "Arts & Culture": ["art", "culture"],
-    "University & Campuses": ["university", "campus"],
-  };
-  function normalizeSource(source) {
-    const value = String(source || "").trim().toLowerCase();
-    if (/\bcsc\b/.test(value)) return "CSC";
-    if (/teacher|faculty/.test(value)) return "Teacher / Faculty";
-    if (/organization|organizational|ibits|event organizer/.test(value))
-      return "Organizational";
-    if (/external|admin|other/.test(value)) return "Others / External";
-    if (/pup|campus|cite/.test(value)) return "PUP Official";
-    return "Others / External";
-  }
-  events.forEach((event) => {
-    event.source = normalizeSource(event.source || event.eventSource);
-  });
-  function eventStatus(event) {
-    const raw = String(event.status || "").trim().toLowerCase();
-    if (raw === "cancelled" || raw === "canceled") return "Cancelled";
-    if (raw === "rescheduled") return "Rescheduled";
-    const openSlots = event.slotsOpen ?? event.availableSlots ?? event.slots;
-    if (raw === "registration closed" || (openSlots != null && Number(openSlots) <= 0))
-      return "Registration Closed";
-    return "Available to Join";
-  }
-
-  function matches(event) {
-    const query = state.query.trim().toLowerCase();
-    const text =
-      `${event.title} ${event.location} ${event.room} ${event.source} ${event.category}`.toLowerCase();
-    const categoryTerms = categoryMatches[state.category] || [];
-    const categoryMatch =
-      state.category === "all" ||
-      categoryTerms.some((term) =>
-        String(event.category || "")
-          .toLowerCase()
-          .includes(term),
-      );
-    const source = String(event.source || "").toLowerCase();
-    const organizationEvent =
-      /organization|organizer|ibits|club|association/.test(source);
-    const eventDate = event.dateISO
-      ? new Date(`${event.dateISO}T00:00:00`)
-      : null;
-    const validDate = eventDate && !Number.isNaN(eventDate.getTime());
-    const weekEnd = new Date(todayStart);
-    weekEnd.setDate(weekEnd.getDate() + 7);
-    const customRange = /^custom:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$/.exec(state.date);
-    const range = dateRangeBounds(state.date);
-    const dateMatch =
-      state.date === "all" ||
-      (validDate &&
-        state.date === "today" &&
-        eventDate.getTime() === todayStart.getTime()) ||
-      (validDate &&
-        state.date === "week" &&
-        eventDate >= todayStart &&
-        eventDate < weekEnd) ||
-      (validDate &&
-        state.date === "month" &&
-        eventDate.getFullYear() === todayStart.getFullYear() &&
-        eventDate.getMonth() === todayStart.getMonth()) ||
-      (validDate && state.date === "upcoming" && eventDate >= todayStart) ||
-      (validDate && state.date === "past" && eventDate < todayStart) ||
-      (validDate && range && eventDate >= range[0] && eventDate <= range[1]) ||
-      (validDate &&
-        customRange &&
-        eventDate >= new Date(`${customRange[1]}T00:00:00`) &&
-        eventDate <= new Date(`${customRange[2]}T00:00:00`));
-    const statusMatch =
-      state.status === "all" || eventStatus(event) === state.status;
-    const openSlots = event.slotsOpen ?? event.availableSlots;
-    const availabilityMatch =
-      state.availability === "all" ||
-      (state.availability === "available" &&
-        openSlots !== undefined &&
-        Number(openSlots) > 0) ||
-      (state.availability === "full" &&
-        openSlots !== undefined &&
-        Number(openSlots) <= 0) ||
-      (state.availability === "unknown" && openSlots === undefined);
-    const sourceMatches =
-      state.source === "all" || normalizeSource(event.source) === state.source;
-    const typeMatch =
-      state.type === "all" ||
-      (state.type === "organization" && organizationEvent) ||
-      (state.type === "campus" && !organizationEvent);
-    return (
-      (!query || text.includes(query)) &&
-      typeMatch &&
-      sourceMatches &&
-      categoryMatch &&
-      dateMatch &&
-      statusMatch &&
-      availabilityMatch
-    );
-  }
-
-  function isHappeningNow(event) {
-    if (!isCurrent(event)) return false;
-    const range =
-      event.startTime && event.endTime
-        ? [event.startTime, event.endTime]
-        : String(event.time || "").split(/\s+-\s+/);
-    if (range.length < 2) return true;
-    const toMinutes = (value) => {
-      const text = String(value).trim();
-      const match = /^(\d{1,2}):(\d{2})\s*(AM|PM)?$/i.exec(text);
-      if (!match) return null;
-      let hour = Number(match[1]);
-      if (match[3])
-        hour = (hour % 12) + (match[3].toUpperCase() === "PM" ? 12 : 0);
-      return hour * 60 + Number(match[2]);
+      hour: "numeric",
+      minute: "numeric",
+      hourCycle: "h23",
+    }).formatToParts(new Date(timestamp));
+    const get = (type) => Number(parts.find((part) => part.type === type)?.value || 0);
+    return {
+      year: get("year"),
+      month: get("month"),
+      day: get("day"),
+      hour: get("hour"),
+      minute: get("minute"),
     };
-    const start = toMinutes(range[0]);
-    const end = toMinutes(range[1]);
-    const nowMinutes = new Date().getHours() * 60 + new Date().getMinutes();
-    return (
-      start !== null && end !== null && nowMinutes >= start && nowMinutes <= end
+  }
+
+  function dateKey(parts) {
+    return `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
+  }
+
+  function dateOrdinal(key) {
+    const [year, month, day] = key.split("-").map(Number);
+    return Math.floor(Date.UTC(year, month - 1, day) / DAY_MS);
+  }
+
+  function manilaTimestamp(year, month, day, hour = 0, minute = 0, second = 0) {
+    return Date.UTC(year, month - 1, day, hour - 8, minute, second);
+  }
+
+  function parseClock(value) {
+    const match = /^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?$/i.exec(String(value || "").trim());
+    if (!match) return null;
+    let hour = Number(match[1]);
+    const minute = Number(match[2]);
+    if (minute > 59 || hour > 24 || (hour === 24 && minute !== 0)) return null;
+    if (match[4]) {
+      if (hour < 1 || hour > 12) return null;
+      hour = (hour % 12) + (match[4].toUpperCase() === "PM" ? 12 : 0);
+    }
+    if (hour === 24) hour = 0;
+    return { hour, minute, second: Number(match[3] || 0) };
+  }
+
+  function parseDateTime(value) {
+    const text = String(value ?? "").trim();
+    if (!text) return 0;
+    if (/(?:Z|[+-]\d{2}:?\d{2})$/i.test(text)) {
+      const timestamp = Date.parse(text);
+      return Number.isFinite(timestamp) ? timestamp : 0;
+    }
+    const match = /^(\d{4})-(\d{2})-(\d{2})[T ](.+)$/.exec(text);
+    if (!match) return 0;
+    const clock = parseClock(match[4]);
+    if (!clock) return 0;
+    return manilaTimestamp(
+      Number(match[1]),
+      Number(match[2]),
+      Number(match[3]),
+      clock.hour,
+      clock.minute,
+      clock.second,
     );
   }
 
-  function eventCard(event) {
-    const date = dateFor(event);
-    return `<article class="teacher-event-card" data-event-id="${escapeHTML(event.id)}" id="teacher-event-card-${escapeHTML(event.id)}">
-			<div class="teacher-date" id="teacher-event-date-${escapeHTML(event.id)}" data-event-field="date"><span id="teacher-event-month-${escapeHTML(event.id)}">${date.toLocaleDateString("en-US", { month: "short" })}</span><strong id="teacher-event-day-${escapeHTML(event.id)}">${date.getDate()}</strong><small>${date.getFullYear()}</small></div>
-			<div class="teacher-event-content" id="teacher-event-content-${escapeHTML(event.id)}"><h3 class="teacher-event-title" id="teacher-event-title-${escapeHTML(event.id)}" data-event-field="title">${escapeHTML(event.title)}</h3><p class="teacher-event-source" id="teacher-event-source-${escapeHTML(event.id)}" data-event-field="source">${escapeHTML(normalizeSource(event.source || event.location))}</p><div class="teacher-event-meta" id="teacher-event-meta-${escapeHTML(event.id)}" data-event-field="schedule"><span id="teacher-event-time-${escapeHTML(event.id)}" data-event-field="time"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.4"/><path d="M10 6v4l2.5 2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>${escapeHTML(event.time || "Schedule to be announced")}</span><span id="teacher-event-location-${escapeHTML(event.id)}" data-event-field="location"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 17.5S15.5 12.8 15.5 8.5a5.5 5.5 0 1 0-11 0c0 4.3 5.5 9 5.5 9Z" stroke="currentColor" stroke-width="1.4"/><circle cx="10" cy="8.3" r="2" stroke="currentColor" stroke-width="1.4"/></svg>${escapeHTML(event.location || "Location to be announced")} · ${escapeHTML(event.room || "Room TBD")}</span></div><span class="teacher-tag" id="teacher-event-category-${escapeHTML(event.id)}" data-event-field="category">${escapeHTML(event.tag || event.category || "University Event")}</span><p class="teacher-event-slots">${event.slotsOpen !== undefined ? `${escapeHTML(event.slotsOpen)} of ${escapeHTML(event.maxSlots ?? event.capacity ?? event.slotsOpen)} Slots Open` : "Availability not specified"}</p></div>
-			<div class="teacher-event-actions" id="teacher-event-actions-${escapeHTML(event.id)}"><button type="button" class="teacher-details-button" id="teacher-event-details-button-${escapeHTML(event.id)}" data-event-details="${escapeHTML(event.id)}" aria-controls="teacherEventOverlay">View Details</button></div>
-		</article>`;
+  function parseDateKey(value) {
+    if (value && typeof value.toDate === "function") {
+      const date = value.toDate();
+      return dateKey(getManilaParts(date.getTime()));
+    }
+    if (value instanceof Date && Number.isFinite(value.getTime())) {
+      return dateKey(getManilaParts(value.getTime()));
+    }
+    const text = String(value ?? "").trim();
+    const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+    if (dateOnly) {
+      const year = Number(dateOnly[1]);
+      const month = Number(dateOnly[2]);
+      const day = Number(dateOnly[3]);
+      const check = new Date(Date.UTC(year, month - 1, day));
+      if (
+        month < 1 || month > 12 || day < 1 ||
+        check.getUTCFullYear() !== year ||
+        check.getUTCMonth() !== month - 1 ||
+        check.getUTCDate() !== day
+      ) return "";
+      return `${dateOnly[1]}-${dateOnly[2]}-${dateOnly[3]}`;
+    }
+    if (/^\d{4}-\d{2}-\d{2}[T ]/.test(text)) {
+      const parsed = parseDateTime(text);
+      return Number.isFinite(parsed) && parsed ? dateKey(getManilaParts(parsed)) : "";
+    }
+    return "";
+  }
+
+  function toMillis(value) {
+    if (value && typeof value.toMillis === "function") return value.toMillis();
+    if (value && typeof value.toDate === "function") return value.toDate().getTime();
+    if (value && typeof value.seconds === "number") return value.seconds * 1000;
+    if (value instanceof Date && Number.isFinite(value.getTime())) return value.getTime();
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+    if (typeof value === "string" && value.trim()) {
+      const text = value.trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return parseDateTime(`${text}T00:00`);
+      const parsed = parseDateTime(text) || Date.parse(text);
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
+    return 0;
+  }
+
+  function splitTimeRange(value) {
+    return String(value || "").split(/\s*(?:-|–|—)\s*/).map((part) => part.trim());
+  }
+
+  function displayValue(value) {
+    if (value && typeof value === "object") {
+      return String(value.name || value.organization || value.label || "").trim();
+    }
+    return String(value || "").trim();
+  }
+
+  function categoriesFor(event) {
+    const value = event.category ?? event.categories ?? event.tag ?? "";
+    const categories = Array.isArray(value) ? value : String(value).split(",");
+    return [...new Set(categories.map(displayValue).filter(Boolean))];
+  }
+
+  function normalizeEvent(id, data) {
+    if (!data || typeof data !== "object") throw new Error("Event data is not an object.");
+    if (
+      typeof window.isTeacherEventVisible !== "function" ||
+      !window.isTeacherEventVisible(data, { includeCancelled: true })
+    ) {
+      return null;
+    }
+
+    const rawTime = splitTimeRange(data.time);
+    const dateValue = data.dateISO || data.eventDate || data.date || data.startDate || "";
+    const rawStartAt = data.startAt ?? data.start_at;
+    const startAtIsDateOnly = typeof rawStartAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(rawStartAt.trim());
+    let start = startAtIsDateOnly ? 0 : toMillis(rawStartAt);
+    let startDate = parseDateKey(dateValue) || parseDateKey(rawStartAt);
+    const startClock = parseClock(data.startTime || data.timeStart || rawTime[0] || "");
+
+    if (!start && startDate) {
+      const [year, month, day] = startDate.split("-").map(Number);
+      start = manilaTimestamp(
+        year,
+        month,
+        day,
+        startClock?.hour || 0,
+        startClock?.minute || 0,
+        startClock?.second || 0,
+      );
+    }
+    if (!start && dateValue) {
+      start = parseDateTime(dateValue);
+      if (start) startDate = dateKey(getManilaParts(start));
+    }
+    if (!start || !Number.isFinite(start)) {
+      debug(`Skipped event ${id}: no usable start date.`, data);
+      return null;
+    }
+    if (!startDate) startDate = dateKey(getManilaParts(start));
+
+    const endDateValue = data.endDateISO || data.dateEnd || data.endDate || dateValue;
+    const rawEndAt = data.endAt ?? data.end_at;
+    const endAtIsDateOnly = typeof rawEndAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(rawEndAt.trim());
+    const endDate = parseDateKey(rawEndAt) || parseDateKey(endDateValue) || startDate;
+    const endClock = parseClock(data.endTime || data.timeEnd || rawTime[1] || "");
+    let end = endAtIsDateOnly ? 0 : toMillis(rawEndAt);
+    if (!end && endClock) {
+      const [year, month, day] = endDate.split("-").map(Number);
+      end = manilaTimestamp(year, month, day, endClock.hour, endClock.minute, endClock.second);
+      if (end < start && endDate === startDate) end += DAY_MS;
+    } else if (!end) {
+      const [year, month, day] = endDate.split("-").map(Number);
+      end = manilaTimestamp(year, month, day, 23, 59, 59);
+    }
+
+    const organization = displayValue(
+      data.organization || data.organizationName || data.organizerName || data.organizer || data.orgName,
+    );
+    const source = displayValue(data.source || data.eventSource || organization) || "Source not specified";
+    const capacityValue = data.capacity ?? data.maxCapacity ?? data.maxSlots ?? "";
+    const capacity = String(capacityValue).trim() === "" ? null : Number(capacityValue);
+    const registeredValue = data.registeredCount;
+    const registeredCount = registeredValue === null ||
+      registeredValue === undefined ||
+      String(registeredValue).trim() === ""
+      ? null
+      : Number(registeredValue);
+    const venue = [displayValue(data.venue || data.location), displayValue(data.room)]
+      .filter(Boolean)
+      .join(" · ");
+
+    return {
+      id: String(id),
+      raw: data,
+      status: normalizeStatus(data),
+      title: String(data.title || data.name || data.eventName || "Untitled event"),
+      description: String(data.description || data.desc || data.summary || ""),
+      organization: organization || source,
+      source,
+      venue: venue || "Location to be announced",
+      categories: categoriesFor(data),
+      start,
+      end,
+      date: startDate,
+      capacity: Number.isFinite(capacity) && capacity >= 0 ? capacity : null,
+      registeredCount: Number.isFinite(registeredCount) ? Math.max(0, registeredCount) : null,
+    };
+  }
+
+  function todayKey() {
+    return dateKey(getManilaParts(Date.now()));
+  }
+
+  function formatDate(timestamp, options) {
+    return new Intl.DateTimeFormat("en-US", { timeZone: TIME_ZONE, ...options }).format(new Date(timestamp));
+  }
+
+  function timeRange(event) {
+    return `${formatDate(event.start, { weekday: "short" })}, ${formatDate(event.start, { hour: "numeric", minute: "2-digit" })} - ${formatDate(event.end, { hour: "numeric", minute: "2-digit" })}`;
+  }
+
+  function isLive(event, now = Date.now()) {
+    return event.start <= now && now < event.end;
+  }
+
+  function eventStatus(event, now = Date.now()) {
+    if (event.status === "cancelled" || event.status === "canceled") return "Cancelled";
+    if (event.status === "rescheduled") return "Rescheduled";
+    if (isLive(event, now)) return "Live now";
+    return event.start > now ? "Upcoming" : "Completed";
+  }
+
+  function availability(event) {
+    if (event.capacity === null || event.registeredCount === null) return "";
+    if (event.registeredCount >= event.capacity) return "full";
+    if (event.capacity > 0 && event.registeredCount / event.capacity >= 0.8) return "almost-full";
+    return "open";
+  }
+
+  function refreshOptions(select, values, placeholder) {
+    const selected = select.value;
+    select.replaceChildren(new Option(placeholder, "all"));
+    values.forEach((value) => select.add(new Option(value, value)));
+    if ([...select.options].some((option) => option.value === selected)) {
+      select.value = selected;
+    } else {
+      select.value = "all";
+    }
+  }
+
+  function updateDynamicOptions() {
+    const sources = [...new Set(events.flatMap((event) => [event.source, event.organization]).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b));
+    const categories = [...new Set(events.flatMap((event) => event.categories))]
+      .sort((a, b) => a.localeCompare(b));
+    refreshOptions(elements.source, sources, "All Sources");
+    refreshOptions(elements.category, categories, "Category");
+    let invalidFilter = false;
+    if (!sources.includes(state.source)) {
+      invalidFilter = state.source !== "all";
+      state.source = "all";
+    }
+    if (!categories.includes(state.category)) {
+      invalidFilter = invalidFilter || state.category !== "all";
+      state.category = "all";
+    }
+    elements.source.value = state.source;
+    elements.category.value = state.category;
+
+    const hasCapacity = events.some((event) => event.capacity !== null);
+    const hasUnknownAvailability = events.some(
+      (event) => event.capacity === null || event.registeredCount === null,
+    );
+    elements.availability.disabled = !hasCapacity;
+    elements.availabilityNote.hidden = !events.length || (!hasUnknownAvailability && hasCapacity);
+    elements.availabilityNote.textContent = hasCapacity
+      ? "Events without stored capacity or registered count are excluded from availability filters."
+      : "Availability filters are disabled because no events have capacity.";
+    if (!hasCapacity && state.availability !== "all") {
+      state.availability = "all";
+      invalidFilter = true;
+    }
+    elements.availability.value = state.availability;
+    if (invalidFilter) writeUrlFilters(true);
+  }
+
+  function dateMatch(event, nowKey) {
+    if (state.date === "all") return true;
+    if (state.date === "today") return event.date === nowKey;
+    const currentOrdinal = dateOrdinal(nowKey);
+    const eventOrdinal = dateOrdinal(event.date);
+    if (state.date === "week") {
+      const weekStart = currentOrdinal - new Date(Date.UTC(
+        Number(nowKey.slice(0, 4)),
+        Number(nowKey.slice(5, 7)) - 1,
+        Number(nowKey.slice(8, 10)),
+      )).getUTCDay();
+      return eventOrdinal >= weekStart && eventOrdinal < weekStart + 7;
+    }
+    if (state.date === "month") return event.date.slice(0, 7) === nowKey.slice(0, 7);
+    if (state.date === "custom") {
+      const start = state.dateFrom || state.dateTo;
+      const end = state.dateTo || state.dateFrom;
+      return Boolean(start && end && event.date >= start && event.date <= end);
+    }
+    return true;
+  }
+
+  function filterEvents() {
+    const now = Date.now();
+    const nowKey = todayKey();
+    const query = state.query.trim().toLocaleLowerCase();
+    const steps = [
+      ["search", (event) => !query || `${event.title} ${event.venue} ${event.organization} ${event.source}`.toLocaleLowerCase().includes(query)],
+      ["scope", (event) => state.scope === "all" || (state.scope === "upcoming" ? event.start >= now : event.start < now)],
+      ["source", (event) => state.source === "all" || event.source === state.source || event.organization === state.source],
+      ["category", (event) => state.category === "all" || event.categories.includes(state.category)],
+      ["date", (event) => dateMatch(event, nowKey)],
+      ["status", (event) => state.status === "all" || eventStatus(event, now).toLowerCase().replace(/\s+/g, "-") === state.status],
+      ["availability", (event) => state.availability === "all" || availability(event) === state.availability],
+    ];
+    let filtered = [...events];
+    const counts = { visible: filtered.length };
+    steps.forEach(([name, predicate]) => {
+      filtered = filtered.filter(predicate);
+      counts[name] = filtered.length;
+    });
+    debug("Filter counts:", counts);
+    return filtered.sort((a, b) => {
+      const aUpcoming = a.start >= now;
+      const bUpcoming = b.start >= now;
+      if (aUpcoming !== bUpcoming) return aUpcoming ? -1 : 1;
+      return aUpcoming ? a.start - b.start : b.start - a.start;
+    });
+  }
+
+  function renderCard(event, section) {
+    const status = eventStatus(event);
+    const registrationText = event.capacity === null || event.registeredCount === null
+      ? ""
+      : `<p class="teacher-event-slots">${event.registeredCount} of ${event.capacity} registered</p>`;
+    const classes = [
+      "teacher-event-card",
+      event.status === "cancelled" || event.status === "canceled" ? "is-cancelled" : "",
+    ].filter(Boolean).join(" ");
+    return `<article class="${classes}" data-event-id="${escapeHTML(event.id)}" data-section="${section}">
+      <div class="teacher-date" aria-label="${escapeHTML(formatDate(event.start, { month: "long", day: "numeric" }))}">
+        <span>${escapeHTML(formatDate(event.start, { month: "short" }))}</span>
+        <strong>${escapeHTML(formatDate(event.start, { day: "numeric" }))}</strong>
+        <small>${escapeHTML(formatDate(event.start, { year: "numeric" }))}</small>
+      </div>
+      <div class="teacher-event-content">
+        <div class="teacher-event-categories">${event.categories.map((category) => `<span class="teacher-tag">${escapeHTML(category)}</span>`).join("")}</div>
+        <h3 class="teacher-event-title">${escapeHTML(event.title)}</h3>
+        <p class="teacher-event-source">${escapeHTML(event.organization)}</p>
+        <div class="teacher-event-meta">
+          <span>${escapeHTML(timeRange(event))}</span>
+          <span>${escapeHTML(event.venue)}</span>
+        </div>
+        ${registrationText}
+      </div>
+      <div class="teacher-event-actions">
+        <span class="teacher-status-chip status-${status.toLowerCase().replace(/\s+/g, "-")}">${escapeHTML(status)}</span>
+        <button type="button" class="teacher-details-button" data-event-details="${escapeHTML(event.id)}" aria-controls="teacherEventOverlay">Details</button>
+      </div>
+    </article>`;
+  }
+
+  function skeletonCards() {
+    return Array.from({ length: 2 }, () => '<div class="teacher-event-skeleton" aria-hidden="true"><span></span><div><i></i><i></i><i></i></div></div>').join("");
+  }
+
+  function activeFilters() {
+    return state.query !== "" ||
+      state.scope !== "all" ||
+      state.source !== "all" ||
+      state.category !== "all" ||
+      state.date !== "all" ||
+      state.status !== "all" ||
+      state.availability !== "all";
   }
 
   function render() {
-    const visible = events
-      .filter(matches)
-      .sort((first, second) =>
-        String(first.dateISO || "").localeCompare(String(second.dateISO || "")),
-      );
-    const current = visible.filter(isHappeningNow);
-    currentEvents.innerHTML = current.length
-      ? current.map(eventCard).join("")
-      : '<div class="teacher-empty">No events match your filters.</div>';
-    upcomingEvents.innerHTML = visible.length
-      ? visible.map(eventCard).join("")
-      : '<div class="teacher-empty">No events match your filters.</div>';
-    resultCount.textContent = `${visible.length} event${visible.length === 1 ? "" : "s"}`;
+    elements.clear.hidden = !activeFilters();
+    elements.dateRange.hidden = elements.date.value !== "custom";
+    if (loading) {
+      elements.count.textContent = "";
+      elements.current.innerHTML = skeletonCards();
+      elements.all.innerHTML = skeletonCards();
+      elements.loadState.hidden = true;
+      return;
+    }
+    if (loadError) {
+      elements.count.textContent = "0 events";
+      elements.current.replaceChildren();
+      elements.all.replaceChildren();
+      elements.loadState.hidden = false;
+      elements.loadState.innerHTML = `<span>${escapeHTML(loadError)}</span><button type="button" id="teacherRetryEvents">Retry</button>`;
+      return;
+    }
+
+    elements.loadState.hidden = true;
+    const filtered = filterEvents();
+    const live = filtered.filter((event) => isLive(event));
+    elements.count.textContent = `${filtered.length} ${filtered.length === 1 ? "event" : "events"}`;
+    if (live.length) {
+      elements.current.innerHTML = live.map((event) => renderCard(event, "current")).join("");
+    } else {
+      elements.current.innerHTML = '<div class="teacher-empty">No events happening right now.</div>';
+    }
+    if (filtered.length) {
+      elements.all.innerHTML = filtered.map((event) => renderCard(event, "all")).join("");
+    } else if (!events.length) {
+      elements.all.innerHTML = '<div class="teacher-empty">No events yet.</div>';
+    } else {
+      elements.all.innerHTML = '<div class="teacher-empty">No events match your filters.</div>';
+    }
   }
 
-  function openDetails(id) {
-    const event = events.find((item) => item.id === id);
-    if (!event) return;
-    const teacherId = localStorage.getItem("recovibeTeacherId");
-    const canReviewDocuments =
-      teacherId &&
-      String(event.createdBy || event.teacherId || event.organizerId || "") ===
-        String(teacherId);
-    window.RecovibeEventDetails?.open(event, {
-      showApprovalDocuments: Boolean(canReviewDocuments),
+  function readUrlFilters() {
+    const params = new URLSearchParams(window.location.search);
+    const valid = (value, choices) => choices.includes(value) ? value : "all";
+    state.query = (params.get("search") || "").trim();
+    state.scope = valid(params.get("scope"), ["all", "upcoming", "past"]);
+    state.source = params.get("source") || "all";
+    state.category = params.get("category") || "all";
+    state.date = valid(params.get("date"), ["all", "today", "week", "month", "custom"]);
+    state.status = valid(params.get("status"), ["all", "upcoming", "live", "completed", "cancelled", "rescheduled"]);
+    state.availability = valid(params.get("availability"), ["all", "open", "almost-full", "full"]);
+    state.dateFrom = params.get("dateFrom") || "";
+    state.dateTo = params.get("dateTo") || "";
+    if (
+      (state.dateFrom && parseDateKey(state.dateFrom) !== state.dateFrom) ||
+      (state.dateTo && parseDateKey(state.dateTo) !== state.dateTo) ||
+      (state.dateFrom && state.dateTo && state.dateFrom > state.dateTo)
+    ) {
+      state.date = "all";
+      state.dateFrom = "";
+      state.dateTo = "";
+    }
+    if (state.date !== "custom") {
+      state.dateFrom = "";
+      state.dateTo = "";
+    }
+    if (state.date === "custom" && !state.dateFrom && !state.dateTo) state.date = "all";
+    elements.search.value = state.query;
+    elements.scope.value = state.scope;
+    elements.date.value = state.date;
+    elements.dateFrom.value = state.dateFrom;
+    elements.dateTo.value = state.dateTo;
+    elements.status.value = state.status;
+    elements.availability.value = state.availability;
+  }
+
+  function writeUrlFilters(replace = false) {
+    const url = new URL(window.location.href);
+    const params = url.searchParams;
+    const values = {
+      search: state.query,
+      scope: state.scope,
+      source: state.source,
+      category: state.category,
+      date: state.date,
+      dateFrom: state.date === "custom" ? state.dateFrom : "",
+      dateTo: state.date === "custom" ? state.dateTo : "",
+      status: state.status,
+      availability: state.availability,
+    };
+    Object.entries(values).forEach(([key, value]) => {
+      if (value && value !== "all") params.set(key, value);
+      else params.delete(key);
     });
+    if (url.href !== window.location.href) {
+      if (replace) window.history.replaceState(null, "", url);
+      else window.history.pushState(null, "", url);
+    }
+  }
+
+  function syncControls() {
+    elements.search.value = state.query;
+    elements.scope.value = state.scope;
+    elements.source.value = state.source;
+    elements.category.value = state.category;
+    elements.date.value = state.date;
+    elements.dateFrom.value = state.dateFrom;
+    elements.dateTo.value = state.dateTo;
+    elements.status.value = state.status;
+    elements.availability.value = state.availability;
+  }
+
+  function onFilterChange() {
+    state.query = elements.search.value.trim();
+    state.scope = elements.scope.value;
+    state.source = elements.source.value;
+    state.category = elements.category.value;
+    state.date = elements.date.value;
+    state.dateFrom = elements.dateFrom.value;
+    state.dateTo = elements.dateTo.value;
+    state.status = elements.status.value;
+    state.availability = elements.availability.value;
+    writeUrlFilters();
+    render();
+  }
+
+  function setError(error, fallback) {
+    const code = String(error?.code || "unknown");
+    debug("Firestore read failed:", {
+      path: "events",
+      filters: activeReadFilters,
+      code,
+      message: error?.message || String(error),
+      uid: activeReadUid,
+    });
+    if (code.includes("permission-denied")) {
+      loadError = "You don't have permission to view events. Ask an administrator to check the Firestore events read rule.";
+    } else if (/unavailable|deadline-exceeded|network|unknown/.test(code)) {
+      loadError = "Couldn't connect to events. Check your network connection and retry.";
+    } else {
+      loadError = fallback || "Events could not be loaded. Please retry.";
+    }
+    loading = false;
+    clearTimeout(timeoutId);
+    timeoutId = null;
+    render();
+  }
+
+  function stopEvents() {
+    eventsUnsubscribe?.();
+    eventsUnsubscribe = null;
+    clearTimeout(timeoutId);
+    timeoutId = null;
+  }
+
+  function startSafetyTimeout() {
+    clearTimeout(timeoutId);
+    timeoutId = setTimeout(() => {
+      if (loading) setError({ code: "timeout" }, "Events are taking longer than expected to load. Please retry.");
+    }, 5000);
+  }
+
+  function handleSnapshot(snapshot) {
+    const nextEvents = [];
+    let visibleCount = 0;
+    snapshot.docs.forEach((item) => {
+      try {
+        const data = item.data();
+        if (window.isTeacherEventVisible?.(data, { includeCancelled: true })) visibleCount += 1;
+        const event = normalizeEvent(item.id, data);
+        if (event) nextEvents.push(event);
+      } catch (error) {
+        debug(`Skipped malformed event ${item.id}:`, error);
+      }
+    });
+    events = nextEvents;
+    visibleEvents = nextEvents;
+    loading = false;
+    loadError = "";
+    clearTimeout(timeoutId);
+    timeoutId = null;
+    debug("Event snapshot:", {
+      rawSnapshotSize: snapshot.size,
+      afterVisibilityRule: visibleCount,
+      afterUsableStartDate: nextEvents.length,
+    });
+    updateDynamicOptions();
+    syncControls();
+    render();
+    if (!directEventHandled) openRequestedEvent();
+  }
+
+  function subscribeEvents(user) {
+    stopEvents();
+    currentUser = user;
+    events = [];
+    visibleEvents = [];
+    loading = true;
+    loadError = "";
+    render();
+    if (!db || !isFirebaseConfigured || !user?.uid || auth?.currentUser?.uid !== user.uid) {
+      loadError = "Sign in with a teacher account to view events.";
+      loading = false;
+      render();
+      return;
+    }
+    startSafetyTimeout();
+    const uidAtRead = auth.currentUser?.uid;
+    const filters = teacherEventReadFilters(user.uid);
+    activeReadUid = uidAtRead;
+    activeReadFilters = filters;
+    debug("Firestore read started:", {
+      path: "events",
+      filters,
+      uid: uidAtRead,
+    });
+    try {
+      eventsUnsubscribe = onSnapshot(
+        teacherEventsQuery(db, user.uid),
+        handleSnapshot,
+        (error) => setError(error, "Events could not be loaded. Please retry."),
+      );
+    } catch (error) {
+      setError(error, "Events could not be loaded. Please retry.");
+    }
+  }
+
+  function detailStatus(event) {
+    return eventStatus(event);
+  }
+
+  function openDetails(event) {
+    if (!event) return;
+    const date = formatDate(event.start, { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+    document.getElementById("teacherModalSource").textContent = event.organization;
+    document.getElementById("teacherModalTitle").textContent = event.title;
+    document.getElementById("teacherModalDate").textContent = date;
+    document.getElementById("teacherModalTime").textContent = timeRange(event);
+    document.getElementById("teacherModalLocation").textContent = event.venue;
+    document.getElementById("teacherModalDescription").textContent = event.description;
+    document.getElementById("teacherModalCategory").textContent = event.categories.join(", ") || "Not specified";
+    document.getElementById("teacherModalCapacity").textContent = event.capacity === null
+      ? "Not specified"
+      : String(event.capacity);
+    document.getElementById("teacherModalStatus").textContent = detailStatus(event);
+    elements.detailsOverlay.hidden = false;
+    document.getElementById("teacherModalClose").focus();
   }
 
   function closeDetails() {
-    document.getElementById("teacherEventOverlay").hidden = true;
+    elements.detailsOverlay.hidden = true;
   }
 
-  function createDateRangePicker(host, select) {
-    const wrapper = document.createElement("div");
-    const trigger = document.createElement("button");
-    const panel = document.createElement("section");
-    wrapper.className = "date-range-picker";
-    trigger.className = "date-range-trigger";
-    trigger.type = "button";
-    trigger.textContent = "All Dates";
-    trigger.setAttribute("aria-label", "Date filter: All Dates");
-    trigger.setAttribute("aria-expanded", "false");
-    trigger.setAttribute("aria-haspopup", "dialog");
-    trigger.setAttribute("aria-controls", `${select.id}PickerPanel`);
-    panel.className = "date-range-panel";
-    panel.id = `${select.id}PickerPanel`;
-    panel.hidden = true;
-    panel.setAttribute("role", "dialog");
-    panel.setAttribute("aria-labelledby", `${panel.id}Title`);
-    panel.innerHTML = `<header class="date-range-header"><h2 id="${panel.id}Title">Choose date range</h2><button type="button" class="date-range-close" aria-label="Close date picker">&times;</button></header><div class="date-range-quick" role="group" aria-label="Quick date ranges"></div><div class="date-range-months" aria-label="Choose dates"></div><div class="date-range-fields"><label>From<input type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" aria-label="Start date"></label><label>To<input type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" aria-label="End date"></label></div><p class="date-range-error" role="alert" aria-live="polite"></p><footer class="date-range-actions"><button type="button" class="date-range-clear">Clear</button><button type="button" class="date-range-cancel">Cancel</button><button type="button" class="date-range-apply">Apply</button></footer>`;
-    wrapper.appendChild(trigger);
-    host.appendChild(wrapper);
-    host.classList.add("date-range-host");
-    document.body.appendChild(panel);
+  function openRequestedEvent() {
+    const eventId = new URLSearchParams(window.location.search).get("eventId");
+    if (!eventId) {
+      directEventHandled = true;
+      return;
+    }
+    const event = visibleEvents.find((item) => item.id === eventId);
+    directEventHandled = true;
+    if (!event) {
+      elements.notice.textContent = "That event could not be found in the events available to your account.";
+      elements.notice.hidden = false;
+      return;
+    }
+    elements.notice.hidden = true;
+    if (!matchesCurrentFilters(event)) {
+      Object.assign(state, FILTER_DEFAULTS);
+      syncControls();
+      writeUrlFilters();
+      render();
+    }
+    requestAnimationFrame(() => {
+      const card = [...elements.all.querySelectorAll("[data-event-id]")].find((item) => item.dataset.eventId === event.id);
+      if (card) {
+        card.scrollIntoView({ behavior: "smooth", block: "center" });
+        card.classList.add("is-highlighted");
+        window.setTimeout(() => card.classList.remove("is-highlighted"), 2200);
+      }
+      openDetails(event);
+    });
+  }
 
-    const startInput = panel.querySelector(".date-range-fields label:first-child input");
-    const endInput = panel.querySelector(".date-range-fields label:last-child input");
-    const quick = panel.querySelector(".date-range-quick");
-    const monthsElement = panel.querySelector(".date-range-months");
-    const error = panel.querySelector(".date-range-error");
-    const pad = (value) => String(value).padStart(2, "0");
-    const dateString = (date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-    const parseDate = (value) => {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(value || "")) return null;
-      const [year, month, day] = value.split("-").map(Number);
-      const date = new Date(year, month - 1, day);
-      return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day ? date : null;
-    };
-    const addDays = (date, count) => new Date(date.getFullYear(), date.getMonth(), date.getDate() + count);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const rangeFor = (preset) => {
-      const day = new Date(today);
-      if (preset === "today") return [day, day];
-      if (preset === "tomorrow") return [addDays(day, 1), addDays(day, 1)];
-      if (preset === "this_week") {
-        const start = addDays(day, -day.getDay());
-        return [start, addDays(start, 6)];
-      }
-      if (preset === "this_weekend") {
-        if (day.getDay() === 0) return [day, day];
-        const saturday = addDays(day, 6 - day.getDay());
-        return [saturday, addDays(saturday, 1)];
-      }
-      if (preset === "next_week") {
-        const start = addDays(day, 7 - day.getDay());
-        return [start, addDays(start, 6)];
-      }
-      if (preset === "this_month") return [new Date(day.getFullYear(), day.getMonth(), 1), new Date(day.getFullYear(), day.getMonth() + 1, 0)];
-      if (preset === "next_month") return [new Date(day.getFullYear(), day.getMonth() + 1, 1), new Date(day.getFullYear(), day.getMonth() + 2, 0)];
-      return null;
-    };
-    const baseOptions = [
-      { value: "today", label: "Today" },
-      { value: "tomorrow", label: "Tomorrow" },
-      { value: "this_week", label: "This week" },
-      { value: "this_weekend", label: "This weekend" },
-      { value: "next_week", label: "Next week" },
-      { value: "this_month", label: "This month" },
-      { value: "next_month", label: "Next month" },
-      { value: "all", label: "All time" },
-    ];
-    const options = [...baseOptions];
-    ["upcoming", "past"].forEach((value) => {
-      const oldOption = [...select.options].find((option) => option.value === value);
-      if (oldOption) options.push({ value, label: oldOption.textContent.trim() });
-    });
-    let applied = { value: select.value || "all", start: "", end: "" };
-    let pending = { ...applied };
-    let shownMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+  function matchesCurrentFilters(event) {
+    const saved = events;
+    events = [event];
+    const match = filterEvents().length > 0;
+    events = saved;
+    return match;
+  }
 
-    function setPending(value, bounds = null) {
-      if (value.startsWith("custom:")) {
-        const [, start, end] = value.split(":");
-        pending = { value: "custom", start, end };
-      } else if (bounds) {
-        pending = { value, start: dateString(bounds[0]), end: dateString(bounds[1]) };
-      } else if (value === "all" || value === "upcoming" || value === "past") {
-        pending = { value, start: "", end: "" };
-      } else {
-        const presetBounds = rangeFor(value);
-        pending = presetBounds
-          ? { value, start: dateString(presetBounds[0]), end: dateString(presetBounds[1]) }
-          : { value: "custom", start: "", end: "" };
-      }
-      startInput.value = pending.start;
-      endInput.value = pending.end;
-      if (pending.start) {
-        const parsed = parseDate(pending.start);
-        if (parsed) shownMonth = new Date(parsed.getFullYear(), parsed.getMonth(), 1);
-      }
-      error.textContent = "";
-      renderCalendars();
-    }
-    function syncPicker() {
-      const start = startInput.value.trim();
-      const end = endInput.value.trim();
-      const startDate = start ? parseDate(start) : null;
-      const endDate = end ? parseDate(end) : null;
-      if ((start && !startDate) || (end && !endDate)) {
-        error.textContent = "Enter a valid date (YYYY-MM-DD).";
-      } else if (startDate && endDate && start && end && start > end) {
-        error.textContent = "Start date must be on or before end date.";
-      } else {
-        error.textContent = "";
-      }
-      const unchanged = pending.value === applied.value
-        && pending.start === applied.start
-        && pending.end === applied.end;
-      panel.querySelector(".date-range-apply").disabled = Boolean(error.textContent) || unchanged;
-      quick.querySelectorAll("button").forEach((button) => {
-        const active = button.dataset.value === pending.value;
-        button.classList.toggle("active", active);
-        button.setAttribute("aria-pressed", String(active));
-      });
-      monthsElement.querySelectorAll(".date-range-day").forEach((button) => {
-        const value = button.dataset.date;
-        const selected = value === pending.start || value === pending.end;
-        button.classList.toggle("selected", selected);
-        button.classList.toggle("in-range", Boolean(pending.start && pending.end && value > pending.start && value < pending.end));
-        if (selected) button.setAttribute("aria-pressed", "true");
-        else button.setAttribute("aria-pressed", "false");
-      });
-    }
-    function renderMonth(monthDate, index) {
-      const year = monthDate.getFullYear();
-      const month = monthDate.getMonth();
-      const section = document.createElement("section");
-      section.className = "date-range-month";
-      section.setAttribute("aria-label", monthDate.toLocaleDateString("en-US", { month: "long", year: "numeric" }));
-      const title = document.createElement("h3");
-      title.className = "date-range-month-title";
-      title.textContent = monthDate.toLocaleDateString("en-US", { month: "long", year: "numeric" });
-      section.appendChild(title);
-      const weekdayRow = document.createElement("div");
-      weekdayRow.className = "date-range-weekdays";
-      weekdayRow.setAttribute("aria-hidden", "true");
-      ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].forEach((label) => {
-        const weekday = document.createElement("span");
-        weekday.textContent = label;
-        weekdayRow.appendChild(weekday);
-      });
-      section.appendChild(weekdayRow);
-      const grid = document.createElement("div");
-      grid.className = "date-range-days";
-      grid.setAttribute("role", "grid");
-      const first = new Date(year, month, 1);
-      for (let blank = 0; blank < first.getDay(); blank += 1) {
-        const spacer = document.createElement("span");
-        spacer.className = "date-range-empty-day";
-        spacer.setAttribute("aria-hidden", "true");
-        grid.appendChild(spacer);
-      }
-      const count = new Date(year, month + 1, 0).getDate();
-      for (let day = 1; day <= count; day += 1) {
-        const value = `${year}-${pad(month + 1)}-${pad(day)}`;
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "date-range-day";
-        button.dataset.date = value;
-        button.textContent = String(day);
-        button.setAttribute("role", "gridcell");
-        button.setAttribute("aria-label", new Date(year, month, day).toLocaleDateString("en-US", { dateStyle: "full" }));
-        button.classList.toggle("is-today", value === dateString(today));
-        button.addEventListener("click", () => {
-          if (!pending.start || pending.end) {
-            pending = { value: "custom", start: value, end: "" };
-          } else if (value < pending.start) {
-            pending = { value: "custom", start: value, end: pending.start };
-          } else {
-            pending = { value: "custom", start: pending.start, end: value };
-          }
-          startInput.value = pending.start;
-          endInput.value = pending.end;
-          error.textContent = "";
-          renderCalendars();
-          monthsElement.querySelector(`[data-date="${pending.end || pending.start}"]`)?.focus();
-        });
-        grid.appendChild(button);
-      }
-      section.appendChild(grid);
-      if (index > 0) section.classList.add("date-range-next-month");
-      return section;
-    }
-    function renderCalendars() {
-      monthsElement.replaceChildren();
-      const previous = document.createElement("button");
-      previous.type = "button";
-      previous.className = "date-range-month-nav date-range-previous";
-      previous.setAttribute("aria-label", "Previous month");
-      previous.textContent = "\u2039";
-      previous.addEventListener("click", () => {
-        shownMonth = new Date(shownMonth.getFullYear(), shownMonth.getMonth() - 1, 1);
-        renderCalendars();
-        monthsElement.querySelector(".date-range-previous")?.focus();
-      });
-      const next = document.createElement("button");
-      next.type = "button";
-      next.className = "date-range-month-nav date-range-next";
-      next.setAttribute("aria-label", "Next month");
-      next.textContent = "\u203a";
-      next.addEventListener("click", () => {
-        shownMonth = new Date(shownMonth.getFullYear(), shownMonth.getMonth() + 1, 1);
-        renderCalendars();
-        monthsElement.querySelector(".date-range-next")?.focus();
-      });
-      monthsElement.append(previous, renderMonth(shownMonth, 0), renderMonth(new Date(shownMonth.getFullYear(), shownMonth.getMonth() + 1, 1), 1), next);
-      syncPicker();
-    }
-    options.forEach(({ value, label }) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "date-range-quick-option";
-      button.dataset.value = value;
-      button.textContent = label;
-      button.addEventListener("click", () => {
-        if (value === "all" || value === "upcoming" || value === "past") setPending(value);
-        else setPending(value, rangeFor(value));
-      });
-      quick.appendChild(button);
+  function resetFilters() {
+    Object.assign(state, FILTER_DEFAULTS);
+    syncControls();
+    writeUrlFilters();
+    render();
+  }
+
+  function setup() {
+    readUrlFilters();
+    writeUrlFilters(true);
+    elements.search.addEventListener("input", () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(onFilterChange, 250);
     });
-    [startInput, endInput].forEach((input) => input.addEventListener("input", () => {
-      const start = startInput.value.trim();
-      const end = endInput.value.trim();
-      pending = start || end ? { value: "custom", start, end } : { value: "all", start: "", end: "" };
-      const enteredDate = parseDate(pending.start) || parseDate(pending.end);
-      if (enteredDate) shownMonth = new Date(enteredDate.getFullYear(), enteredDate.getMonth(), 1);
-      error.textContent = "";
-      renderCalendars();
-    }));
-    function triggerLabel(selection) {
-      if (selection.value === "all") return "All Dates";
-      if (selection.value === "upcoming" || selection.value === "past")
-        return options.find((option) => option.value === selection.value)?.label || selection.value;
-      const preset = options.find((option) => option.value === selection.value);
-      if (preset) return preset.label;
-      if (selection.start && selection.end) {
-        const start = parseDate(selection.start);
-        const end = parseDate(selection.end);
-        if (start && end) {
-          const startLabel = start.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-          const endLabel = end.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-          return selection.start === selection.end ? endLabel : `${startLabel} \u2013 ${endLabel}`;
-        }
-      }
-      return "Custom range";
-    }
-    function validCustomRange() {
-      const start = startInput.value.trim();
-      const end = endInput.value.trim();
-      if (!start && !end) return { value: "all", start: "", end: "" };
-      const startDate = parseDate(start || end);
-      const endDate = parseDate(end || start);
-      if (!startDate || !endDate) {
-        error.textContent = "Enter a valid date (YYYY-MM-DD).";
-        return null;
-      }
-      if (start && end && start > end) {
-        error.textContent = "Start date must be on or before end date.";
-        return null;
-      }
-      return { value: "custom", start: start || end, end: end || start };
-    }
-    function closePicker(restore, returnFocus = true) {
-      panel.hidden = true;
-      trigger.setAttribute("aria-expanded", "false");
-      if (restore) {
-        pending = { ...applied };
-        if (pending.start) {
-          const parsed = parseDate(pending.start);
-          if (parsed) shownMonth = new Date(parsed.getFullYear(), parsed.getMonth(), 1);
-        }
-        startInput.value = pending.start;
-        endInput.value = pending.end;
-        error.textContent = "";
-      }
-      if (returnFocus) trigger.focus();
-    }
-    function positionPanel() {
-      if (panel.hidden) return;
-      const rect = trigger.getBoundingClientRect();
-      const margin = 8;
-      const width = Math.min(720, window.innerWidth - margin * 2);
-      panel.style.width = `${width}px`;
-      panel.style.left = `${Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin))}px`;
-      const height = panel.getBoundingClientRect().height;
-      const below = rect.bottom + height + margin <= window.innerHeight;
-      const top = below ? rect.bottom + margin : rect.top - height - margin;
-      panel.style.top = `${Math.max(margin, Math.min(top, window.innerHeight - height - margin))}px`;
-    }
-    function openPicker() {
-      pending = { ...applied };
-      startInput.value = pending.start;
-      endInput.value = pending.end;
-      if (pending.start) {
-        const parsed = parseDate(pending.start);
-        if (parsed) shownMonth = new Date(parsed.getFullYear(), parsed.getMonth(), 1);
-      } else shownMonth = new Date(today.getFullYear(), today.getMonth(), 1);
-      error.textContent = "";
-      renderCalendars();
-      panel.hidden = false;
-      trigger.setAttribute("aria-expanded", "true");
-      positionPanel();
-      startInput.focus();
-    }
-    trigger.addEventListener("click", () => panel.hidden ? openPicker() : closePicker(true));
-    panel.querySelector(".date-range-close").addEventListener("click", () => closePicker(true));
-    panel.querySelector(".date-range-cancel").addEventListener("click", () => closePicker(true));
-    panel.querySelector(".date-range-clear").addEventListener("click", () => setPending("all"));
-    panel.querySelector(".date-range-apply").addEventListener("click", () => {
-      let selection = pending;
-      if (pending.value === "custom") {
-        selection = validCustomRange();
-        if (!selection) return;
-      }
-      applied = { ...selection };
-      let value = selection.value;
-      if (value === "custom") value = `custom:${selection.start}:${selection.end}`;
-      if (![...select.options].some((option) => option.value === value)) {
-        select.add(new Option(triggerLabel(selection), value));
-      }
-      select.value = value;
-      trigger.textContent = triggerLabel(selection);
-      trigger.setAttribute("aria-label", `Date filter: ${trigger.textContent}`);
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-      panel.hidden = true;
-      trigger.setAttribute("aria-expanded", "false");
-      trigger.focus();
-    });
+    [
+      elements.scope,
+      elements.source,
+      elements.category,
+      elements.date,
+      elements.status,
+      elements.availability,
+      elements.dateFrom,
+      elements.dateTo,
+    ].forEach((control) => control.addEventListener("change", onFilterChange));
+    elements.clear.addEventListener("click", resetFilters);
     document.addEventListener("click", (event) => {
-      if (!panel.hidden && !wrapper.contains(event.target) && !panel.contains(event.target)) closePicker(true, false);
+      const detailsButton = event.target.closest("[data-event-details]");
+      if (detailsButton) {
+        const item = visibleEvents.find((candidate) => candidate.id === detailsButton.dataset.eventDetails);
+        openDetails(item);
+      }
+      if (event.target.closest("#teacherRetryEvents")) subscribeEvents(currentUser);
+    });
+    document.getElementById("teacherModalClose").addEventListener("click", closeDetails);
+    elements.detailsOverlay.addEventListener("click", (event) => {
+      if (event.target === elements.detailsOverlay) closeDetails();
     });
     document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && !panel.hidden) {
-        event.preventDefault();
-        closePicker(true);
-      }
+      if (event.key === "Escape") closeDetails();
     });
-    window.addEventListener("resize", positionPanel);
-    window.addEventListener("scroll", positionPanel, true);
-    select.classList.add("date-range-native-select");
-    select.setAttribute("aria-hidden", "true");
-    select.tabIndex = -1;
-    select.hidden = true;
-    if (select.parentElement !== host) host.appendChild(select);
-    host.insertBefore(wrapper, select);
-    const currentValue = select.value || "all";
-    setPending(currentValue);
-    applied = { ...pending };
-    trigger.textContent = triggerLabel(applied);
-    trigger.setAttribute("aria-label", `Date filter: ${trigger.textContent}`);
-    renderCalendars();
-  }
+    document.getElementById("teacherMenuToggle").addEventListener("click", () => {
+      const sidebar = document.getElementById("teacherSidebar");
+      const open = sidebar.classList.toggle("is-open");
+      document.getElementById("teacherMenuToggle").setAttribute("aria-expanded", String(open));
+    });
+    document.getElementById("teacherLogout").addEventListener("click", () => {
+      localStorage.removeItem("recovibeCurrentTeacher");
+      localStorage.removeItem("recovibeTeacherId");
+    });
+    window.addEventListener("popstate", () => {
+      clearTimeout(searchTimer);
+      Object.assign(state, FILTER_DEFAULTS);
+      readUrlFilters();
+      if (events.length) updateDynamicOptions();
+      render();
+    });
+    window.addEventListener("pagehide", onPageHide);
+    window.addEventListener("pageshow", onPageShow);
 
-  function setupTeacherFilterDropdowns() {
-    const selects = [...document.querySelectorAll(".teacher-toolbar select")]
-      .filter((select) => select.id !== "teacherDateFilter");
-    const wrappers = [];
-
-    function closeMenus(except) {
-      wrappers.forEach(({ wrapper, button, menu }) => {
-        if (wrapper === except) return;
-        menu.classList.remove("show");
-        button.setAttribute("aria-expanded", "false");
-      });
+    try {
+      const teacher = JSON.parse(localStorage.getItem("recovibeCurrentTeacher") || "null");
+      if (teacher) {
+        const teacherName = teacher.name || teacher.fullName || "Teacher";
+        document.getElementById("teacherName").textContent = teacherName;
+        document.getElementById("teacherAvatar").textContent = teacherName
+          .split(/\s+/).filter(Boolean).map((part) => part[0]).slice(0, 2).join("").toUpperCase();
+        document.getElementById("teacherRole").textContent = "Teacher";
+      }
+    } catch (error) {
+      debug("Unable to read teacher profile:", error);
     }
 
-    selects.forEach((select) => {
-      const wrapper = document.createElement("div");
-      const button = document.createElement("button");
-      const menu = document.createElement("div");
-      const dropdownId = `${select.id}Dropdown`;
-      wrapper.className = "filter-dropdown";
-      button.className = "filter-button";
-      button.type = "button";
-      button.setAttribute("aria-haspopup", "listbox");
-      button.setAttribute("aria-expanded", "false");
-      button.setAttribute(
-        "aria-label",
-        select.getAttribute("aria-label") || "Filter events",
-      );
-      button.id = `${dropdownId}Button`;
-      menu.className = "filter-menu";
-      menu.id = dropdownId;
-      menu.setAttribute("role", "listbox");
-      menu.setAttribute("aria-labelledby", button.id);
-      button.setAttribute("aria-controls", menu.id);
+    render();
+    startSafetyTimeout();
+    setupAuth();
+  }
 
-      [...select.options].forEach((option) => {
-        const item = document.createElement("button");
-        item.className = `filter-option${option.selected ? " active" : ""}`;
-        item.type = "button";
-        item.setAttribute("role", "option");
-        item.setAttribute("aria-selected", String(option.selected));
-        item.dataset.value = option.value;
-        item.textContent = option.textContent.trim();
-        menu.appendChild(item);
-      });
+  function onPageHide() {
+    active = false;
+    authGeneration += 1;
+    authUnsubscribe?.();
+    authUnsubscribe = null;
+    stopEvents();
+    clearInterval(minuteInterval);
+    clearTimeout(searchTimer);
+  }
 
-      function syncSelection() {
-        const selected = select.options[select.selectedIndex];
-        button.childNodes[0]?.remove();
-        button.insertBefore(
-          document.createTextNode(selected ? selected.textContent.trim() : ""),
-          button.firstChild,
-        );
-        menu.querySelectorAll(".filter-option").forEach((item) => {
-          const active = item.dataset.value === select.value;
-          item.classList.toggle("active", active);
-          item.setAttribute("aria-selected", String(active));
-        });
+  function onPageShow(event) {
+    if (!event.persisted) return;
+    active = true;
+    setupAuth();
+  }
+
+  function setupAuth() {
+    const generation = ++authGeneration;
+    Promise.resolve(authReady).then(() => {
+      if (!active || generation !== authGeneration || authUnsubscribe) return;
+      if (!auth || !isFirebaseConfigured) {
+        window.location.replace("TeacherLogin.html");
+        return;
       }
-      syncSelection();
-      select.classList.add("teacher-native-filter-select");
-      select.setAttribute("aria-hidden", "true");
-      select.tabIndex = -1;
-      select.hidden = true;
-      select.parentNode.insertBefore(wrapper, select);
-      wrapper.append(button, menu, select);
-      wrappers.push({ wrapper, button, menu, select, syncSelection });
-
-      button.addEventListener("click", (event) => {
-        event.stopPropagation();
-        const wasOpen = menu.classList.contains("show");
-        closeMenus();
-        if (!wasOpen) {
-          menu.classList.add("show");
-          button.setAttribute("aria-expanded", "true");
+      authUnsubscribe = onAuthStateChanged(auth, (user) => {
+        if (!active) return;
+        if (!user?.uid) {
+          stopEvents();
+          window.location.replace("TeacherLogin.html");
+          return;
         }
+        subscribeEvents(user);
       });
-      menu.addEventListener("click", (event) => {
-        const item = event.target.closest(".filter-option");
-        if (!item) return;
-        select.value = item.dataset.value;
-        select.dispatchEvent(new Event("change", { bubbles: true }));
-        syncSelection();
-        closeMenus();
-        button.focus();
-      });
-      select.addEventListener("change", syncSelection);
+    }).catch((error) => {
+      debug("Teacher authentication initialization failed:", error);
+      window.location.replace("TeacherLogin.html");
     });
-
-    document.addEventListener("click", (event) => {
-      if (!event.target.closest(".teacher-toolbar .filter-dropdown"))
-        closeMenus();
-    });
-    document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") closeMenus();
-    });
+    minuteInterval = window.setInterval(() => {
+      if (!loading && !loadError) render();
+    }, 60000);
   }
 
-  setupTeacherFilterDropdowns();
-  createDateRangePicker(
-    document.getElementById("teacherDateFilter").parentElement,
-    document.getElementById("teacherDateFilter"),
-  );
-
-  document
-    .getElementById("teacherEventSearch")
-    .addEventListener("input", (event) => {
-      state.query = event.target.value;
-      render();
-    });
-  const filterBindings = [
-    ["teacherEventTypeFilter", "type"],
-    ["teacherSourceFilter", "source"],
-    ["teacherCategoryFilter", "category"],
-    ["teacherDateFilter", "date"],
-    ["teacherStatusFilter", "status"],
-    ["teacherAvailabilityFilter", "availability"],
-  ];
-  filterBindings.forEach(([id, key]) =>
-    document.getElementById(id).addEventListener("change", (event) => {
-      state[key] = event.target.value;
-      render();
-    }),
-  );
-  document.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-event-details]");
-    if (button) openDetails(button.dataset.eventDetails);
-  });
-  document
-    .getElementById("teacherModalClose")
-    .addEventListener("click", closeDetails);
-  document
-    .getElementById("teacherEventOverlay")
-    .addEventListener("click", (event) => {
-      if (event.target.id === "teacherEventOverlay") closeDetails();
-    });
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") closeDetails();
-  });
-  document.getElementById("teacherMenuToggle").addEventListener("click", () => {
-    const sidebar = document.getElementById("teacherSidebar");
-    const open = sidebar.classList.toggle("is-open");
-    document
-      .getElementById("teacherMenuToggle")
-      .setAttribute("aria-expanded", String(open));
-  });
-  let teacher = null;
-  try {
-    teacher = JSON.parse(
-      localStorage.getItem("recovibeCurrentTeacher") || "null",
-    );
-  } catch (error) {
-    console.warn("Unable to read teacher account.", error);
-  }
-  if (teacher) {
-    const teacherName = teacher.name || teacher.fullName || "Mr. Miguel";
-    document.getElementById("teacherName").textContent = teacherName;
-    document.getElementById("teacherAvatar").textContent = teacherName
-      .split(/\s+/)
-      .filter(Boolean)
-      .map((part) => part[0])
-      .slice(0, 2)
-      .join("")
-      .toUpperCase();
-    document.getElementById("teacherRole").textContent =
-      teacher.department ||
-      teacher.organization ||
-      teacher.role ||
-      "Faculty account";
-  }
-  document.getElementById("teacherLogout").addEventListener("click", () => {
-    localStorage.removeItem("recovibeCurrentTeacher");
-    localStorage.removeItem("recovibeTeacherId");
-  });
-  render();
-  const requestedEventId = new URLSearchParams(window.location.search).get(
-    "eventId",
-  );
-  if (requestedEventId) openDetails(requestedEventId);
+  setup();
 })();

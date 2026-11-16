@@ -4,15 +4,15 @@ import {
   getDoc,
   onSnapshot,
   query,
-  updateDoc,
-  where,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {
+  onAuthStateChanged,
+  signOut,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
   ref,
   onValue,
   off,
-  update,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 import {
   auth,
@@ -29,12 +29,12 @@ import {
   const root = document.getElementById("dashboardRoot");
   let firestoreEvents = [];
   let unsubscribeEvents;
-  let unsubscribeNotifications = [];
   let toastTimer;
   let waitingOnYouCount = 0;
   let queueListenerRef = null;
-  let rtdbNotifListenerRef = null;
   let currentAdminUid = "";
+  let adminNotificationController = null;
+  let sharedNotificationItems = [];
   let dashboardLoadTimer;
   let dashboardLoadExpired = false;
   const dashboardTableState = {
@@ -77,6 +77,38 @@ import {
   }
   function records() {
     return firestoreEvents;
+  }
+  function waitForAuthState() {
+    return new Promise((resolve, reject) => {
+      let unsubscribe = () => {};
+      let settled = false;
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        callback(value);
+        unsubscribe();
+      };
+      unsubscribe = onAuthStateChanged(
+        auth,
+        (user) => finish(resolve, user),
+        (error) => finish(reject, error),
+      );
+      if (settled) unsubscribe();
+    });
+  }
+  function showDashboardError(message, error, uid = auth?.currentUser?.uid || "") {
+    clearTimeout(dashboardLoadTimer);
+    dashboardLoadTimer = null;
+    dashboardLoadExpired = false;
+    if (error) {
+      console.error("Unable to load Admin Dashboard data:", {
+        code: error.code || "unknown",
+        message: error.message || String(error),
+        uid,
+      });
+    }
+    root.innerHTML = `<div class="admin-error" role="alert">${message} <button class="admin-row-action" id="retryDashboardData" type="button">Try again</button></div>`;
+    root.querySelector("#retryDashboardData")?.addEventListener("click", init);
   }
   function getCurrentAdminStage(adminProfile) {
     const normalize = (value) => String(value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -687,52 +719,7 @@ import {
     );
   }
 
-  let rtdbNotifications = [];
-  let firestoreNotifications = [];
-  let firestoreNotificationsByUid = [];
-  let firestoreNotificationsByRole = [];
-
-  function subscribeToRtdbNotifications(uid) {
-    if (!isRtdbConfigured || !rtdb || !uid) return;
-    if (rtdbNotifListenerRef) {
-      off(rtdbNotifListenerRef);
-      rtdbNotifListenerRef = null;
-    }
-    rtdbNotifListenerRef = ref(rtdb, `notifications/${uid}`);
-    onValue(
-      rtdbNotifListenerRef,
-      (snapshot) => {
-        const data = snapshot.val() || {};
-        rtdbNotifications = Object.entries(data).map(([id, val]) => ({
-          id,
-          eventId: val.eventId || "",
-          title: val.title || "Notification",
-          message: val.message || "",
-          read: val.read === true,
-          createdAt: val.createdAt || Date.now(),
-          source: "rtdb",
-        }));
-        combineAndRenderNotifications();
-      },
-      (err) => {
-        console.warn("RTDB notifications error:", err);
-      },
-    );
-  }
-
-  function combineAndRenderNotifications() {
-    const byId = new Map();
-    [...rtdbNotifications, ...firestoreNotifications].forEach((item) => {
-      byId.set(item.id, { ...byId.get(item.id), ...item });
-    });
-    const combined = [...byId.values()].sort(
-      (a, b) => (b.createdAt || 0) - (a.createdAt || 0),
-    );
-    const unreadCount = combined.filter((item) => !item.read).length;
-    document.querySelectorAll("[data-notification-count]").forEach((badge) => {
-      badge.textContent = String(unreadCount);
-      badge.hidden = unreadCount === 0;
-    });
+  function renderNotificationMenu(combined) {
     const menu = document.querySelector("[data-notification-menu]");
     if (!menu) return;
     menu.innerHTML = `<div class="dashboard-notification-heading"><strong>Notifications</strong><a href="AdminNotification.html">View all</a></div>${
@@ -748,30 +735,17 @@ import {
     }`;
   }
 
-  function renderFirestoreNotifications(snapshot, field) {
-    const notifications = snapshot.docs.map((docSnap) => {
-      const data = docSnap.data();
-      return {
-        id: docSnap.id,
-        eventId: data.eventId || "",
-        title: data.title || "Notification",
-        message: data.message || "",
-        read: data.read === true || data.isRead === true,
-        createdAt: data.createdAt?.toDate
-          ? data.createdAt.toDate().getTime()
-          : data.createdAt || 0,
-        source: "firestore",
-      };
+  import("./AdminNotificationData.js")
+    .then(({ subscribeAdminNotifications }) => {
+      adminNotificationController = subscribeAdminNotifications((state) => {
+        sharedNotificationItems = state.items;
+        renderNotificationMenu(state.items);
+      });
+    })
+    .catch(() => {
+      document.querySelectorAll("[data-notification-count]").forEach((badge) => { badge.hidden = true; });
+      renderNotificationMenu([]);
     });
-    if (field === "recipientUid") firestoreNotificationsByUid = notifications;
-    else firestoreNotificationsByRole = notifications;
-    const merged = new Map();
-    [...firestoreNotificationsByUid, ...firestoreNotificationsByRole].forEach((item) => {
-      merged.set(item.id, { ...merged.get(item.id), ...item });
-    });
-    firestoreNotifications = [...merged.values()];
-    combineAndRenderNotifications();
-  }
 
   async function init() {
     clearTimeout(dashboardLoadTimer);
@@ -795,9 +769,8 @@ import {
       await authReady;
       if (dashboardLoadExpired) return;
       if (!auth) throw new Error("Please sign in with an Admin account.");
-      await auth.authStateReady();
+      const user = await waitForAuthState();
       if (dashboardLoadExpired) return;
-      const user = auth.currentUser;
       if (!user) {
         clearTimeout(dashboardLoadTimer);
         dashboardLoadTimer = null;
@@ -810,18 +783,35 @@ import {
         getDoc(doc(db, "users", user.uid)),
       ]);
       if (dashboardLoadExpired) return;
-      const adminProfile = adminResult.status === "fulfilled" && adminResult.value.exists()
-        ? adminResult.value.data()
-        : {};
+      if (adminResult.status === "rejected") throw adminResult.reason;
+      if (!adminResult.value.exists()) {
+        location.replace("AdminLogin.html");
+        return;
+      }
+      const adminProfile = adminResult.value.data() || {};
       const userProfile = userResult.status === "fulfilled" && userResult.value.exists()
         ? userResult.value.data()
         : {};
-      if (adminResult.status === "rejected" && userResult.status === "rejected") {
-        throw adminResult.reason;
+      if (userResult.status === "rejected") {
+        console.warn("Could not load the optional users profile for the Admin Dashboard:", {
+          code: userResult.reason?.code || "unknown",
+          message: userResult.reason?.message || String(userResult.reason),
+          uid: user.uid,
+        });
       }
       const verifiedProfile = { ...userProfile, ...adminProfile };
-      const role = String(verifiedProfile.role || verifiedProfile.userRole || "").trim().toLowerCase().replace(/[\s_-]+/g, "");
-      if (role !== "admin") {
+      const roleValue = Object.prototype.hasOwnProperty.call(adminProfile, "role")
+        ? adminProfile.role
+        : adminProfile.userRole;
+      const role = String(roleValue || "").trim().toLowerCase().replace(/[\s_.-]+/g, "");
+      const status = String(adminProfile.status || "Active")
+        .trim()
+        .toLowerCase()
+        .replace(/[\s_.-]+/g, "");
+      if (
+        !["admin", "superadmin", "osas"].includes(role)
+        || ["disabled", "inactive", "suspended"].includes(status)
+      ) {
         clearTimeout(dashboardLoadTimer);
         dashboardLoadTimer = null;
         location.replace("AdminLogin.html");
@@ -835,10 +825,7 @@ import {
       roleElement.textContent = getApprovalPosition(profile);
       roleElement.title = roleElement.textContent;
       subscribeToQueue(user.uid);
-      subscribeToRtdbNotifications(user.uid);
       unsubscribeEvents?.();
-      unsubscribeNotifications.forEach((unsubscribe) => unsubscribe());
-      unsubscribeNotifications = [];
       const eventsQuery = query(collection(db, "events"));
       unsubscribeEvents = onSnapshot(
         eventsQuery,
@@ -850,28 +837,24 @@ import {
           render();
         },
         (error) => {
-          clearTimeout(dashboardLoadTimer);
-          dashboardLoadTimer = null;
-          dashboardLoadExpired = false;
-          console.error("Unable to load dashboard events:", error);
-          root.innerHTML = '<div class="admin-error" role="alert">Could not load dashboard events. <button class="admin-row-action" id="retryDashboardData" type="button">Try again</button></div>';
-          root.querySelector("#retryDashboardData")?.addEventListener("click", init);
+          unsubscribeEvents?.();
+          unsubscribeEvents = null;
+          showDashboardError(
+            error?.code === "permission-denied"
+              ? "You don't have permission to view this."
+              : "Could not load dashboard events.",
+            error,
+            user.uid,
+          );
         },
       );
-      unsubscribeNotifications = [
-        onSnapshot(
-          query(collection(db, "notifications"), where("recipientUid", "==", user.uid)),
-          (snapshot) => renderFirestoreNotifications(snapshot, "recipientUid"),
-          (error) => console.warn("Admin notifications unavailable:", error),
-        ),
-      ];
     } catch (error) {
-      clearTimeout(dashboardLoadTimer);
-      dashboardLoadTimer = null;
-      dashboardLoadExpired = false;
-      console.error("Could not verify Admin access or load dashboard data:", error);
-      root.innerHTML = '<div class="admin-error" role="alert">Could not verify your Admin access or load dashboard data. <button class="admin-row-action" id="retryDashboardData" type="button">Try again</button></div>';
-      root.querySelector("#retryDashboardData")?.addEventListener("click", init);
+      showDashboardError(
+        error?.code === "permission-denied"
+          ? "You don't have permission to view this."
+          : "Could not verify your Admin or OSAS access.",
+        error,
+      );
     }
   }
 
@@ -887,18 +870,10 @@ import {
     if (item) {
       const notifId = item.dataset.notificationId;
       const eventId = item.dataset.eventId;
-      const source = item.dataset.source;
-      if (item.classList.contains("is-unread")) {
+      const notification = sharedNotificationItems.find((entry) => entry.id === notifId);
+      if (item.classList.contains("is-unread") && notification) {
         try {
-          if (source === "rtdb" && currentAdminUid && rtdb) {
-            await update(ref(rtdb, `notifications/${currentAdminUid}/${notifId}`), {
-              read: true,
-            });
-          } else if (db) {
-            await updateDoc(doc(db, "notifications", notifId), {
-              read: true,
-            });
-          }
+          await adminNotificationController?.setReadState(notification, true);
         } catch (error) {
           console.error("Unable to mark notification as read:", error);
         }
@@ -917,12 +892,13 @@ import {
     }
   });
 
-  window.addEventListener("beforeunload", () => {
+  window.addEventListener("pagehide", () => {
     clearTimeout(dashboardLoadTimer);
     unsubscribeEvents?.();
-    unsubscribeNotifications.forEach((unsubscribe) => unsubscribe());
     if (queueListenerRef) off(queueListenerRef);
-    if (rtdbNotifListenerRef) off(rtdbNotifListenerRef);
+  });
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) init();
   });
   init();
 })();

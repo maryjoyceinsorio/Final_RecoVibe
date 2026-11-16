@@ -1,938 +1,1038 @@
-(function () {
-  "use strict";
+import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {
+  doc,
+  getDoc,
+  onSnapshot,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import {
+  auth,
+  authReady,
+  db,
+  isFirebaseConfigured,
+} from "../UserStudent/firebaseConfig.js";
+import { startTeacherNotificationData } from "./TeacherNotificationData.js";
+import { teacherEventReadFilters, teacherEventsQuery } from "./TeacherEventQuery.js";
 
-  /* ---------------------------------------------------------
-     DATA
-  --------------------------------------------------------- */
-  const EVENTS = Array.isArray(window.RECOVIBE_EVENTS)
-    ? window.RECOVIBE_EVENTS
-    : [];
+const DEBUG = false;
+const TIME_ZONE = "Asia/Manila";
+const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+const UPCOMING_MS = 7 * DAY_MS;
+const RECENT_MS = 14 * DAY_MS;
+const NOTIFICATION_KEY = "recovibeTeacherNotifications";
+const DELETED_KEY = "recovibeTeacherDeletedNotifications";
+
+const dom = {
+  app: document.getElementById("teacherDashboard"),
+  sidebar: document.getElementById("teacherSidebar"),
+  sidebarToggle: document.getElementById("sidebarToggle"),
+  sidebarClose: document.getElementById("sidebarClose"),
+  sidebarScrim: document.getElementById("sidebarScrim"),
+  greeting: document.getElementById("teacherGreeting"),
+  subtitle: document.getElementById("teacherSubtitle"),
+  today: document.getElementById("teacherToday"),
+  userName: document.getElementById("userName"),
+  userAvatar: document.getElementById("userAvatar"),
+  comingUp: document.getElementById("comingUpContent"),
+  calendar: document.getElementById("calendarContent"),
+  calendarLabel: document.getElementById("calendarMonthLabel"),
+  calendarPrevious: document.getElementById("calendarPrevious"),
+  calendarNext: document.getElementById("calendarNext"),
+  notifications: document.getElementById("notificationsContent"),
+  unreadCount: document.getElementById("unreadCount"),
+  notificationBadge: document.getElementById("navNotifBadge"),
+};
+
+const state = {
+  uid: "",
+  profile: readCachedProfile(),
+  events: [],
+  records: [],
+  eventsLoading: true,
+  eventsError: "",
+  notificationItems: [],
+  notificationLoading: true,
+  notificationError: "",
+  notificationRetry: null,
+  notificationSourceErrors: [],
+  month: getManilaParts(Date.now()).month - 1,
+  year: getManilaParts(Date.now()).year,
+  selectedDate: "",
+};
+
+let authUnsubscribe = null;
+let eventsUnsubscribe = null;
+let eventsTimeout = null;
+let nextMinuteTimeout = null;
+let minuteInterval = null;
+let active = true;
+let authGeneration = 0;
+
+function debug(...args) {
+  if (DEBUG) console.debug("[Teacher Dashboard]", ...args);
+}
+
+function escapeHTML(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[character]);
+}
+
+function readCachedProfile() {
   try {
-    const teacherEvents = JSON.parse(
-      localStorage.getItem("recovibeTeacherEvents") || "[]",
-    );
-    if (Array.isArray(teacherEvents)) {
-      teacherEvents
-        .filter((event) => ["Approved", "Published"].includes(event.status))
-        .forEach((event) => {
-          const id = event.eventId || event.id;
-          if (!EVENTS.some((existing) => String(existing.id) === String(id))) {
-            EVENTS.push({
-              ...event,
-              id,
-              source: event.source || "PUP Biñan Campus",
-              desc: event.description || "Event details will be posted soon.",
-            });
-          }
-        });
-    }
+    return JSON.parse(
+      localStorage.getItem("recovibeCurrentTeacher") ||
+      localStorage.getItem("recovibeTeacher") ||
+      "{}",
+    ) || {};
   } catch (error) {
-    console.warn("Teacher event records could not be loaded.", error);
+    debug("Could not read the cached teacher profile:", error);
+    return {};
   }
+}
 
-  const RECOMMENDED = [
-    {
-      id: "leadership-seminar",
-      source: "PUP Official",
-      tagLabel: "PUP Biñan Campus",
-      tagClass: "tag-campus",
-      title: "PUP Biñan Leadership Seminar",
-      when: "Mar 15 | 1:00 PM",
-      match: "Matches Your Interest In Academic Events",
-    },
-    {
-      id: "intramurals-opening",
-      source: "PUP Official",
-      tagLabel: "Sports",
-      tagClass: "tag-sports",
-      title: "Intramurals Opening Program",
-      when: "Apr 2 | 7:00 AM",
-      match: "Matches Your Interest In Sports",
-    },
-    {
-      id: "cite-hackathon",
-      source: "PUP Official",
-      tagLabel: "PUP CITE",
-      tagClass: "tag-academic",
-      title: "CITE Mini Hackathon",
-      when: "Apr 18 | 9:00 AM",
-      match: "Matches Your Interest In Academic Events",
-    },
-    {
-      id: "ibits-general-assembly",
-      source: "Organizational",
-      tagLabel: "IBITS",
-      tagClass: "tag-campus",
-      title: "IBITS General Assembly",
-      when: "May 5 | 2:00 PM",
-      match: "Matches Your Interest In Org Activities",
-    },
-  ];
-
-  const NOTIFICATIONS = [
-    {
-      text: 'Your participation for <b>"IBITS General Assembly"</b> was confirmed.',
-      time: "2 Hours Ago",
-    },
-    {
-      text: '<b>"IBITS General Assembly"</b> was cancelled due to internal reasons.',
-      time: "40 Hours Ago",
-    },
-  ];
-
-  const MONTH_NAMES = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-  ];
-
-  /* ---------------------------------------------------------
-     STATE
-  --------------------------------------------------------- */
-  const today = new Date();
-  const state = {
-    query: "",
-    calMonth: today.getMonth(),
-    calYear: today.getFullYear(),
-    sidebarCollapsed: false,
+function getManilaParts(timestamp) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: TIME_ZONE,
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "numeric",
+    hourCycle: "h23",
+  }).formatToParts(new Date(timestamp));
+  const get = (type) => Number(parts.find((part) => part.type === type)?.value || 0);
+  return {
+    year: get("year"),
+    month: get("month"),
+    day: get("day"),
+    hour: get("hour"),
+    minute: get("minute"),
   };
-  let activeModalEventId = null;
+}
 
-  /* ---------------------------------------------------------
-     RENDER: header date
-  --------------------------------------------------------- */
-  function renderTodayDate() {
-    const el = document.getElementById("todayDate");
-    if (!el) return;
-    const opts = { year: "numeric", month: "long", day: "numeric" };
-    el.textContent = today.toLocaleDateString("en-US", opts);
-  }
+function dateKey(parts) {
+  return `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
+}
 
-  /* ---------------------------------------------------------
-     RENDER: events
-  --------------------------------------------------------- */
-  function eventMetaIconClock() {
-    return '<svg width="13" height="13" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.4"/><path d="M10 6v4l2.5 2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
-  }
-  function eventMetaIconPin() {
-    return '<svg width="13" height="13" viewBox="0 0 20 20" fill="none"><path d="M10 17.5S15.5 12.8 15.5 8.5a5.5 5.5 0 1 0-11 0c0 4.3 5.5 9 5.5 9Z" stroke="currentColor" stroke-width="1.4"/><circle cx="10" cy="8.3" r="2" stroke="currentColor" stroke-width="1.4"/></svg>';
-  }
+function dateOrdinal(key) {
+  const [year, month, day] = key.split("-").map(Number);
+  return Math.floor(Date.UTC(year, month - 1, day) / DAY_MS);
+}
 
-  function eventDateParts(dateISO) {
-    const date = new Date(`${dateISO}T00:00:00`);
-    return {
-      month: date.toLocaleDateString("en-US", { month: "short" }).toUpperCase(),
-      day: date.getDate(),
-      year: date.getFullYear(),
-    };
-  }
+function manilaTimestamp(year, month, day, hour = 0, minute = 0, second = 0) {
+  return Date.UTC(year, month - 1, day, hour - 8, minute, second);
+}
 
-  function matchesFilters(ev) {
-    const q = state.query.trim().toLowerCase();
-    return (
-      q === "" ||
-      ev.title.toLowerCase().includes(q) ||
-      ev.location.toLowerCase().includes(q) ||
-      ev.source.toLowerCase().includes(q) ||
-      ev.category.toLowerCase().includes(q)
-    );
+function parseClock(value) {
+  const match = /^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?$/i.exec(String(value || "").trim());
+  if (!match) return null;
+  let hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (minute > 59 || hour > 24 || (hour === 24 && minute !== 0)) return null;
+  if (match[4]) {
+    if (hour < 1 || hour > 12) return null;
+    hour = (hour % 12) + (match[4].toUpperCase() === "PM" ? 12 : 0);
   }
+  if (hour === 24) hour = 0;
+  return { hour, minute, second: Number(match[3] || 0) };
+}
 
-  function preferredCategory(category) {
-    const value = String(category || "").toLowerCase();
+function parseDateKey(value) {
+  if (value && typeof value.toDate === "function") {
+    const date = value.toDate();
+    return dateKey(getManilaParts(date.getTime()));
+  }
+  if (value instanceof Date && Number.isFinite(value.getTime())) {
+    return dateKey(getManilaParts(value.getTime()));
+  }
+  const text = String(value ?? "").trim();
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  if (dateOnly) {
+    const year = Number(dateOnly[1]);
+    const month = Number(dateOnly[2]);
+    const day = Number(dateOnly[3]);
+    const check = new Date(Date.UTC(year, month - 1, day));
     if (
-      value.includes("leadership") ||
-      value.includes("career") ||
-      value.includes("student development")
-    )
-      return "Leadership & Career";
-    if (value.includes("sport") || value.includes("fitness"))
-      return "Sports & Fitness";
-    if (value.includes("tech") || value.includes("innovation"))
-      return "Tech & Innovation";
-    if (value.includes("art") || value.includes("culture"))
-      return "Arts & Culture";
-    if (value.includes("academic")) return "Academic & Learning";
-    return category || "Academic & Learning";
+      month < 1 || month > 12 || day < 1 ||
+      check.getUTCFullYear() !== year ||
+      check.getUTCMonth() !== month - 1 ||
+      check.getUTCDate() !== day
+    ) return "";
+    return `${dateOnly[1]}-${dateOnly[2]}-${dateOnly[3]}`;
   }
-
-  function categoryClass(category) {
-    return preferredCategory(category)
-      .toLowerCase()
-      .replace(/[^a-z]+/g, "-")
-      .replace(/^-|-$/g, "");
+  if (/^\d{4}-\d{2}-\d{2}[T ]/.test(text)) {
+    const parsed = parseDateTime(text);
+    return Number.isFinite(parsed) ? dateKey(getManilaParts(parsed)) : "";
   }
+  return "";
+}
 
-  function renderEvents() {
-    const list = document.getElementById("eventList");
-    const todayISO = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
-    const visible = EVENTS.filter(
-      (ev) => ev.dateISO >= todayISO && matchesFilters(ev),
-    )
-      .sort((a, b) => a.dateISO.localeCompare(b.dateISO))
-      .slice(0, 3);
+function parseDateTime(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return 0;
+  if (/(?:Z|[+-]\d{2}:?\d{2})$/i.test(text)) {
+    const timestamp = Date.parse(text);
+    return Number.isFinite(timestamp) ? timestamp : 0;
+  }
+  const match = /^(\d{4})-(\d{2})-(\d{2})[T ](.+)$/.exec(text);
+  if (!match) return 0;
+  const clock = parseClock(match[4]);
+  if (!clock) return 0;
+  return manilaTimestamp(
+    Number(match[1]),
+    Number(match[2]),
+    Number(match[3]),
+    clock.hour,
+    clock.minute,
+    clock.second,
+  );
+}
 
-    if (visible.length === 0) {
-      list.innerHTML = `<div class="empty-state" style="padding:24px;text-align:center;color:var(--ink-500);font-size:13.5px;border:1px dashed var(--line);border-radius:12px;">No events match “${escapeHTML(state.query)}”.</div>`;
-      return;
+function toMillis(value) {
+  if (value && typeof value.toMillis === "function") return value.toMillis();
+  if (value && typeof value.toDate === "function") return value.toDate().getTime();
+  if (value && typeof value.seconds === "number") return value.seconds * 1000;
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+  if (typeof value === "string" && value.trim()) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(value.trim())) {
+      return parseDateTime(`${value.trim()}T00:00`);
     }
+    const parsed = parseDateTime(value) || Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
 
-    list.innerHTML = visible
-      .map((ev) => {
-        const date = eventDateParts(ev.dateISO);
-        return `
-      <article class="event-card" id="event-card-${ev.id}" data-event-id="${ev.id}">
-        <div class="event-date" id="event-date-${ev.id}" data-event-field="date">
-          <span class="mon" id="event-month-${ev.id}">${date.month}</span>
-          <span class="day" id="event-day-${ev.id}">${date.day}</span>
-          <span class="year" id="event-year-${ev.id}">${date.year}</span>
-        </div>
-        <div class="event-body">
-          <h3 class="event-title" id="event-title-${ev.id}" data-event-field="title">${escapeHTML(ev.title)}</h3>
-          <p class="event-source" id="event-source-${ev.id}" data-event-field="source">${escapeHTML(ev.source)}</p>
-          <div class="event-meta" id="event-meta-${ev.id}" data-event-field="schedule">
-            <span id="event-time-${ev.id}" data-event-field="time">${eventMetaIconClock()} ${escapeHTML(ev.time)}</span>
-            <span id="event-location-${ev.id}" data-event-field="location">${eventMetaIconPin()} ${escapeHTML(ev.location)} · ${escapeHTML(ev.room)}</span>
-          </div>
-          <div class="event-category-row" id="event-category-row-${ev.id}"><span class="category category-${categoryClass(ev.category)}" id="event-category-${ev.id}" data-event-field="category">${escapeHTML(preferredCategory(ev.category))}</span></div>
-          <div class="event-foot" id="event-footer-${ev.id}">
-            <span class="slots" id="event-slots-${ev.id}" data-event-field="participants">${ev.slotsOpen} of ${ev.maxSlots} Slots Open</span>
-            <button class="btn-outline" id="event-details-button-${ev.id}" data-event-id="${ev.id}" aria-controls="modalContent">View Details</button>
-          </div>
-        </div>
-      </article>`;
-      })
-      .join("");
+function splitRange(value) {
+  return String(value || "").split(/\s*(?:-|–|—)\s*/).map((part) => part.trim());
+}
+
+function normalizeStatus(event) {
+  return String(event?.status || "").trim().toLowerCase().replace(/[\s_-]+/g, "");
+}
+
+function normalizeEvent(id, event) {
+  if (!event || typeof event !== "object") return null;
+  if (typeof window.isTeacherEventVisible !== "function" || !window.isTeacherEventVisible(event)) {
+    return null;
   }
 
-  /* ---------------------------------------------------------
-     RENDER: recommended
-  --------------------------------------------------------- */
-  function renderRecommended() {
-    const grid = document.getElementById("recGrid");
-    if (!grid) return;
-    const recommendedList = EVENTS.filter((event) => {
-      const status = String(event.status || "").trim().toLowerCase();
-      const id = String(event.id || event.eventId || "");
-      return !id.startsWith("demo-event-") && status !== "cancelled" && status !== "canceled" && status !== "draft";
-    }).slice(0, 4);
+  const rawTime = splitRange(event.time);
+  const dateValue = event.dateISO || event.eventDate || event.date || event.startDate || "";
+  const rawStartAt = event.startAt ?? event.start_at;
+  const startAtIsDateOnly = typeof rawStartAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(rawStartAt.trim());
+  let start = startAtIsDateOnly ? 0 : toMillis(rawStartAt);
+  let startDate = parseDateKey(dateValue) || parseDateKey(rawStartAt);
+  const startClock = parseClock(event.startTime || event.timeStart || rawTime[0] || "");
 
-    if (!recommendedList.length) {
-      grid.innerHTML = '<p class="rec-empty" style="grid-column: 1 / -1; color: var(--ink-500); text-align: center; padding: 28px 0; font-size: 14px;">No recommended events at this time.</p>';
-      return;
-    }
-
-    grid.innerHTML = recommendedList
-      .map((event) => {
-        const id = event.id || event.eventId;
-        return `
-      <article class="rec-card" id="recommended-card-${id}" data-event-id="${id}">
-        <h3 id="recommended-title-${id}" data-event-field="title">${escapeHTML(event.title || "Untitled event")}</h3>
-        <div class="rec-source" id="recommended-source-${id}" data-event-field="source">${escapeHTML(event.source || "PUP Biñan Campus")}</div>
-        <div class="rec-when" id="recommended-time-${id}" data-event-field="time">${escapeHTML(event.time || "Time TBA")}</div>
-        <div class="rec-match" id="recommended-location-${id}" data-event-field="location">${escapeHTML(event.location ? `${event.location} · ${event.room || ""}` : "Location TBA")}</div>
-        <span class="rec-tag tag-academic" id="recommended-category-${id}" data-event-field="category">${escapeHTML(event.category || event.tag || "Academic & Learning")}</span>
-        <button type="button" class="btn-outline event-details-trigger" id="recommended-details-button-${id}" data-event-id="${id}" aria-controls="detailsDialog">View Details</button>
-      </article>`;
-      })
-      .join("");
-  }
-
-  /* ---------------------------------------------------------
-     RENDER: notifications
-  --------------------------------------------------------- */
-  function renderNotifications() {
-    const list = document.getElementById("notifList");
-    list.innerHTML = NOTIFICATIONS.map(
-      (n) => `
-      <li class="notif-item">
-        ${n.text}
-        <span class="notif-time">${escapeHTML(n.time)}</span>
-      </li>`,
-    ).join("");
-  }
-
-  /* ---------------------------------------------------------
-     RENDER: calendar
-  --------------------------------------------------------- */
-  function isHolidayEvent(event) {
-    if (!event) return false;
-    const id = String(event.id || event.eventId || "");
-    const src = String(event.source || event.organizerName || "").toLowerCase();
-    const cat = String(event.category || "").toLowerCase();
-    const title = String(event.title || "").toLowerCase();
-    return (
-      event.isHoliday === true ||
-      id.startsWith("holiday:") ||
-      src.includes("holiday") ||
-      cat.includes("holiday") ||
-      title.includes("holiday")
+  if (!start && startDate) {
+    const [year, month, day] = startDate.split("-").map(Number);
+    start = manilaTimestamp(
+      year,
+      month,
+      day,
+      startClock?.hour || 0,
+      startClock?.minute || 0,
+      startClock?.second || 0,
     );
   }
+  if (!start && dateValue) {
+    start = parseDateTime(dateValue);
+    if (start) startDate = dateKey(getManilaParts(start));
+  }
+  if (!start || !Number.isFinite(start)) return null;
+  if (!startDate) startDate = dateKey(getManilaParts(start));
 
-  async function syncHolidays(year, month) {
+  const endDateValue = event.endDateISO || event.dateEnd || event.endDate || dateValue;
+  const rawEndAt = event.endAt ?? event.end_at;
+  const endAtIsDateOnly = typeof rawEndAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(rawEndAt.trim());
+  const endDate = parseDateKey(rawEndAt) || parseDateKey(endDateValue) || startDate;
+  const endClock = parseClock(event.endTime || event.timeEnd || rawTime[1] || "");
+  let end = endAtIsDateOnly ? 0 : toMillis(rawEndAt);
+  if (!end && endClock) {
+    const [year, month, day] = endDate.split("-").map(Number);
+    end = manilaTimestamp(year, month, day, endClock.hour, endClock.minute, endClock.second);
+    if (end < start && endDate === startDate) end += DAY_MS;
+  } else if (!end) {
+    const [year, month, day] = endDate.split("-").map(Number);
+    end = manilaTimestamp(year, month, day, 23, 59, 59);
+  }
+
+  const title = String(event.title || event.name || event.eventName || "Untitled event");
+  const venueParts = [event.location, event.room].filter((part) => String(part || "").trim());
+  const capacityMissing =
+    event.capacity === null ||
+    event.capacity === undefined ||
+    String(event.capacity).trim() === "";
+  const capacity = capacityMissing ? Number.NaN : Number(event.capacity);
+  return {
+    id: String(id),
+    raw: event,
+    status: normalizeStatus(event),
+    title,
+    venue: venueParts.length ? venueParts.join(" · ") : "Location to be announced",
+    start,
+    end,
+    date: startDate,
+    capacity: Number.isFinite(capacity) && capacity >= 0 ? capacity : null,
+    registeredCount: Number.isFinite(Number(event.registeredCount))
+      ? Math.max(0, Number(event.registeredCount))
+      : 0,
+  };
+}
+
+function formatTime(timestamp) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: TIME_ZONE,
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(timestamp));
+}
+
+function formatDayHeading(key, todayKey, tomorrowKey) {
+  const [year, month, day] = key.split("-").map(Number);
+  if (key === todayKey) return "Today";
+  if (key === tomorrowKey) {
+    return `Tomorrow · ${new Intl.DateTimeFormat("en-US", {
+      timeZone: TIME_ZONE,
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+    }).format(new Date(manilaTimestamp(year, month, day, 12)))}`;
+  }
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: TIME_ZONE,
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  }).format(new Date(manilaTimestamp(year, month, day, 12)));
+}
+
+function eventChip(event, now, todayKey) {
+  if (event.start <= now && event.end >= now) {
+    return '<span class="event-chip is-live">Live now</span>';
+  }
+  const remaining = event.start - now;
+  if (remaining < HOUR_MS) {
+    return `<span class="event-chip">Starts in ${Math.max(1, Math.ceil(remaining / 60000))}m</span>`;
+  }
+  if (remaining < DAY_MS) {
+    return `<span class="event-chip">Starts in ${Math.ceil(remaining / HOUR_MS)}h</span>`;
+  }
+  const days = Math.max(1, dateOrdinal(event.date) - dateOrdinal(todayKey));
+  return `<span class="event-chip">In ${days} ${days === 1 ? "day" : "days"}</span>`;
+}
+
+function renderError(message, retryType) {
+  return `<div class="section-error"><span>${escapeHTML(message)}</span><button type="button" data-retry="${retryType}">Retry</button></div>`;
+}
+
+function renderComingUp() {
+  if (state.eventsLoading) return;
+  if (state.eventsError) {
+    dom.comingUp.innerHTML = renderError(state.eventsError, "events");
+    return;
+  }
+
+  const now = Date.now();
+  const today = getManilaParts(now);
+  const todayKey = dateKey(today);
+  const tomorrowKey = dateKey({
+    ...getManilaParts(now + DAY_MS),
+  });
+  const candidates = state.events
+    .filter((event) => {
+      const live = event.start <= now && event.end >= now;
+      return live || (event.start >= now && event.start <= now + UPCOMING_MS);
+    })
+    .sort((first, second) => {
+      const firstLive = first.start <= now && first.end >= now;
+      const secondLive = second.start <= now && second.end >= now;
+      return Number(secondLive) - Number(firstLive) || first.start - second.start;
+    })
+    .slice(0, 6);
+
+  if (!candidates.length) {
+    dom.comingUp.innerHTML = '<div class="empty-state">Nothing coming up. Events starting in the next 7 days will appear here.</div>';
+    return;
+  }
+
+  const groups = [];
+  candidates.forEach((event) => {
+    const live = event.start <= now && event.end >= now;
+    const heading = live ? "Happening now" : formatDayHeading(event.date, todayKey, tomorrowKey);
+    let group = groups.find((item) => item.heading === heading);
+    if (!group) {
+      group = { heading, events: [] };
+      groups.push(group);
+    }
+    group.events.push(event);
+  });
+
+  dom.comingUp.innerHTML = groups.map((group) => `
+    <div class="event-group">
+      <h3>${escapeHTML(group.heading)}</h3>
+      ${group.events.map((event) => {
+        const href = `TeacherAllEvent.html?eventId=${encodeURIComponent(event.id)}`;
+        const count = event.capacity === null
+          ? ""
+          : `<p class="event-registered">${event.registeredCount} of ${event.capacity} registered</p>`;
+        return `<a class="event-row" href="${escapeHTML(href)}" aria-label="${escapeHTML(`${event.title}, ${formatTime(event.start)} to ${formatTime(event.end)}. Open event details`)}">
+          <span class="event-time"><span>${escapeHTML(formatTime(event.start))}</span><span>${escapeHTML(formatTime(event.end))}</span></span>
+          <span class="event-info">
+            <span class="event-title-line"><strong class="event-title">${escapeHTML(event.title)}</strong>${eventChip(event, now, todayKey)}</span>
+            <span class="event-venue">${escapeHTML(event.venue)}</span>
+            ${count}
+          </span>
+        </a>`;
+      }).join("")}
+    </div>`).join("");
+}
+
+function calendarMonthName(month) {
+  return new Intl.DateTimeFormat("en-US", { timeZone: "UTC", month: "long" }).format(new Date(Date.UTC(2020, month, 1)));
+}
+
+function formatCalendarDate(key) {
+  const [year, month, day] = key.split("-").map(Number);
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: TIME_ZONE,
+    month: "long",
+    day: "numeric",
+  }).format(new Date(manilaTimestamp(year, month, day, 12)));
+}
+
+function renderCalendar() {
+  dom.calendarLabel.textContent = `${calendarMonthName(state.month)} ${state.year}`;
+  if (state.eventsLoading) return;
+  if (state.eventsError) {
+    dom.calendar.innerHTML = renderError(state.eventsError, "events");
+    return;
+  }
+
+  const todayKey = dateKey(getManilaParts(Date.now()));
+  const firstDay = new Date(Date.UTC(state.year, state.month, 1)).getUTCDay();
+  const daysInMonth = new Date(Date.UTC(state.year, state.month + 1, 0)).getUTCDate();
+  const eventsByDate = new Map();
+  state.events.forEach((event) => {
+    const startOrdinal = dateOrdinal(event.date);
+    const endDate = dateKey(getManilaParts(Math.max(event.start, event.end)));
+    const endOrdinal = dateOrdinal(endDate);
+    for (let day = 1; day <= daysInMonth; day += 1) {
+      const key = `${state.year}-${String(state.month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+      const ordinal = dateOrdinal(key);
+      if (ordinal < startOrdinal || ordinal > endOrdinal) continue;
+      if (!eventsByDate.has(key)) eventsByDate.set(key, []);
+      eventsByDate.get(key).push(event);
+    }
+  });
+
+  const cells = [];
+  for (let index = 0; index < firstDay; index += 1) cells.push('<span class="calendar-day is-outside" aria-hidden="true"></span>');
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    const key = `${state.year}-${String(state.month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    const hasEvents = eventsByDate.has(key);
+    const classes = ["calendar-day"];
+    if (hasEvents) classes.push("has-events");
+    if (key === todayKey) classes.push("is-today");
+    if (key === state.selectedDate) classes.push("is-selected");
+    const label = `${calendarMonthName(state.month)} ${day}${hasEvents ? ", has events" : ""}`;
+    cells.push(`<button type="button" class="${classes.join(" ")}" data-calendar-date="${key}" aria-label="${escapeHTML(label)}"${hasEvents ? ' aria-pressed="' + String(key === state.selectedDate) + '"' : ' disabled'}>${day}</button>`);
+  }
+  while (cells.length % 7) cells.push('<span class="calendar-day is-outside" aria-hidden="true"></span>');
+
+  const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const anyMonthEvents = eventsByDate.size > 0;
+  let selectedEvents = [];
+  if (state.selectedDate) selectedEvents = eventsByDate.get(state.selectedDate) || [];
+  const selectedList = selectedEvents.length
+    ? `<div class="selected-day-events"><h3>${escapeHTML(formatCalendarDate(state.selectedDate))}</h3>${selectedEvents
+      .sort((first, second) => first.start - second.start)
+      .map((event) => `<a href="TeacherAllEvent.html?eventId=${encodeURIComponent(event.id)}"><span>${escapeHTML(event.title)}</span><small>${escapeHTML(formatTime(event.start))}</small></a>`)
+      .join("")}</div>`
+    : "";
+  const monthEmpty = anyMonthEvents ? "" : '<p class="empty-state calendar-empty">No events scheduled this month.</p>';
+
+  dom.calendar.innerHTML = `
+    <div class="calendar-weekdays" aria-hidden="true">${weekdays.map((day) => `<span>${day}</span>`).join("")}</div>
+    <div class="calendar-grid">${cells.join("")}</div>
+    ${monthEmpty}${selectedList}`;
+}
+
+function parseStoredArray(key) {
+  try {
+    const value = JSON.parse(localStorage.getItem(key) || "[]");
+    return Array.isArray(value) ? value : [];
+  } catch (error) {
+    debug("Could not read saved notification state:", error);
+    return [];
+  }
+}
+
+function belongsToUid(item, uid) {
+  const identifiers = [
+    item.userId,
+    item.recipientUid,
+    item.teacherId,
+    item.teacherUid,
+    item.recipientId,
+    item.ownerId,
+    item.email,
+    item.recipientEmail,
+  ].filter(Boolean).map((value) => String(value).trim().toLowerCase());
+  return identifiers.includes(String(uid || "").toLowerCase());
+}
+
+function readStoredState(key, uid) {
+  const scopedKey = `${key}:${uid}`;
+  try {
+    if (uid && localStorage.getItem(scopedKey) !== null) return parseStoredArray(scopedKey);
+  } catch (error) {
+    debug("Could not check scoped notification state:", error);
+  }
+  return parseStoredArray(key).filter((item) => !uid || belongsToUid(item, uid));
+}
+
+function notificationType(item) {
+  const text = `${item.type || ""} ${item.title || ""} ${item.status || ""} ${item.action || ""}`
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
+  if (text.includes("cancel")) return "cancelled";
+  if (text.includes("resched")) return "rescheduled";
+  if (text.includes("reminder") || text.includes("upcoming") || text.includes("starts")) return "reminder";
+  if (text.includes("publish") || text.includes("newevent")) return "published";
+  return "default";
+}
+
+function eventDerivedNotifications() {
+  const now = Date.now();
+  const items = [];
+  state.records.forEach(({ id, data }) => {
     try {
-      const { fetchMonthHolidays } = await import("../holidayService.js");
-      const list = await fetchMonthHolidays(year, month);
-      if (Array.isArray(list)) {
-        list.forEach((h) => {
-          const id = h.id || `holiday:${h.date}`;
-          if (!EVENTS.some((e) => String(e.id) === String(id))) {
-            EVENTS.push({
-              id,
-              title: h.title || h.name,
-              dateISO: h.date,
-              time: "Holiday",
-              isHoliday: true,
-              source: "Holiday",
-              category: "Holiday",
-            });
-          }
+      const status = normalizeStatus(data);
+      const title = String(data.title || data.name || data.eventName || "Event");
+      const description = String(data.description || data.summary || "").trim();
+      const publishedAt = toMillis(data.publishedAt) || toMillis(data.updatedAt) || toMillis(data.createdAt);
+      const cancelled = status === "cancelled" || status === "canceled";
+
+      if (status === "published" && publishedAt > 0 && publishedAt <= now && now - publishedAt <= RECENT_MS) {
+        items.push({
+          id: `published-${id}-${publishedAt}`,
+          eventId: id,
+          type: "published",
+          title: "New event",
+          message: description ? `${title}. ${description}` : `${title} is now available.`,
+          createdAtMillis: publishedAt,
+          read: false,
         });
-        renderCalendar();
-      }
-    } catch (err) {
-      console.warn("Holidays could not be loaded for Teacher dashboard", err);
-    }
-  }
-
-  function renderCalendar() {
-    const label = document.getElementById("calMonthLabel");
-    if (!label) return;
-    label.textContent = `${MONTH_NAMES[state.calMonth]} ${state.calYear}`;
-
-    const firstOfMonth = new Date(state.calYear, state.calMonth, 1);
-    const startWeekday = firstOfMonth.getDay(); // 0 = Sun
-    const daysInMonth = new Date(
-      state.calYear,
-      state.calMonth + 1,
-      0,
-    ).getDate();
-    const daysInPrevMonth = new Date(
-      state.calYear,
-      state.calMonth,
-      0,
-    ).getDate();
-
-    const isCurrentRealMonth =
-      state.calMonth === today.getMonth() &&
-      state.calYear === today.getFullYear();
-
-    const cells = [];
-
-    // leading days from previous month
-    for (let i = startWeekday - 1; i >= 0; i--) {
-      cells.push({
-        num: daysInPrevMonth - i,
-        muted: true,
-        hasEvent: false,
-        isToday: false,
-        eventIds: [],
-      });
-    }
-    // days of current month
-    for (let d = 1; d <= daysInMonth; d++) {
-      const dateISO = `${state.calYear}-${String(state.calMonth + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-      const eventIds = EVENTS.filter((event) => event.dateISO === dateISO).map(
-        (event) => event.id,
-      );
-      cells.push({
-        num: d,
-        muted: false,
-        hasEvent: eventIds.length > 0,
-        isToday: isCurrentRealMonth && d === today.getDate(),
-        eventIds,
-      });
-    }
-    // trailing days to complete the grid to a multiple of 7
-    let trailing = 1;
-    while (cells.length % 7 !== 0) {
-      cells.push({
-        num: trailing++,
-        muted: true,
-        hasEvent: false,
-        isToday: false,
-        eventIds: [],
-      });
-    }
-
-    const grid = document.getElementById("calDays");
-    grid.innerHTML = cells
-      .map((c) => {
-        const classes = ["cal-day"];
-        if (c.muted) classes.push("is-muted");
-        if (c.hasEvent) classes.push("has-event");
-        if (c.isToday) classes.push("is-today");
-        const dayEvents = EVENTS.filter((event) =>
-          c.eventIds.includes(event.id),
-        );
-        const regularEvents = dayEvents.filter((event) => !isHolidayEvent(event));
-        const isOnlyHoliday = dayEvents.length > 0 && regularEvents.length === 0;
-        if (isOnlyHoliday) classes.push("only-holiday");
-        const eventId = regularEvents[0]?.id || "";
-        const preview = dayEvents.length
-          ? `
-          <span class="dashboard-calendar-preview" role="tooltip">
-            <strong>${dayEvents.length} event${dayEvents.length === 1 ? "" : "s"}</strong>
-            ${dayEvents.map((event) => `<span><b>${escapeHTML(event.title)}</b><small>${isHolidayEvent(event) ? "Holiday" : escapeHTML(event.time)}</small></span>`).join("")}
-          </span>`
-          : "";
-        const cellId = `dashboard-calendar-day-${state.calYear}-${String(state.calMonth + 1).padStart(2, "0")}-${String(c.num).padStart(2, "0")}`;
-        const ariaLabel = isOnlyHoliday
-          ? `${dayEvents[0]?.title || "Holiday"} (Holiday) on ${MONTH_NAMES[state.calMonth]} ${c.num}`
-          : (eventId ? `View event on ${MONTH_NAMES[state.calMonth]} ${c.num}` : "");
-        return `<button type="button" id="${cellId}" class="${classes.join(" ")}"${eventId ? ` data-event-id="${eventId}"` : ""}${ariaLabel ? ` aria-label="${escapeHTML(ariaLabel)}"` : ""} data-calendar-field="date"><span id="${cellId}-number">${c.num}</span>${preview}</button>`;
-      })
-      .join("");
-  }
-
-  function shiftMonth(delta) {
-    let m = state.calMonth + delta;
-    let y = state.calYear;
-    if (m < 0) {
-      m = 11;
-      y -= 1;
-    }
-    if (m > 11) {
-      m = 0;
-      y += 1;
-    }
-    state.calMonth = m;
-    state.calYear = y;
-    renderCalendar();
-    syncHolidays(state.calYear, state.calMonth);
-  }
-
-  /* ---------------------------------------------------------
-     MODAL
-  --------------------------------------------------------- */
-  function openEventModal(id) {
-    const ev = EVENTS.find((e) => e.id === id) || eventFromRecommended(id);
-    if (!ev || isHolidayEvent(ev)) return;
-    activeModalEventId = id;
-    window.RecovibeEventDetails?.open(ev);
-  }
-
-  function eventFromRecommended(id) {
-    return EVENTS.find((e) => e.id === id);
-  }
-
-  function closeModal() {
-    document.getElementById("modalOverlay").classList.remove("is-open");
-    activeModalEventId = null;
-  }
-
-  /* ---------------------------------------------------------
-     TOAST
-  --------------------------------------------------------- */
-  let toastTimer = null;
-  function showToast(msg) {
-    const toast = document.getElementById("toast");
-    toast.textContent = msg;
-    toast.classList.add("is-visible");
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => toast.classList.remove("is-visible"), 2400);
-  }
-
-  /* ---------------------------------------------------------
-     HELPERS
-  --------------------------------------------------------- */
-  function escapeHTML(str) {
-    return String(str).replace(
-      /[&<>"']/g,
-      (c) =>
-        ({
-          "&": "&amp;",
-          "<": "&lt;",
-          ">": "&gt;",
-          '"': "&quot;",
-          "'": "&#39;",
-        })[c],
-    );
-  }
-
-  /* ---------------------------------------------------------
-     EVENT WIRING
-  --------------------------------------------------------- */
-  function setSidebarCollapsed(collapsed) {
-    const sidebar = document.getElementById("sidebar");
-    const btn = document.getElementById("collapseBtn");
-    state.sidebarCollapsed = collapsed;
-    sidebar.classList.toggle("is-collapsed", collapsed);
-    localStorage.setItem("sidebarCollapsed", String(collapsed));
-    if (btn) {
-      btn.setAttribute("aria-expanded", String(!collapsed));
-      btn.setAttribute(
-        "aria-label",
-        collapsed ? "Expand sidebar" : "Collapse sidebar",
-      );
-      btn.setAttribute(
-        "title",
-        collapsed ? "Expand sidebar" : "Collapse sidebar",
-      );
-    }
-  }
-
-  function wireSidebar() {
-    const collapseBtn = document.getElementById("collapseBtn");
-    if (collapseBtn) {
-      collapseBtn.addEventListener("click", () => {
-        if (!window.matchMedia("(max-width: 860px)").matches) {
-          setSidebarCollapsed(!state.sidebarCollapsed);
-        }
-      });
-    }
-
-    document.querySelectorAll(".nav-item[data-view]").forEach((item) => {
-      item.addEventListener("click", (e) => {
-        if (item.getAttribute("href") === "#") e.preventDefault();
-        document
-          .querySelectorAll(".nav-item[data-view]")
-          .forEach((n) => n.classList.remove("is-active"));
-        item.classList.add("is-active");
-        if (item.getAttribute("href") === "#") {
-          showToast(`${item.dataset.label} — coming soon in this preview.`);
-        }
-      });
-    });
-
-    document
-      .querySelector(".nav-item.logout")
-      .addEventListener("click", (e) => {
-        localStorage.removeItem("recovibeCurrentTeacher");
-        localStorage.removeItem("recovibeTeacherId");
-      });
-  }
-
-  function wireSeeAllLinks() {
-    document.querySelectorAll(".link-see-all[data-view]").forEach((link) => {
-      link.addEventListener("click", (e) => {
-        const target = document.querySelector(
-          `.nav-item[data-view="${link.dataset.view}"]`,
-        );
-        if (target) {
-          e.preventDefault();
-          target.click();
-        }
-      });
-    });
-  }
-
-  function wireSearch() {
-    const search = document.getElementById("searchInput");
-    search.addEventListener("input", (e) => {
-      state.query = e.target.value;
-      renderEvents();
-    });
-  }
-
-  function wireCalendar() {
-    const prev = document.getElementById("calPrev");
-    const next = document.getElementById("calNext");
-    if (!prev || !next) return;
-    prev.addEventListener("click", () => shiftMonth(-1));
-    next.addEventListener("click", () => shiftMonth(1));
-  }
-
-  function wireCardClicks() {
-    document.addEventListener("click", (e) => {
-      const btn = e.target.closest("[data-event-id]:not(.modal)");
-      if (btn) {
-        openEventModal(btn.dataset.eventId);
-      }
-    });
-  }
-
-  function wireModal() {
-    document.getElementById("modalClose").addEventListener("click", closeModal);
-    document.getElementById("modalOverlay").addEventListener("click", (e) => {
-      if (e.target.id === "modalOverlay") closeModal();
-    });
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") closeModal();
-    });
-    document.getElementById("modalRegister").addEventListener("click", () => {
-      if (activeModalEventId) {
-        const event = EVENTS.find((item) => item.id === activeModalEventId);
-        if (event) window.RecovibeEventDetails?.open(event);
-      }
-    });
-  }
-
-  /* ---------------------------------------------------------
-     INIT
-  --------------------------------------------------------- */
-  function init() {
-    const teacherEvents = (() => {
-      try {
-        const records = JSON.parse(
-          localStorage.getItem("recovibeTeacherEvents") || "[]",
-        );
-        return Array.isArray(records) ? records : [];
-      } catch (error) {
-        console.warn("Teacher event records could not be loaded.", error);
-        return [];
-      }
-    })();
-    let teacher = null;
-    try {
-      teacher = JSON.parse(
-        localStorage.getItem("recovibeCurrentTeacher") || "null",
-      );
-    } catch (error) {
-      console.warn("Unable to read teacher account.", error);
-    }
-
-    const teacherEmail = String(
-      (teacher && teacher.email) ||
-        localStorage.getItem("recovibeTeacherId") ||
-        "",
-    ).toLowerCase();
-    const events = teacherEmail
-      ? teacherEvents.filter(
-          (event) =>
-            !event.organizerId ||
-            String(event.organizerId).toLowerCase() === teacherEmail,
-        )
-      : teacherEvents;
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const todayISO = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
-    const actionRows = document.getElementById("teacherActionRows");
-    const upcomingEventsList = document.getElementById("upcomingEventsList");
-    const happeningNowList = document.getElementById("happeningNowList");
-    const eventDetailsModal = document.getElementById("eventDetailsModal");
-
-    const hapApproved = (event, number) => {
-      if (!event) return false;
-      const approvalKey = `hap${number}Approved`;
-      const statusKey = `hap_${number}_status`;
-      const legacyKey = `hap${number}`;
-      const nestedApproval = event.approvals?.[`hap${number}`];
-
-      if (event[approvalKey] === true) return true;
-      if (nestedApproval === true) return true;
-      if (
-        typeof nestedApproval === "string" &&
-        nestedApproval.toLowerCase() === "approved"
-      ) {
-        return true;
-      }
-      if (
-        typeof event[statusKey] === "string" &&
-        event[statusKey].toLowerCase() === "approved"
-      ) {
-        return true;
-      }
-      if (event[legacyKey] === true) return true;
-
-      const hasSpecificHapTracking =
-        event.hap1Approved === true ||
-        event.hap2Approved === true ||
-        event.hap3Approved === true ||
-        Boolean(
-          event.approvals?.hap1 || event.approvals?.hap2 || event.approvals?.hap3,
-        ) ||
-        Boolean(event.hap_1_status || event.hap_2_status || event.hap_3_status);
-
-      if (hasSpecificHapTracking) {
-        return false;
       }
 
-      const normStatus = String(event.status || "").trim().toLowerCase();
-      if (["approved", "published", "completed"].includes(normStatus)) {
-        return true;
-      }
-
-      return false;
-    };
-
-    const getStatus = (event) => {
-      const status = String(event.status || "Pending")
-        .toLowerCase()
-        .replace(/[ _-]+/g, " ");
-      if (status === "draft") return "Draft";
-      if (status === "published") return "Published";
-      if (status === "needs revision") return "Needs Revision";
-      if (status === "rejected") return "Rejected";
-      if (status === "cancelled" || status === "canceled") return "Cancelled";
-      if (status === "completed") return "Completed";
-
-      const hap1 = hapApproved(event, 1);
-      const hap2 = hapApproved(event, 2);
-      const hap3 = hapApproved(event, 3);
-      const checkCount = (hap1 ? 1 : 0) + (hap2 ? 1 : 0) + (hap3 ? 1 : 0);
-
-      return checkCount === 3 ? "Approved" : "Pending Approval";
-    };
-    const getStatusClass = (status) =>
-      status.toLowerCase().replace(/[^a-z0-9_-]/g, "-");
-    const formatDate = (value, fallback = "Date TBA") => {
-      if (!value) return fallback;
-      const date = new Date(
-        String(value).includes("T")
-          ? value
-          : `${String(value).slice(0, 10)}T00:00:00`,
-      );
-      return Number.isNaN(date.getTime())
-        ? fallback
-        : date.toLocaleDateString("en-US", {
-            month: "2-digit",
-            day: "2-digit",
-            year: "2-digit",
+      if ((cancelled || status === "rescheduled") && toMillis(data.updatedAt) > 0) {
+        const updatedAt = toMillis(data.updatedAt);
+        if (updatedAt <= now && now - updatedAt <= RECENT_MS) {
+          items.push({
+            id: `${cancelled ? "cancelled" : "rescheduled"}-${id}-${updatedAt}`,
+            eventId: id,
+            type: cancelled ? "cancelled" : "rescheduled",
+            title: cancelled ? `${title} was cancelled` : `${title} was rescheduled`,
+            message: cancelled ? "The organizer cancelled this event." : "The event schedule has changed.",
+            createdAtMillis: updatedAt,
+            read: false,
           });
-    };
-    const dateParts = (value) => {
-      const date = new Date(`${String(value).slice(0, 10)}T00:00:00`);
-      return Number.isNaN(date.getTime())
-        ? { month: "TBA", day: "", year: "" }
-        : {
-            month: date
-              .toLocaleDateString("en-US", { month: "short" })
-              .toUpperCase(),
-            day: String(date.getDate()).padStart(2, "0"),
-            year: String(date.getFullYear()),
-          };
-    };
-
-    function updateTeacherAccount() {
-      const name = String(
-        (teacher && (teacher.name || teacher.fullName)) || "Teacher",
-      );
-      const department = String(
-        (teacher &&
-          (teacher.department || teacher.organization || teacher.role)) ||
-          "Faculty account",
-      );
-      document.getElementById("userName").textContent = name;
-      document.getElementById("userRole").textContent = department;
-      document.getElementById("userAvatar").textContent =
-        name
-          .split(/\s+/)
-          .filter(Boolean)
-          .slice(0, 2)
-          .map((part) => part[0].toUpperCase())
-          .join("") || "T";
-      const hour = new Date().getHours();
-      const greeting = hour < 12 ? "Morning" : hour < 18 ? "Noon" : "Evening";
-      document.getElementById("teacherDashboardHeading").textContent =
-        `Good ${greeting}, ${name}!`;
-      document.getElementById("teacherToday").textContent =
-        new Date().toLocaleDateString("en-US", {
-          month: "long",
-          day: "numeric",
-          year: "numeric",
-        });
-    }
-
-    function renderStatistics() {
-      const statusCounts = events.map(getStatus);
-      document.getElementById("activeEventsCount").textContent =
-        statusCounts.filter((status) =>
-          ["Draft", "Pending", "Pending Approval", "Approved"].includes(status),
-        ).length;
-      document.getElementById("pendingApprovalCount").textContent =
-        statusCounts.filter((status) =>
-          ["Pending", "Pending Approval", "Needs Revision"].includes(status),
-        ).length;
-      document.getElementById("approvedEventsCount").textContent =
-        statusCounts.filter((status) =>
-          ["Approved", "Published"].includes(status),
-        ).length;
-      document.getElementById("completedEventsCount").textContent =
-        statusCounts.filter((status) => status === "Completed").length;
-    }
-
-    function renderActionRequired() {
-      if (!events.length) {
-        actionRows.innerHTML = `<tr><td colspan="3"><div class="dashboard-empty-state"><strong>No events created yet</strong><span>Your submitted events and approval status will appear here.</span><a class="organizer-button" href="TeacherCreate.html">+ Create an Event</a></div></td></tr>`;
-        return;
-      }
-      actionRows.innerHTML = [...events]
-        .sort((first, second) =>
-          String(second.createdAt || "").localeCompare(
-            String(first.createdAt || ""),
-          ),
-        )
-        .map((event) => {
-          const id = escapeHTML(event.eventId || event.id || "");
-          const status = getStatus(event);
-          return `<tr data-event-id="${id}" style="cursor: pointer;">
-          <td><strong>${escapeHTML(event.title || "Untitled event")}</strong><small>${escapeHTML(event.category || "General")}</small></td>
-          <td>${escapeHTML(formatDate(event.createdAt, "Today"))}</td>
-          <td><span class="organizer-status ${getStatusClass(status)}">${escapeHTML(status)}</span></td>
-        </tr>`;
-        })
-        .join("");
-    }
-
-    function renderHappeningNow() {
-      if (!happeningNowList) return;
-      const happening = events
-        .filter((event) => {
-          if (!event.dateISO) return false;
-          const startISO = String(event.dateISO).slice(0, 10);
-          const endISO = String(event.endDateISO || event.endDate || event.dateEnd || startISO).slice(0, 10);
-          const status = getStatus(event);
-          if (status === "Cancelled" || status === "Rejected") return false;
-          return startISO <= todayISO && endISO >= todayISO;
-        })
-        .sort((first, second) =>
-          String(first.dateISO).localeCompare(String(second.dateISO)),
-        );
-
-      if (!happening.length) {
-        happeningNowList.innerHTML = `<div class="dashboard-empty-state compact"><strong>No events happening today</strong><span>Events scheduled for today will appear here.</span></div>`;
-        return;
+        }
       }
 
-      happeningNowList.innerHTML = happening
-        .map((event) => {
-          const parts = dateParts(event.dateISO);
-          const id = escapeHTML(event.eventId || event.id || "");
-          return `<article class="upcoming-event" data-event-id="${id}" style="cursor: pointer;"><div class="upcoming-event-date"><span class="upcoming-event-month">${escapeHTML(parts.month)}</span><strong>${escapeHTML(parts.day)}</strong><small>${escapeHTML(parts.year)}</small></div><div class="upcoming-event-content"><strong>${escapeHTML(event.title || "Untitled event")}</strong><span>${escapeHTML(event.time || "Time TBA")}</span><span>${escapeHTML(event.location || "Location TBA")}</span></div></article>`;
-        })
-        .join("");
-    }
-
-    function renderUpcomingEvents() {
-      const upcoming = events
-        .filter(
-          (event) =>
-            event.dateISO &&
-            String(event.dateISO).slice(0, 10) > todayISO &&
-            getStatus(event) !== "Cancelled" &&
-            getStatus(event) !== "Rejected",
-        )
-        .sort((first, second) =>
-          String(first.dateISO).localeCompare(String(second.dateISO)),
-        )
-        .slice(0, 4);
-      if (!upcoming.length) {
-        upcomingEventsList.innerHTML = `<div class="dashboard-empty-state compact"><strong>No upcoming events</strong><span>Future events you create will appear here.</span></div>`;
-        return;
-      }
-      upcomingEventsList.innerHTML = upcoming
-        .map((event) => {
-          const parts = dateParts(event.dateISO);
-          const id = escapeHTML(event.eventId || event.id || "");
-          return `<article class="upcoming-event" data-event-id="${id}" style="cursor: pointer;"><div class="upcoming-event-date"><span class="upcoming-event-month">${escapeHTML(parts.month)}</span><strong>${escapeHTML(parts.day)}</strong><small>${escapeHTML(parts.year)}</small></div><div class="upcoming-event-content"><strong>${escapeHTML(event.title || "Untitled event")}</strong><span>${escapeHTML(event.time || "Time TBA")}</span><span>${escapeHTML(event.location || "Location TBA")}</span></div></article>`;
-        })
-        .join("");
-    }
-
-    function openEventDetails(event) {
-      if (window.RecovibeEventDetails) {
-        window.RecovibeEventDetails.open(event);
-        return;
-      }
-      document.getElementById("eventDetailsTitle").textContent =
-        event.title || "Untitled event";
-      document.getElementById("eventDetailsHeadingMeta").textContent =
-        `${getStatus(event)} · ${event.category || "General"}`;
-      document.getElementById("eventDetailsContent").innerHTML = [
-        ["Date", formatDate(event.dateISO)],
-        ["Time", event.time || "Time TBA"],
-        ["Location", event.location || "Location TBA"],
-        ["Organizer", event.organizerName || "Teacher"],
-        [
-          "Capacity",
-          event.capacity ? `${event.capacity} people` : "Not specified",
-        ],
-        [
-          "Registration deadline",
-          formatDate(event.registrationDeadline, "Not specified"),
-        ],
-      ]
-        .map(
-          ([label, value]) =>
-            `<div class="event-detail-item"><dt>${escapeHTML(label)}</dt><dd>${escapeHTML(value)}</dd></div>`,
-        )
-        .join("");
-      document.getElementById("eventDetailsDescription").innerHTML =
-        `<h3>Event Description</h3><p>${escapeHTML(event.description || "No event description provided.")}</p>`;
-      const listSection = (title, values) =>
-        `<section class="event-details-section"><h3>${title}</h3>${values.length ? `<ul>${values.map((value) => `<li>${escapeHTML(value)}</li>`).join("")}</ul>` : `<p>Not provided.</p>`}</section>`;
-      const lines = (value) =>
-        Array.isArray(value)
-          ? value
-          : String(value || "")
-              .split(/\r?\n/)
-              .map((line) => line.trim())
-              .filter(Boolean);
-      document.getElementById("eventDetailsSections").innerHTML = [
-        listSection("Event Key Details", lines(event.keyDetails)),
-        listSection("Requirements &amp; Reminders", lines(event.requirements)),
-        listSection("Invitation Recipients", lines(event.invitees)),
-        listSection("Participation Rules", lines(event.participationRules)),
-        listSection("Participant Documents", lines(event.participantDocuments)),
-        listSection("Approval Documents", lines(event.approvalDocuments)),
-        listSection("Contact Person", lines(event.contactPerson)),
-      ].join("");
-      eventDetailsModal.hidden = false;
-      document.body.classList.add("modal-open");
-      eventDetailsModal.querySelector(".event-details-close").focus();
-    }
-
-    updateTeacherAccount();
-    renderStatistics();
-    renderActionRequired();
-    renderHappeningNow();
-    renderUpcomingEvents();
-    renderCalendar();
-    wireCalendar();
-    syncHolidays(state.calYear, state.calMonth);
-
-    actionRows.addEventListener("click", (event) => {
-      const item = event.target.closest("[data-event-id]");
-      if (!item) return;
-      const selected = events.find(
-        (entry) =>
-          String(entry.eventId || entry.id || "") === item.dataset.eventId,
-      );
-      if (selected) openEventDetails(selected);
-    });
-
-    [happeningNowList, upcomingEventsList].forEach((container) => {
-      container?.addEventListener("click", (event) => {
-        const item = event.target.closest("[data-event-id]");
-        if (!item) return;
-        const selected = events.find(
-          (entry) =>
-            String(entry.eventId || entry.id || "") === item.dataset.eventId,
-        );
-        if (selected) openEventDetails(selected);
+      if (cancelled || ["draft", "pending", "rejected"].includes(status)) return;
+      const event = normalizeEvent(id, data);
+      if (!event || event.start <= now || event.start - now > DAY_MS) return;
+      const tomorrowKey = dateKey(getManilaParts(now + DAY_MS));
+      const isTomorrow = event.date === tomorrowKey;
+      const hours = Math.max(1, Math.ceil((event.start - now) / HOUR_MS));
+      items.push({
+        id: `reminder-${id}-${event.start}`,
+        eventId: id,
+        type: "reminder",
+        title: isTomorrow ? `${title} starts tomorrow` : `${title} starts in ${hours} ${hours === 1 ? "hour" : "hours"}`,
+        message: "An event is coming up.",
+        createdAtMillis: Math.max(1, event.start - DAY_MS),
+        read: false,
       });
+    } catch (error) {
+      debug(`Could not create an event notification for ${id}:`, error);
+    }
+  });
+  return items;
+}
+
+function mergedNotifications() {
+  const merged = new Map();
+  state.notificationItems.forEach((item) => {
+    if (!item || !item.id) return;
+    merged.set(String(item.id), {
+      ...item,
+      id: String(item.id),
+      title: String(item.title || item.eventTitle || item.eventName || "Notification"),
+      message: String(item.message || item.body || ""),
+      type: notificationType(item),
+      createdAtMillis: Number(item.createdAtMillis) || toMillis(item.createdAt) ||
+        toMillis(item.timestamp) || toMillis(item.time),
+      eventId: String(item.eventId || item.event_id || ""),
     });
-    eventDetailsModal.addEventListener("click", (event) => {
-      if (event.target.hasAttribute("data-modal-close")) {
-        eventDetailsModal.hidden = true;
-        document.body.classList.remove("modal-open");
-      }
+  });
+
+  const coverage = new Set();
+  merged.forEach((item) => {
+    if (item.eventId) coverage.add(`${item.eventId}:${item.type}`);
+  });
+  eventDerivedNotifications().forEach((item) => {
+    if (merged.has(item.id) || coverage.has(`${item.eventId}:${item.type}`)) return;
+    merged.set(item.id, item);
+  });
+
+  const stored = readStoredState(NOTIFICATION_KEY, state.uid);
+  const deleted = readStoredState(DELETED_KEY, state.uid);
+  const readById = new Map(stored.map((item) => [String(item.id || ""), item.read === true]));
+  const deletedIds = new Set(deleted.map((item) => String(item.id || "")));
+  return [...merged.values()]
+    .filter((item) => !deletedIds.has(item.id))
+    .map((item) => ({
+      ...item,
+      read: readById.has(item.id) ? readById.get(item.id) : item.read === true,
+    }))
+    .sort((first, second) => {
+      const firstTime = Number(first.createdAtMillis) || 0;
+      const secondTime = Number(second.createdAtMillis) || 0;
+      if (!firstTime && !secondTime) return 0;
+      if (!firstTime) return 1;
+      if (!secondTime) return -1;
+      return secondTime - firstTime;
     });
-    document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && !eventDetailsModal.hidden) {
-        eventDetailsModal.hidden = true;
-        document.body.classList.remove("modal-open");
-      }
-    });
-    document.getElementById("teacherLogout").addEventListener("click", () => {
-      localStorage.removeItem("recovibeCurrentTeacher");
-      localStorage.removeItem("recovibeTeacherId");
-    });
-    window.addEventListener("storage", (event) => {
-      if (event.key === "recovibeTeacherEvents") window.location.reload();
-    });
+}
+
+function relativeTime(timestamp) {
+  if (!timestamp || !Number.isFinite(timestamp)) return "";
+  const elapsed = Math.max(0, Date.now() - timestamp);
+  if (elapsed < HOUR_MS) return `${Math.max(1, Math.ceil(elapsed / 60000))}m`;
+  if (elapsed < DAY_MS) return `${Math.ceil(elapsed / HOUR_MS)}h`;
+
+  const itemKey = dateKey(getManilaParts(timestamp));
+  const todayKey = dateKey(getManilaParts(Date.now()));
+  const yesterdayKey = dateKey(getManilaParts(Date.now() - DAY_MS));
+  if (itemKey === yesterdayKey) return "Yesterday";
+  if (itemKey === todayKey) return "Today";
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: TIME_ZONE,
+    month: "short",
+    day: "numeric",
+  }).format(new Date(timestamp));
+}
+
+function notificationIcon(type) {
+  const icons = {
+    published: "✦",
+    cancelled: "×",
+    rescheduled: "↻",
+    reminder: "◷",
+    default: "•",
+  };
+  return icons[type] || icons.default;
+}
+
+function renderNotifications() {
+  if (state.notificationLoading) return;
+  if (state.notificationError) {
+    dom.notifications.innerHTML = renderError(state.notificationError, "notifications");
+    return;
   }
 
-  document.addEventListener("DOMContentLoaded", init);
-})();
+  const items = mergedNotifications();
+  const unread = items.filter((item) => !item.read).length;
+  dom.unreadCount.textContent = unread > 9 ? "9+" : String(unread);
+  dom.unreadCount.hidden = unread === 0;
+  dom.notificationBadge.textContent = unread > 9 ? "9+" : String(unread);
+  dom.notificationBadge.hidden = unread === 0;
+  dom.notificationBadge.setAttribute(
+    "aria-label",
+    unread ? `${unread} unread notifications` : "No unread notifications",
+  );
+
+  const warning = state.notificationSourceErrors.length
+    ? `<div class="notification-source-warning"><span>${escapeHTML(state.notificationSourceErrors.join(" "))} Some sources may be unavailable.</span><button type="button" data-retry="notifications">Retry</button></div>`
+    : "";
+  if (!items.length) {
+    dom.notifications.innerHTML = `${warning}<div class="empty-state">No recent notifications.</div>`;
+    return;
+  }
+
+  dom.notifications.innerHTML = `${warning}${items.slice(0, 4).map((item) => {
+    const unreadClass = item.read ? "" : " is-unread";
+    const time = relativeTime(Number(item.createdAtMillis) || 0);
+    return `<article class="notification-item${unreadClass}">
+      <span class="notification-icon" aria-hidden="true">${notificationIcon(item.type)}</span>
+      <div class="notification-copy">
+        <strong>${escapeHTML(item.title)}</strong>
+        <p>${escapeHTML(item.message || "There is an update about an event.")}</p>
+      </div>
+      ${time ? `<time class="notification-time">${escapeHTML(time)}</time>` : ""}
+      ${item.read ? "" : '<span class="unread-dot" aria-label="Unread"></span>'}
+    </article>`;
+  }).join("")}`;
+}
+
+function renderHeader() {
+  const now = Date.now();
+  const parts = getManilaParts(now);
+  const greeting = parts.hour >= 5 && parts.hour < 12
+    ? "Good morning"
+    : parts.hour >= 12 && parts.hour < 18
+      ? "Good afternoon"
+      : "Good evening";
+  const firstName = String(
+    state.profile.firstName ||
+    state.profile.fullName ||
+    state.profile.name ||
+    state.profile.displayName ||
+    "",
+  ).trim().split(/\s+/)[0] || "there";
+  dom.greeting.textContent = `${greeting}, ${firstName}`;
+  dom.today.textContent = new Intl.DateTimeFormat("en-US", {
+    timeZone: TIME_ZONE,
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  }).format(new Date(now));
+  debug("Greeting hour (Asia/Manila):", parts.hour);
+
+  if (state.eventsLoading || state.eventsError) return;
+  const happening = state.events.filter((event) => event.start <= now && event.end >= now).length;
+  const tomorrowKey = dateKey(getManilaParts(now + DAY_MS));
+  const tomorrow = state.events.filter((event) => event.date === tomorrowKey && event.start > now).length;
+  dom.subtitle.textContent = happening
+    ? `${happening} ${happening === 1 ? "event is" : "events are"} happening now`
+    : tomorrow
+      ? `${tomorrow} ${tomorrow === 1 ? "event starts" : "events start"} tomorrow`
+      : "No events coming up";
+}
+
+function renderAll() {
+  renderHeader();
+  renderComingUp();
+  renderCalendar();
+  renderNotifications();
+}
+
+function recordEvents(snapshot) {
+  const records = [];
+  const events = [];
+  snapshot.docs.forEach((item) => {
+    try {
+      const data = item.data();
+      if (!data || typeof data !== "object") throw new Error("Event data is not an object.");
+      records.push({ id: item.id, data });
+      const event = normalizeEvent(item.id, data);
+      if (event) events.push(event);
+    } catch (error) {
+      debug(`Skipped malformed event ${item.id}:`, error);
+    }
+  });
+  state.records = records;
+  state.events = events;
+  state.eventsLoading = false;
+  state.eventsError = "";
+  if (eventsTimeout) clearTimeout(eventsTimeout);
+  eventsTimeout = null;
+  debug("Event snapshot:", { total: snapshot.size, visible: events.length });
+  renderAll();
+}
+
+function stopEvents() {
+  eventsUnsubscribe?.();
+  eventsUnsubscribe = null;
+  if (eventsTimeout) clearTimeout(eventsTimeout);
+  eventsTimeout = null;
+}
+
+function subscribeEvents(uid) {
+  stopEvents();
+  state.events = [];
+  state.records = [];
+  state.eventsLoading = true;
+  state.eventsError = "";
+  if (!db || !uid || auth?.currentUser?.uid !== uid) {
+    state.eventsLoading = false;
+    state.eventsError = "Sign in to view events.";
+    renderAll();
+    return;
+  }
+
+  eventsTimeout = setTimeout(() => {
+    if (!state.eventsLoading) return;
+    state.eventsLoading = false;
+    state.eventsError = "Events are taking longer than expected to load.";
+    renderAll();
+  }, 5000);
+  const uidAtRead = auth.currentUser?.uid;
+  const filters = teacherEventReadFilters(uid);
+  debug("Firestore read started:", {
+    path: "events",
+    filters,
+    uid: uidAtRead,
+  });
+  try {
+    eventsUnsubscribe = onSnapshot(
+      teacherEventsQuery(db, uid),
+      recordEvents,
+      (error) => {
+        if (eventsTimeout) clearTimeout(eventsTimeout);
+        eventsTimeout = null;
+        state.eventsLoading = false;
+        state.eventsError = error?.code === "permission-denied"
+          ? "You don't have permission to view events. Ask an administrator to check the Firestore events read rule."
+          : error?.message || "Events could not be loaded.";
+        debug("Firestore read failed:", {
+          path: "events",
+          filters,
+          code: error?.code || "unknown",
+          message: error?.message || String(error),
+          uid: uidAtRead,
+        });
+        renderAll();
+      },
+    );
+  } catch (error) {
+    if (eventsTimeout) clearTimeout(eventsTimeout);
+    eventsTimeout = null;
+    state.eventsLoading = false;
+    state.eventsError = error?.code === "permission-denied"
+      ? "You don't have permission to view events. Ask an administrator to check the Firestore events read rule."
+      : error?.message || "Events could not be loaded.";
+    debug("Firestore read failed:", {
+      path: "events",
+      filters,
+      code: error?.code || "unknown",
+      message: error?.message || String(error),
+      uid: uidAtRead,
+    });
+    renderAll();
+  }
+}
+
+async function loadProfile(user) {
+  const cached = readCachedProfile();
+  state.profile = cached;
+  if (user?.displayName) state.profile.displayName = user.displayName;
+  updateSidebarProfile();
+  if (!user?.uid || !db) return;
+
+  const uidAtRead = auth.currentUser?.uid;
+  try {
+    debug("Firestore read started:", {
+      path: `users/${user.uid}`,
+      filters: [],
+      uid: uidAtRead,
+    });
+    const profileSnapshot = await getDoc(doc(db, "users", user.uid));
+    if (state.uid !== user.uid || !profileSnapshot.exists()) return;
+    state.profile = { ...cached, ...profileSnapshot.data() };
+    updateSidebarProfile();
+    renderHeader();
+  } catch (error) {
+    debug("Firestore read failed:", {
+      path: `users/${user.uid}`,
+      filters: [],
+      code: error?.code || "unknown",
+      message: error?.message || String(error),
+      uid: uidAtRead,
+    });
+  }
+}
+
+function updateSidebarProfile() {
+  const name = String(
+    state.profile.fullName ||
+    state.profile.name ||
+    state.profile.displayName ||
+    "Teacher",
+  ).trim();
+  dom.userName.textContent = name || "Teacher";
+  dom.userAvatar.textContent = (name || "Teacher")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0].toUpperCase())
+    .join("") || "T";
+}
+
+function resolveIdentity(user) {
+  if (!user?.uid) {
+    state.uid = "";
+    stopEvents();
+    window.location.replace("TeacherLogin.html");
+    return;
+  }
+  const cached = readCachedProfile();
+  const uid = user.uid;
+  if (uid === state.uid && eventsUnsubscribe) return;
+  state.uid = uid;
+  subscribeEvents(uid);
+  loadProfile(user);
+}
+
+function startAuthListener() {
+  const generation = ++authGeneration;
+  if (!auth || !isFirebaseConfigured) {
+    window.location.replace("TeacherLogin.html");
+    return;
+  }
+  if (eventsTimeout) clearTimeout(eventsTimeout);
+  eventsTimeout = setTimeout(() => {
+    if (!active || generation !== authGeneration || !state.eventsLoading) return;
+    state.eventsLoading = false;
+    state.eventsError = "Authentication is taking longer than expected to load dashboard events.";
+    renderAll();
+  }, 5000);
+  Promise.resolve(authReady).then(() => {
+    if (!active || generation !== authGeneration || authUnsubscribe) return;
+    authUnsubscribe = onAuthStateChanged(auth, (user) => {
+      if (active && generation === authGeneration) resolveIdentity(user);
+    });
+  }).catch((error) => {
+    if (eventsTimeout) clearTimeout(eventsTimeout);
+    eventsTimeout = null;
+    debug("Could not initialize teacher authentication:", error);
+    window.location.replace("TeacherLogin.html");
+  });
+}
+
+function onNotificationData(data) {
+  if (!auth?.currentUser?.uid || data.uid !== auth.currentUser.uid) return;
+  state.notificationItems = Array.isArray(data.items) ? data.items : [];
+  state.notificationLoading = Boolean(data.loading);
+  state.notificationRetry = data.retry;
+  state.notificationSourceErrors = Object.values(data.sourceErrors || {})
+    .filter(Boolean)
+    .map((message) => String(message));
+  state.notificationError = data.allFailed
+    ? data.error || "Notifications could not be loaded."
+    : "";
+  if (!state.notificationLoading) renderNotifications();
+}
+
+function setSidebarOpen(open) {
+  dom.sidebar.classList.toggle("is-open", open);
+  dom.sidebarScrim.hidden = !open;
+  dom.sidebarToggle.setAttribute("aria-expanded", String(open));
+  document.body.classList.toggle("sidebar-open", open);
+}
+
+dom.sidebarToggle.addEventListener("click", () => setSidebarOpen(true));
+dom.sidebarClose.addEventListener("click", () => setSidebarOpen(false));
+dom.sidebarScrim.addEventListener("click", () => setSidebarOpen(false));
+dom.sidebar.querySelectorAll(".nav-link").forEach((link) => {
+  link.addEventListener("click", () => setSidebarOpen(false));
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") setSidebarOpen(false);
+});
+dom.calendarPrevious.addEventListener("click", () => {
+  state.month -= 1;
+  if (state.month < 0) {
+    state.month = 11;
+    state.year -= 1;
+  }
+  state.selectedDate = "";
+  renderCalendar();
+});
+dom.calendarNext.addEventListener("click", () => {
+  state.month += 1;
+  if (state.month > 11) {
+    state.month = 0;
+    state.year += 1;
+  }
+  state.selectedDate = "";
+  renderCalendar();
+});
+dom.calendar.addEventListener("click", (event) => {
+  const day = event.target.closest("[data-calendar-date]");
+  if (!day) return;
+  state.selectedDate = state.selectedDate === day.dataset.calendarDate
+    ? ""
+    : day.dataset.calendarDate;
+  renderCalendar();
+});
+document.addEventListener("click", (event) => {
+  const retry = event.target.closest("[data-retry]");
+  if (!retry) return;
+  if (retry.dataset.retry === "events") subscribeEvents(state.uid);
+  if (retry.dataset.retry === "notifications" && state.notificationRetry) state.notificationRetry();
+});
+
+document.getElementById("teacherLogout").addEventListener("click", () => {
+  localStorage.removeItem("recovibeCurrentTeacher");
+  localStorage.removeItem("recovibeTeacherId");
+});
+
+function onPageHide() {
+  active = false;
+  authGeneration += 1;
+  authUnsubscribe?.();
+  authUnsubscribe = null;
+  stopEvents();
+  clearTimeout(nextMinuteTimeout);
+  clearInterval(minuteInterval);
+}
+
+function onPageShow(event) {
+  if (!event.persisted) return;
+  active = true;
+  startAuthListener();
+  scheduleMinuteUpdates();
+}
+
+function onStorageChange(event) {
+  if (
+    !event.key ||
+    event.key === NOTIFICATION_KEY ||
+    event.key === DELETED_KEY ||
+    event.key === `${NOTIFICATION_KEY}:${state.uid}` ||
+    event.key === `${DELETED_KEY}:${state.uid}`
+  ) {
+    renderNotifications();
+  }
+}
+
+function scheduleMinuteUpdates() {
+  clearTimeout(nextMinuteTimeout);
+  clearInterval(minuteInterval);
+  const delay = 60000 - (Date.now() % 60000);
+  nextMinuteTimeout = setTimeout(() => {
+    renderHeader();
+    renderComingUp();
+    renderNotifications();
+    minuteInterval = setInterval(() => {
+      renderHeader();
+      renderComingUp();
+      renderNotifications();
+    }, 60000);
+  }, delay);
+}
+
+window.addEventListener("pagehide", onPageHide);
+window.addEventListener("pageshow", onPageShow);
+window.addEventListener("storage", onStorageChange);
+window.addEventListener("focus", renderNotifications);
+
+updateSidebarProfile();
+renderHeader();
+renderComingUp();
+renderCalendar();
+renderNotifications();
+startTeacherNotificationData(onNotificationData, { includeEvents: false });
+startAuthListener();
+scheduleMinuteUpdates();

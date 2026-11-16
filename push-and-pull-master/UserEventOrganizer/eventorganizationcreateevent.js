@@ -10,8 +10,11 @@ import { httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.2/fireba
 import { ref, onValue, off, update, get, push, set, remove } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 import { addDoc, collection, doc, getDoc, getDocs, onSnapshot, serverTimestamp, updateDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { deleteObject, getDownloadURL, getStorage, ref as storageRef, uploadBytes } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
+import { EVENT_APPROVAL_STAGES, getStages } from "../eventWorkflow.js";
 
 const FAVORITES_LIMIT = 5;
+// null allows every organizer to skip; otherwise list organization ID/code values, never display names.
+const ADVISER_STEP_SKIPPABLE_FOR = null;
 const storage = app ? getStorage(app) : null;
 
 function sanitizeRtdbValue(value) {
@@ -181,8 +184,10 @@ function normalizeApprovalStages(stages) {
     .map((stage, index) => ({
       ...stage,
       id: String(stage.id || stage.key || `stage-${index + 1}`),
-      name: String(stage.name || stage.label || `Stage ${index + 1}`),
-      reviewer: String(stage.reviewer || stage.name || stage.label || ""),
+      name: String(stage.name || stage.label || `Stage ${index + 1}`)
+        .replace(/Property Cuspdian/gi, "Property Custodian"),
+      reviewer: String(stage.reviewer || stage.name || stage.label || "")
+        .replace(/Property Cuspdian/gi, "Property Custodian"),
       reviewerEmail: String(stage.reviewerEmail || stage.email || "").trim().toLowerCase(),
       required: stage.required !== false,
     }));
@@ -285,6 +290,14 @@ loadCachedOrganizations();
 
   const teacherName = String(teacherProfile.name || teacherProfile.fullName || "Prof. Faculty").trim();
   const organizerOrgName = String(organizerProfile.organization || organizerProfile.orgName || organizerProfile.name || "IBITS").trim();
+  let organizerOrganizationIdentifier = [
+    organizerProfile.organizationId,
+    organizerProfile.orgId,
+    organizerProfile.organizationCode,
+    organizerProfile.orgCode,
+  ].find((value) => String(value || "").trim()) || "";
+  let organizerAccountProfileUid = "";
+  let organizerAccountProfilePromise = null;
 
   const readOnlyOrganizerValue = isOrganizerPage ? organizerOrgName : teacherName;
   function getAutomaticEventSource() {
@@ -311,19 +324,58 @@ loadCachedOrganizations();
     return "Open to All";
   }
 
+  function getOrganizerOrganizationIdentifier(profile) {
+    return [
+      profile?.organizationId,
+      profile?.orgId,
+      profile?.organizationCode,
+      profile?.orgCode,
+    ].map((value) => String(value || "").trim()).find(Boolean) || "";
+  }
+
+  function loadOrganizerAccountProfile(organizerUid) {
+    if (!organizerUid) return Promise.reject(new Error("Sign in before loading your organizer profile."));
+    if (organizerAccountProfileUid !== organizerUid) {
+      organizerAccountProfileUid = organizerUid;
+      organizerAccountProfilePromise = null;
+      organizerOrganizationIdentifier = "";
+    }
+    if (!organizerAccountProfilePromise) {
+      organizerAccountProfilePromise = Promise.resolve()
+        .then(() => {
+          if (!db) throw new Error("Firestore is not configured.");
+          return getDoc(doc(db, "adminUser", organizerUid));
+        })
+        .then((profileSnapshot) => {
+          if (!profileSnapshot.exists()) {
+            throw new Error("Your organizer account profile could not be verified. Contact an administrator.");
+          }
+          const profile = profileSnapshot.data() || {};
+          const role = String(profile.role || profile.userRole || "")
+            .trim()
+            .toLowerCase()
+            .replace(/[\s_-]+/g, "");
+          if (!["eventorganizer", "organizer", "eo"].includes(role)) {
+            throw new Error("Your account is not authorized to submit events as an organizer.");
+          }
+          organizerOrganizationIdentifier = getOrganizerOrganizationIdentifier(profile);
+          renderApprovers();
+          return profile;
+        })
+        .catch((error) => {
+          if (organizerAccountProfileUid === organizerUid) {
+            organizerOrganizationIdentifier = "";
+            organizerAccountProfilePromise = null;
+            renderApprovers();
+          }
+          throw error;
+        });
+    }
+    return organizerAccountProfilePromise;
+  }
+
   async function getOrganizerOrganizationCode(organizerUid) {
-    const profileSnapshot = await getDoc(doc(db, "adminUser", organizerUid));
-    if (!profileSnapshot.exists()) {
-      throw new Error("Your organizer account profile could not be verified. Contact an administrator.");
-    }
-    const profile = profileSnapshot.data() || {};
-    const role = String(profile.role || profile.userRole || "")
-      .trim()
-      .toLowerCase()
-      .replace(/[\s_-]+/g, "");
-    if (!["eventorganizer", "organizer", "eo"].includes(role)) {
-      throw new Error("Your account is not authorized to submit events as an organizer.");
-    }
+    const profile = await loadOrganizerAccountProfile(organizerUid);
     const organizationCode = String(
       profile.organizationCode ||
       profile.orgCode ||
@@ -336,6 +388,15 @@ loadCachedOrganizations();
       throw new Error("Your organizer profile must have an organization assigned before submitting an event.");
     }
     return organizationCode;
+  }
+
+  function canSkipAdviserStep() {
+    if (ADVISER_STEP_SKIPPABLE_FOR === null) return true;
+    if (!Array.isArray(ADVISER_STEP_SKIPPABLE_FOR) || !organizerOrganizationIdentifier) return false;
+    const organizationId = String(organizerOrganizationIdentifier).trim().toLowerCase();
+    return ADVISER_STEP_SKIPPABLE_FOR.some((value) =>
+      String(value || "").trim().toLowerCase() === organizationId,
+    );
   }
 
   const storageKeyEvents = isOrganizerPage ? "recovibeOrganizerEvents" : "recovibeTeacherEvents";
@@ -1346,8 +1407,15 @@ loadCachedOrganizations();
       }
     }
 
-    root.hidden = false;
     currentAuthUid = user.uid;
+    if (isOrganizerPage && Array.isArray(ADVISER_STEP_SKIPPABLE_FOR)) {
+      try {
+        await loadOrganizerAccountProfile(user.uid);
+      } catch (error) {
+        console.warn("[CreateEvent] Could not verify the organizer's organization ID; adviser skipping is locked.", error);
+      }
+    }
+    root.hidden = false;
     const userStored = readJSON(`recovibeReuseLibrary_${user.uid}`, null);
     if (userStored && typeof userStored === "object") {
       reuseLibrary = { ...reuseLibrary, ...userStored };
@@ -2568,10 +2636,10 @@ loadCachedOrganizations();
                 <div class="ce-field ce-field--full" id="wrap-approverList">
                   <div class="ce-label-split" style="margin-bottom: 8px;">
                     <label id="approverListLabel">Sequential Approval Steps <span class="ce-req">*</span></label>
-                    <span class="ce-counter" id="approverCountText">7 approvers selected</span>
+                    <span class="ce-counter" id="approverCountText">${getSelectedApprovalStages().length} approvers selected</span>
                   </div>
                   <p class="ce-hint" style="margin-bottom: 12px;">
-                    Approvals run sequentially in 8 steps. Each step opens only after the one before approves. Unticked approvers are skipped and the rest are numbered by position.
+                    Approvals run sequentially in ${getSelectedApprovalStages().length} steps. Each step opens only after the one before approves. Unticked approvers are skipped and the rest are numbered by position.
                   </p>
                   <div class="ce-approver-list" id="approverList">
                     <!-- Dynamic approver items -->
@@ -3042,6 +3110,10 @@ loadCachedOrganizations();
     state.mode = "new";
     state.dirty = true;
     state.deadlineManuallyEdited = true;
+    const savedApprovalSteps = getStages(ev);
+    state.selectedApprovers = getFormApprovalStageOptions()
+      .filter((stage) => savedApprovalSteps.includes(stage.key))
+      .map((stage) => stage.id);
 
     state.highlightedFields = new Set(["eventDate", "timeStart", "timeEnd", "category"]);
 
@@ -3306,6 +3378,9 @@ loadCachedOrganizations();
                   document.querySelector("#adminDocsList input:not(:valid)")?.focus();
                   return;
                 }
+                if (isOrganizerPage && Array.isArray(ADVISER_STEP_SKIPPABLE_FOR)) {
+                  await loadOrganizerAccountProfile(auth?.currentUser?.uid);
+                }
                 if (!validateForm()) {
                   closeModal();
                   const message = "Please resolve all marked errors before submitting.";
@@ -3346,9 +3421,16 @@ loadCachedOrganizations();
                         organizerOrganization: organizerOrganizationCode,
                       }
                     : {}),
+                  ...(isOrganizerPage
+                    ? {
+                        approvalSteps: formPayload.approvalSteps,
+                        approvalCurrentStage: formPayload.approvalSteps[0] || null,
+                        approvalCurrentStep: 0,
+                      }
+                    : {}),
                   startAt: `${formPayload.date || ""} ${formPayload.timeStart || ""}`.trim(),
                   endAt: `${formPayload.dateEnd || formPayload.date || ""} ${formPayload.timeEnd || ""}`.trim(),
-                  approvers: [...state.selectedApprovers],
+                  approvers: [...formPayload.approvers],
                   ...(isOrganizerPage && urlParams.get("resubmit")
                     ? { resubmissionOf: urlParams.get("resubmit") }
                     : {}),
@@ -3775,6 +3857,81 @@ loadCachedOrganizations();
     });
   }
 
+  function getFormApprovalStageOptions() {
+    const configuredStages = systemApprovalStages.map((stage, index) => {
+      const identities = [stage.key, stage.id, stage.name, stage.label, stage.reviewer]
+        .map((value) => String(value || "").toLowerCase().replace(/[^a-z0-9]/g, ""));
+      const canonicalStage = EVENT_APPROVAL_STAGES.find((candidate) =>
+        [candidate.key, candidate.label]
+          .some((value) => identities.includes(String(value).toLowerCase().replace(/[^a-z0-9]/g, ""))),
+      );
+      return {
+        stage,
+        key: canonicalStage?.key || EVENT_APPROVAL_STAGES[index]?.key || null,
+      };
+    });
+
+    return EVENT_APPROVAL_STAGES.map((canonicalStage, index) => {
+      const configured = configuredStages.find((candidate) => candidate.key === canonicalStage.key);
+      const stage = configured?.stage || DEFAULT_APPROVAL_STAGES[index];
+      const canSkipAdviser = isOrganizerPage &&
+        canonicalStage.key === "org_adv" &&
+        canSkipAdviserStep();
+      const required = canonicalStage.key === "osas"
+        ? true
+        : canonicalStage.key === "org_adv"
+          ? !canSkipAdviser
+          : Boolean(stage.required);
+      return {
+        ...stage,
+        key: canonicalStage.key,
+        name: String(stage.name || canonicalStage.label)
+          .replace(/Property Cuspdian/gi, "Property Custodian"),
+        reviewer: String(stage.reviewer || stage.name || canonicalStage.label)
+          .replace(/Property Cuspdian/gi, "Property Custodian"),
+        canSkipAdviser,
+        required,
+      };
+    });
+  }
+
+  function getSelectedApprovalStages() {
+    const selected = new Set((state.selectedApprovers || []).map(String));
+    return getFormApprovalStageOptions().filter((stage) =>
+      stage.required ||
+      selected.has(stage.id) ||
+      selected.has(stage.name) ||
+      selected.has(stage.key),
+    );
+  }
+
+  function getApprovalStepsValidationError() {
+    const selectedStages = getSelectedApprovalStages();
+    const approvalSteps = selectedStages.map((stage) => stage.key);
+    const canonicalSteps = EVENT_APPROVAL_STAGES
+      .map((stage) => stage.key)
+      .filter((stageKey) => approvalSteps.includes(stageKey));
+    if (!approvalSteps.length) return "At least one approver step must remain selected.";
+    if (approvalSteps.length !== selectedStages.length ||
+        approvalSteps.some((stageKey, index) => stageKey !== canonicalSteps[index])) {
+      return "Approval steps must follow the configured stage order.";
+    }
+    if (approvalSteps[approvalSteps.length - 1] !== "osas") {
+      return "OSAS must remain selected as the final approval step.";
+    }
+    return "";
+  }
+
+  function getApprovalStepsForSubmission() {
+    const selectedStageKeys = getSelectedApprovalStages().map((stage) => stage.key);
+    const approvalSteps = getStages({ approvalSteps: selectedStageKeys });
+    const error = getApprovalStepsValidationError();
+    if (error || approvalSteps.length !== selectedStageKeys.length) {
+      throw new Error(error || "The approval chain contains an invalid stage.");
+    }
+    return approvalSteps;
+  }
+
   function renderApprovers() {
     const list = document.getElementById("approverList");
     const countText = document.getElementById("approverCountText");
@@ -3782,26 +3939,29 @@ loadCachedOrganizations();
     const errEl = document.getElementById("error-approvers");
     if (!list) return;
 
-    // Ensure all required stages are included in state.selectedApprovers
-    systemApprovalStages.forEach((stage) => {
+    const stages = getFormApprovalStageOptions();
+    stages.forEach((stage) => {
       if (stage.required && !state.selectedApprovers.includes(stage.id)) {
         state.selectedApprovers.push(stage.id);
       }
     });
 
     function updateStepTags() {
-      const checkedIds = systemApprovalStages
-        .map((s) => s.id)
-        .filter((id) => {
-          const input = document.getElementById(`approver-${id}`);
-          const stage = systemApprovalStages.find((s) => s.id === id);
-          if (stage?.required) return true;
-          return input ? input.checked : state.selectedApprovers.includes(id);
-        });
+      const checkedIds = stages
+        .filter((stage) => {
+          if (stage.required) return true;
+          const input = document.getElementById(`approver-${stage.id}`);
+          return input
+            ? input.checked
+            : state.selectedApprovers.includes(stage.id) ||
+              state.selectedApprovers.includes(stage.name) ||
+              state.selectedApprovers.includes(stage.key);
+        })
+        .map((stage) => stage.id);
       state.selectedApprovers = checkedIds;
 
       let currentStep = 1;
-      systemApprovalStages.forEach((stage) => {
+      stages.forEach((stage) => {
         const tag = document.getElementById(`stepTag-${stage.id}`);
         const item = document.getElementById(`approverItem-${stage.id}`);
         const isChecked = checkedIds.includes(stage.id);
@@ -3823,6 +3983,9 @@ loadCachedOrganizations();
       if (countText) {
         countText.textContent = `${checkedIds.length} approver${checkedIds.length === 1 ? "" : "s"} selected`;
       }
+      if (hintText) {
+        hintText.textContent = `Approvals run sequentially in ${checkedIds.length} steps. OSAS is always last. Unticked approvers are skipped and the rest are numbered by position.`;
+      }
 
       if (errEl) {
         if (checkedIds.length === 0) {
@@ -3835,24 +3998,23 @@ loadCachedOrganizations();
       }
     }
 
-    if (hintText) {
-      hintText.textContent = `Approvals run sequentially in ${systemApprovalStages.length} steps. Each step opens only after the one before approves. Unticked approvers are skipped and the rest are numbered by position.`;
-    }
-
-    list.innerHTML = systemApprovalStages
+    list.innerHTML = stages
       .map((stage) => {
-        const isPreChecked = stage.required || state.selectedApprovers.includes(stage.id);
-        const isReq = Boolean(stage.required);
+        const isPreChecked = stage.required ||
+          state.selectedApprovers.includes(stage.id) ||
+          state.selectedApprovers.includes(stage.name) ||
+          state.selectedApprovers.includes(stage.key);
+        const isLocked = Boolean(stage.required);
         const reviewerExtra = stage.reviewer && stage.reviewer.trim() !== stage.name.trim()
           ? `<span style="font-size:12px;color:#6b7280;margin-left:6px;font-weight:normal;">(${escapeHTML(stage.reviewer)})</span>`
           : "";
 
         return `
-          <div class="ce-approver-item ${isPreChecked ? "is-selected" : ""} ${isReq ? "is-disabled" : ""}" id="approverItem-${stage.id}">
+          <div class="ce-approver-item ${isPreChecked ? "is-selected" : ""} ${isLocked ? "is-disabled" : ""}" id="approverItem-${stage.id}">
             <div class="ce-approver-col-left">
               <span class="ce-step-tag" id="stepTag-${stage.id}">Step -</span>
               <span class="ce-approver-name">${escapeHTML(stage.name)} ${reviewerExtra}</span>
-              ${isReq ? '<span class="ce-req-badge">Required</span>' : ""}
+              ${stage.required ? '<span class="ce-req-badge">Required</span>' : ""}
             </div>
             <div class="ce-approver-col-right">
               <input type="checkbox"
@@ -3860,17 +4022,42 @@ loadCachedOrganizations();
                      id="approver-${stage.id}"
                      data-key="${stage.id}"
                      ${isPreChecked ? "checked" : ""}
-                     ${isReq ? "disabled" : ""}>
+                     ${isLocked ? "disabled" : ""}>
             </div>
           </div>
         `;
       })
       .join("");
 
-    systemApprovalStages.forEach((stage) => {
+    stages.forEach((stage) => {
       const input = document.getElementById(`approver-${stage.id}`);
       if (input && !stage.required) {
         input.addEventListener("change", () => {
+          if (stage.canSkipAdviser && !input.checked) {
+            if (!document.getElementById("ceConfirmModal")) {
+              input.checked = true;
+              updateStepTags();
+              showToast("Confirmation is unavailable; adviser approval remains selected.");
+              return;
+            }
+            showConfirmModal({
+              title: "Skip Adviser Approval?",
+              text: "Skip the Organization Adviser's approval for this proposal?",
+              confirmText: "Skip",
+              cancelText: "Cancel",
+              triggerEl: input,
+              onConfirm: (closeModal) => {
+                closeModal();
+                updateStepTags();
+                state.dirty = true;
+              },
+              onCancel: () => {
+                input.checked = true;
+                updateStepTags();
+              },
+            });
+            return;
+          }
           updateStepTags();
           state.dirty = true;
         });
@@ -7262,10 +7449,22 @@ loadCachedOrganizations();
     }
 
     // 13. Sequential Approval Steps
-    const requiredStages = systemApprovalStages.filter((s) => s.required);
-    const missingReq = requiredStages.filter((s) => !state.selectedApprovers.includes(s.id) && !state.selectedApprovers.includes(s.name));
-    if (missingReq.length > 0 || !state.selectedApprovers || state.selectedApprovers.length === 0) {
-      markError("approvers", "All required approval steps must be included in the approval chain.");
+    const requiredStages = getFormApprovalStageOptions().filter((stage) => stage.required);
+    const missingReq = requiredStages.filter((stage) =>
+      !state.selectedApprovers.includes(stage.id) &&
+      !state.selectedApprovers.includes(stage.name) &&
+      !state.selectedApprovers.includes(stage.key),
+    );
+    const activeApprovalStages = getSelectedApprovalStages();
+    const approvalStepsError = getApprovalStepsValidationError();
+    if (missingReq.length > 0 || !state.selectedApprovers || approvalStepsError ||
+        activeApprovalStages.some((stage) => !stage.key)) {
+      markError(
+        "approvers",
+        missingReq.length
+          ? "All required approval steps must be included in the approval chain."
+          : approvalStepsError || "Approval steps must use valid stage keys.",
+      );
     }
 
     // 14. Target Audience
@@ -7380,6 +7579,10 @@ loadCachedOrganizations();
   // 29. Save Draft & Submit Event Handlers
   function serializeEvent(status) {
     const form = document.getElementById("createEventMainForm");
+    const selectedApprovalStages = getSelectedApprovalStages();
+    const approvalSteps = isOrganizerPage
+      ? getApprovalStepsForSubmission()
+      : null;
     const id = state.editingEventId || `${isOrganizerPage ? "org" : "tch"}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const nowISO = new Date().toISOString();
 
@@ -7508,8 +7711,15 @@ loadCachedOrganizations();
       collaborationNotes: form?.collaborationNotes?.value.trim() || state.collaborationNotes || "",
       externalGuests: collectExternalGuests(),
       outsideGuests: Boolean((state.externalGuests && state.externalGuests.length > 0) || outsideGuests || state.outsideGuests),
-      approvers: [...state.selectedApprovers],
-      approvalStages: systemApprovalStages.filter((s) => state.selectedApprovers.includes(s.id) || s.required),
+      approvers: isOrganizerPage
+        ? selectedApprovalStages.map((stage) => stage.id)
+        : [...state.selectedApprovers],
+      approvalStages: isOrganizerPage
+        ? selectedApprovalStages.map(({ notRequired, ...stage }) => stage)
+        : systemApprovalStages.filter((stage) =>
+            state.selectedApprovers.includes(stage.id) || stage.required,
+          ),
+      ...(isOrganizerPage ? { approvalSteps } : {}),
       status, // "Draft", "Pending Approval", or "Published"
       createdAt: nowISO,
       updatedAt: nowISO,

@@ -14,7 +14,7 @@
     <link rel="stylesheet" href="EventOrganizerScanAttendance.css" />
     <link rel="stylesheet" href="OrganizerNotificationBadge.css" />
     <!-- html5-qrcode library for camera QR reading -->
-    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+    <script async src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
   </head>
   <body>
     <div class="organizer-app" id="organizerScanApp">
@@ -433,7 +433,14 @@
     </div>
 
     <!-- Organizer Script -->
-    <script type="module" src="EventOrganizerScanAttendance.js"></script>
+    <script id="scanAttendanceModule" type="module" src="EventOrganizerScanAttendance.js"></script>
+    <script>
+      document.getElementById("scanAttendanceModule").addEventListener("error", () => {
+        console.error("[Scan Attendance] Page module failed to load; check its imports and network requests.");
+        const eventSelect = document.getElementById("eventSelect");
+        if (eventSelect) eventSelect.replaceChildren(new Option("Failed to load events", ""));
+      });
+    </script>
     <script src="OrganizerNotificationBadge.js"></script>
     <script type="module" src="OrganizerSidebarProfile.js"></script>
   </body>

@@ -1,5 +1,3 @@
-@import url("../UserEventOrganizer/EventOrganizerAllEvents.css");
-
 #organizerCalendarMain .calendar-layout {
   grid-template-columns: minmax(0, 1fr) 340px;
   height: calc(100vh - 32px);

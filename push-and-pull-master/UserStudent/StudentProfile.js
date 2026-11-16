@@ -23,6 +23,11 @@ import {
   loadStudentProfile,
   renderStudentSidebar,
 } from "./studentIdentity.js";
+import {
+  CORRECTION_FIELDS_BY_ROLE,
+  submitCorrectionRequest,
+  subscribeMyCorrectionRequests,
+} from "../correctionRequests.js";
 
 const DEFAULT_STUDENT = {};
 
@@ -497,10 +502,26 @@ function hydrateUserProfile() {
   const btnCancelCorrection = document.getElementById("btnCancelCorrection");
   const correctionForm = document.getElementById("correctionForm");
   const correctionFieldSelect = document.getElementById("correctionFieldSelect");
+  const correctionCurrentValue = document.getElementById("correctionCurrentValue");
   const errCorrectionField = document.getElementById("errCorrectionField");
   const correctionMessageInput = document.getElementById("correctionMessageInput");
   const errCorrectionMessage = document.getElementById("errCorrectionMessage");
+  const correctionReasonInput = document.getElementById("correctionReasonInput");
+  const errCorrectionReason = document.getElementById("errCorrectionReason");
+  const correctionReasonCount = document.getElementById("correctionReasonCount");
+  const correctionSubmitStatus = document.getElementById("correctionSubmitStatus");
+  const correctionRequestsContent = document.getElementById("correctionRequestsContent");
   const btnSendCorrection = document.getElementById("btnSendCorrection");
+  let correctionRequests = [];
+  let correctionRequestsLoading = true;
+  let correctionRequestsError = "";
+  let correctionRequestsUnsubscribe = null;
+  let correctionRequestsTimeout = null;
+  let correctionUid = "";
+  let correctionProfileData = null;
+  let correctionAuthUser = null;
+  let correctionSubmitInFlight = false;
+  let correctionPageActive = true;
 
   // 4. Preferences Card DOM
   const editPreferencesBtn = document.getElementById("editPreferences");
@@ -1012,9 +1033,186 @@ function hydrateUserProfile() {
   /* ==========================================================================
      3. Student Details Card Correction Modal Controller
      ========================================================================== */
+  const studentCorrectionFields = CORRECTION_FIELDS_BY_ROLE.student;
+  const studentCorrectionFieldElements = {
+    studentNumber: "viewStudentNumber",
+    program: "viewDepartment",
+    yearSection: "viewYearSection",
+  };
+
+  function populateCorrectionFieldOptions() {
+    if (!correctionFieldSelect) return;
+    [...correctionFieldSelect.options].slice(1).forEach((option) => option.remove());
+    studentCorrectionFields.forEach(({ field, label }) => {
+      const option = document.createElement("option");
+      option.value = field;
+      option.textContent = label;
+      correctionFieldSelect.append(option);
+    });
+  }
+
+  function escapeCorrectionHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (character) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    })[character]);
+  }
+
+  function correctionCurrentValueFor(field) {
+    const element = document.getElementById(studentCorrectionFieldElements[field]);
+    return element?.textContent?.trim() || "";
+  }
+
+  function correctionTimestamp(value) {
+    if (value && typeof value.toMillis === "function") return value.toMillis();
+    if (value && typeof value.toDate === "function") return value.toDate().getTime();
+    if (value && typeof value.seconds === "number") return value.seconds * 1000;
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    return null;
+  }
+
+  function renderCorrectionRequests() {
+    if (!correctionRequestsContent) return;
+    if (correctionRequestsLoading) {
+      correctionRequestsContent.innerHTML = '<p class="cr-state" role="status">Loading your requests...</p>';
+      updateCorrectionSubmitButton();
+      return;
+    }
+    if (correctionRequestsError) {
+      correctionRequestsContent.innerHTML = `<p class="cr-state" role="alert">${escapeCorrectionHtml(correctionRequestsError)}</p><button class="cr-retry-button" type="button" data-retry-correction-requests>Retry</button>`;
+      updateCorrectionSubmitButton();
+      return;
+    }
+    if (!correctionRequests.length) {
+      correctionRequestsContent.innerHTML = '<p class="cr-state">No correction requests yet.</p>';
+      updateCorrectionSubmitButton();
+      return;
+    }
+
+    correctionRequestsContent.innerHTML = correctionRequests.map((request) => {
+      const rawStatus = String(request.status || "").trim().toLowerCase();
+      const status = rawStatus === "rejected"
+        ? "rejected"
+        : ["approved", "resolved"].includes(rawStatus) ? "approved" : "pending";
+      const statusClass = status === "pending" ? "" : ` cr-is-${status}`;
+      const timestamp = correctionTimestamp(request.createdAt);
+      const date = timestamp
+        ? new Intl.DateTimeFormat("en-US", {
+            timeZone: "Asia/Manila",
+            month: "short",
+            day: "numeric",
+            year: "numeric",
+          }).format(new Date(timestamp))
+        : "Date unavailable";
+      const label = request.fieldLabel
+        || studentCorrectionFields.find((item) => item.field === request.field)?.label
+        || "Student detail";
+      const reviewerNote = String(request.reviewNote || "").trim();
+      return `<article class="cr-request-item">
+        <p class="cr-request-field">${escapeCorrectionHtml(label)}</p>
+        <span class="cr-status-pill${statusClass}">${status[0].toUpperCase()}${status.slice(1)}</span>
+        <p class="cr-request-values">${escapeCorrectionHtml(request.currentValue)} &rarr; ${escapeCorrectionHtml(request.requestedValue)}</p>
+        <p class="cr-request-date">${escapeCorrectionHtml(date)}</p>
+        ${reviewerNote ? `<p class="cr-request-note"><strong>Reviewer note:</strong> ${escapeCorrectionHtml(reviewerNote)}</p>` : ""}
+      </article>`;
+    }).join("");
+    updatePendingCorrectionFields();
+    updateCorrectionSubmitButton();
+  }
+
+  function updatePendingCorrectionFields() {
+    if (!correctionFieldSelect) return;
+    const pending = new Set(correctionRequests
+      .filter((request) => String(request.status || "").trim().toLowerCase() === "pending")
+      .map((request) => request.field));
+    [...correctionFieldSelect.options].forEach((option) => {
+      if (!option.value) return;
+      const field = studentCorrectionFields.find((item) => item.field === option.value);
+      option.disabled = pending.has(option.value);
+      option.textContent = option.disabled ? `${field.label} - Request pending` : field.label;
+    });
+  }
+
+  function updateCorrectionSubmitButton() {
+    if (!btnSendCorrection) return;
+    btnSendCorrection.disabled = correctionSubmitInFlight;
+    btnSendCorrection.textContent = correctionSubmitInFlight ? "Sending..." : "Send";
+  }
+
+  function stopCorrectionRequests() {
+    correctionRequestsUnsubscribe?.();
+    correctionRequestsUnsubscribe = null;
+    clearTimeout(correctionRequestsTimeout);
+    correctionRequestsTimeout = null;
+  }
+
+  function startCorrectionRequests(uid, profileData) {
+    if (!correctionPageActive) return;
+    stopCorrectionRequests();
+    correctionUid = uid;
+    correctionProfileData = profileData;
+    correctionRequests = [];
+    correctionRequestsLoading = true;
+    correctionRequestsError = "";
+    renderCorrectionRequests();
+    updatePendingCorrectionFields();
+    if (!uid || auth?.currentUser?.uid !== uid || !db) {
+      correctionRequestsLoading = false;
+      correctionRequestsError = "Sign in to view your correction requests.";
+      renderCorrectionRequests();
+      return;
+    }
+
+    correctionRequestsTimeout = setTimeout(() => {
+      if (!correctionRequestsLoading) return;
+      correctionRequestsLoading = false;
+      correctionRequestsError = "Requests are taking longer than expected to load.";
+      renderCorrectionRequests();
+    }, 5000);
+    try {
+      correctionRequestsUnsubscribe = subscribeMyCorrectionRequests(
+        uid,
+        (requests) => {
+          if (!correctionPageActive) return;
+          correctionRequests = requests;
+          correctionRequestsLoading = false;
+          correctionRequestsError = "";
+          clearTimeout(correctionRequestsTimeout);
+          correctionRequestsTimeout = null;
+          updatePendingCorrectionFields();
+          renderCorrectionRequests();
+        },
+        (error) => {
+          if (!correctionPageActive) return;
+          correctionRequestsLoading = false;
+          correctionRequestsError = error?.code === "permission-denied"
+            ? "You don't have permission to view your correction requests."
+            : "Couldn't load your requests. Check your connection and retry.";
+          clearTimeout(correctionRequestsTimeout);
+          correctionRequestsTimeout = null;
+          renderCorrectionRequests();
+        },
+      );
+    } catch (error) {
+      correctionRequestsLoading = false;
+      correctionRequestsError = error?.message || "Couldn't load your requests. Check your connection and retry.";
+      clearTimeout(correctionRequestsTimeout);
+      correctionRequestsTimeout = null;
+      renderCorrectionRequests();
+    }
+  }
+
   function openCorrectionModal() {
     if (correctionFieldSelect) correctionFieldSelect.value = "";
     if (correctionMessageInput) correctionMessageInput.value = "";
+    if (correctionCurrentValue) correctionCurrentValue.value = "";
+    if (correctionReasonInput) correctionReasonInput.value = "";
+    if (correctionReasonCount) correctionReasonCount.textContent = "0";
+    if (correctionSubmitStatus) correctionSubmitStatus.textContent = "";
+    correctionSubmitStatus?.classList.remove("cr-is-error");
     if (errCorrectionField) {
       errCorrectionField.textContent = "";
       errCorrectionField.classList.remove("is-visible");
@@ -1023,90 +1221,163 @@ function hydrateUserProfile() {
       errCorrectionMessage.textContent = "";
       errCorrectionMessage.classList.remove("is-visible");
     }
+    if (errCorrectionReason) {
+      errCorrectionReason.textContent = "";
+      errCorrectionReason.classList.remove("is-visible");
+    }
+    updatePendingCorrectionFields();
+    const availableField = [...(correctionFieldSelect?.options || [])]
+      .find((option) => option.value && !option.disabled);
+    if (availableField) correctionFieldSelect.value = availableField.value;
+    if (correctionCurrentValue) {
+      correctionCurrentValue.value = correctionCurrentValueFor(correctionFieldSelect?.value || "");
+    }
     if (correctionModalOverlay) correctionModalOverlay.hidden = false;
     correctionFieldSelect?.focus();
   }
 
   function closeCorrectionModalDialog() {
+    if (correctionSubmitInFlight) return;
     if (correctionModalOverlay) correctionModalOverlay.hidden = true;
   }
 
+  populateCorrectionFieldOptions();
+  correctionFieldSelect?.addEventListener("change", () => {
+    if (correctionCurrentValue) {
+      correctionCurrentValue.value = correctionCurrentValueFor(correctionFieldSelect.value);
+    }
+    if (errCorrectionField) errCorrectionField.classList.remove("is-visible");
+  });
+  correctionReasonInput?.addEventListener("input", () => {
+    if (correctionReasonCount) correctionReasonCount.textContent = String(correctionReasonInput.value.length);
+    errCorrectionReason?.classList.remove("is-visible");
+  });
   btnRequestCorrection?.addEventListener("click", openCorrectionModal);
   closeCorrectionModal?.addEventListener("click", closeCorrectionModalDialog);
   btnCancelCorrection?.addEventListener("click", closeCorrectionModalDialog);
   correctionModalBackdrop?.addEventListener("click", closeCorrectionModalDialog);
+  correctionRequestsContent?.addEventListener("click", (event) => {
+    if (event.target.closest("[data-retry-correction-requests]") && correctionUid && correctionProfileData) {
+      startCorrectionRequests(correctionUid, correctionProfileData);
+    }
+  });
+  window.addEventListener("pagehide", () => {
+    correctionPageActive = false;
+    stopCorrectionRequests();
+  });
+  window.addEventListener("pageshow", (event) => {
+    if (!event.persisted) return;
+    correctionPageActive = true;
+    if (correctionAuthUser?.uid && auth?.currentUser?.uid === correctionAuthUser.uid) {
+      startCorrectionRequests(correctionAuthUser.uid, correctionProfileData);
+    } else if (!auth?.currentUser) {
+      window.location.replace("StudentLogin.html");
+    }
+  });
+  window.addEventListener("student-correction-profile-ready", (event) => {
+    const { uid, profile } = event.detail || {};
+    if (!correctionPageActive || !uid || auth?.currentUser?.uid !== uid) return;
+    correctionAuthUser = { uid };
+    startCorrectionRequests(uid, profile);
+  });
+  window.addEventListener("student-correction-signed-out", () => {
+    stopCorrectionRequests();
+    correctionAuthUser = null;
+    correctionProfileData = null;
+    correctionRequestsLoading = false;
+    correctionRequestsError = "Sign in to view your correction requests.";
+    renderCorrectionRequests();
+  });
+  window.addEventListener("student-correction-unavailable", () => {
+    correctionRequestsLoading = false;
+    correctionRequestsError = "Correction requests are unavailable.";
+    renderCorrectionRequests();
+  });
 
   correctionForm?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const field = correctionFieldSelect?.value || "";
-    const msg = correctionMessageInput?.value.trim() || "";
-    let hasErr = false;
+    const currentValue = correctionCurrentValueFor(field);
+    const requestedValue = correctionMessageInput?.value.trim() || "";
+    const reason = correctionReasonInput?.value.trim() || "";
+    const isPending = !correctionRequestsLoading && !correctionRequestsError && correctionRequests.some((request) =>
+      request.field === field && String(request.status || "").trim().toLowerCase() === "pending",
+    );
+    const fieldError = !field || isPending;
+    const valueError = !requestedValue || requestedValue.length > 200 || requestedValue === currentValue;
+    const reasonError = reason.length < 10 || reason.length > 500;
 
-    if (!field) {
-      if (errCorrectionField) {
-        errCorrectionField.textContent = "Select a detail to correct.";
-        errCorrectionField.classList.add("is-visible");
+    if (errCorrectionField) {
+      errCorrectionField.textContent = isPending
+        ? "A request is already pending for this detail."
+        : "Select a read-only detail to correct.";
+      errCorrectionField.classList.toggle("is-visible", fieldError);
+    }
+    if (errCorrectionMessage) {
+      errCorrectionMessage.textContent = valueError
+        ? "Enter a different requested value (1-200 characters)."
+        : "";
+      errCorrectionMessage.classList.toggle("is-visible", valueError);
+    }
+    if (errCorrectionReason) {
+      errCorrectionReason.textContent = reasonError
+        ? "Explain the reason in 10-500 characters."
+        : "";
+      errCorrectionReason.classList.toggle("is-visible", reasonError);
+    }
+    if (fieldError || valueError || reasonError) return;
+    if (!auth?.currentUser?.uid || auth.currentUser.uid !== correctionUid) {
+      if (correctionSubmitStatus) {
+        correctionSubmitStatus.textContent = "Sign in again before submitting.";
+        correctionSubmitStatus.classList.add("cr-is-error");
       }
-      hasErr = true;
-    } else if (errCorrectionField) {
-      errCorrectionField.textContent = "";
-      errCorrectionField.classList.remove("is-visible");
+      return;
     }
 
-    if (!msg || msg.length < 10) {
-      if (errCorrectionMessage) {
-        errCorrectionMessage.textContent = "Explain the correct details (at least 10 characters).";
-        errCorrectionMessage.classList.add("is-visible");
-      }
-      hasErr = true;
-    } else if (errCorrectionMessage) {
-      errCorrectionMessage.textContent = "";
-      errCorrectionMessage.classList.remove("is-visible");
+    correctionSubmitInFlight = true;
+    updateCorrectionSubmitButton();
+    if (correctionSubmitStatus) {
+      correctionSubmitStatus.textContent = "";
+      correctionSubmitStatus.classList.remove("cr-is-error");
     }
-
-    if (hasErr) return;
-
-    btnSendCorrection.disabled = true;
-    btnSendCorrection.textContent = "Sending...";
 
     try {
-      if (isFirebaseConfigured && functions) {
-        try {
-          const submitReq = httpsCallable(functions, "submitCorrectionRequest");
-          await submitReq({ field, message: msg });
-        } catch (fnErr) {
-          console.warn("Function submitCorrectionRequest failed, writing directly to RTDB:", fnErr);
-          if (rtdb && user.uid) {
-            const reqRef = push(ref(rtdb, "correctionRequests"));
-            await set(reqRef, {
-              uid: user.uid,
-              studentNo: user.studentNo || user.studentNumber || "",
-              field,
-              message: msg,
-              status: "open",
-              createdAt: Date.now(),
-            });
-          }
-        }
-      } else if (isFirebaseConfigured && rtdb && user.uid) {
-        const reqRef = push(ref(rtdb, "correctionRequests"));
-        await set(reqRef, {
-          uid: user.uid,
-          studentNo: user.studentNo || user.studentNumber || "",
-          field,
-          message: msg,
-          status: "open",
-          createdAt: Date.now(),
-        });
-      }
+      const authUser = auth.currentUser;
+      const profileName = [
+        correctionProfileData?.firstName,
+        correctionProfileData?.middleName,
+        correctionProfileData?.lastName,
+      ].filter(Boolean).join(" ");
+      const requesterName = correctionProfileData?.fullName
+        || correctionProfileData?.name
+        || profileName
+        || authUser.displayName
+        || "Student";
+      const requesterEmail = correctionProfileData?.email || authUser.email || "";
+      await submitCorrectionRequest({
+        field,
+        currentValue,
+        requestedValue,
+        reason,
+        requesterRole: "student",
+        requesterName,
+        requesterEmail,
+        studentNumber: correctionProfileData?.studentNumber || correctionProfileData?.studentId || "",
+      });
+      correctionSubmitInFlight = false;
+      updateCorrectionSubmitButton();
       closeCorrectionModalDialog();
       showFeedbackAlert("Correction request sent.");
     } catch (err) {
-      console.error("Correction request error:", err);
-      showFeedbackAlert(err.message || "Failed to send request.", true);
+      if (correctionSubmitStatus) {
+        correctionSubmitStatus.textContent = err?.code === "permission-denied"
+          ? "You don't have permission to submit this request."
+          : err?.message || "Couldn't send your request. Please try again.";
+        correctionSubmitStatus.classList.add("cr-is-error");
+      }
     } finally {
-      btnSendCorrection.disabled = false;
-      btnSendCorrection.textContent = "Send";
+      correctionSubmitInFlight = false;
+      updateCorrectionSubmitButton();
     }
   });
 
@@ -2085,6 +2356,7 @@ function renderMyQr(canvas, options = {}) {
   onAuthStateChanged(auth, async (authUser) => {
     stopCheckedInWatchers();
     if (!authUser) {
+      window.dispatchEvent(new Event("student-correction-signed-out"));
       profileAuthUid = "";
       currentStudentNumber = "";
       currentStudentName = "";
@@ -2095,7 +2367,10 @@ function renderMyQr(canvas, options = {}) {
       return;
     }
     profileAuthUid = authUser.uid;
-    if (!db) return;
+    if (!db) {
+      window.dispatchEvent(new Event("student-correction-unavailable"));
+      return;
+    }
 
     try {
       const profileData = await loadStudentProfile(authUser);
@@ -2140,6 +2415,9 @@ function renderMyQr(canvas, options = {}) {
       setText("profileYear", merged.year);
       setText("profileOrganization", merged.organization);
       updateStudentCardInfo(merged);
+      window.dispatchEvent(new CustomEvent("student-correction-profile-ready", {
+        detail: { uid: authUser.uid, profile: merged },
+      }));
       document.getElementById("profileMain")?.removeAttribute("hidden");
       initCardQr();
       setupCheckedInWatcher();

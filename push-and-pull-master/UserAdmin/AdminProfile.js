@@ -10,6 +10,9 @@ import { auth, authReady, db, isRtdbConfigured, rtdb } from "../UserStudent/fire
 
 (async () => {
   "use strict";
+  import("./AdminNotificationData.js")
+    .then(({ startAdminNotificationBadge }) => startAdminNotificationBadge())
+    .catch(() => document.querySelectorAll("[data-notification-count]").forEach((badge) => { badge.hidden = true; }));
   let profile = {};
   let firebaseUser = null;
   const cachedProfile = read("recovibeAdminProfile", {}),

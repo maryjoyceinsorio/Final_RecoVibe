@@ -1,3 +1,16 @@
+import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {
+  auth,
+  authReady,
+  db,
+  isFirebaseConfigured,
+} from "../UserStudent/firebaseConfig.js";
+import {
+  CORRECTION_FIELDS_BY_ROLE,
+  submitCorrectionRequest,
+  subscribeMyCorrectionRequests,
+} from "../correctionRequests.js";
+
 (() => {
   const profileStorageKey = "recovibeOrganizerProfile";
   const organizerIdKey = "recovibeOrganizerId";
@@ -447,24 +460,276 @@
   const btnCancelCorrection = document.getElementById("btnCancelCorrection");
   const correctionForm = document.getElementById("correctionForm");
   const correctionFieldSelect = document.getElementById("correctionFieldSelect");
+  const correctionCurrentValue = document.getElementById("correctionCurrentValue");
   const correctionMessageInput = document.getElementById("correctionMessageInput");
+  const correctionReasonInput = document.getElementById("correctionReasonInput");
   const errCorrectionField = document.getElementById("errCorrectionField");
   const errCorrectionMessage = document.getElementById("errCorrectionMessage");
+  const errCorrectionReason = document.getElementById("errCorrectionReason");
+  const correctionReasonCount = document.getElementById("correctionReasonCount");
+  const correctionSubmitStatus = document.getElementById("correctionSubmitStatus");
+  const correctionRequestsContent = document.getElementById("correctionRequestsContent");
+  const correctionFields = CORRECTION_FIELDS_BY_ROLE.eventorganizer;
+  const correctionFieldElements = {
+    organization: "viewOrganization",
+    position: "viewRole",
+  };
+  let correctionRequests = [];
+  let correctionRequestsLoading = true;
+  let correctionRequestsError = "";
+  let correctionRequestsUnsubscribe = null;
+  let correctionAuthUnsubscribe = null;
+  let correctionRequestsTimeout = null;
+  let correctionAuthGeneration = 0;
+  let correctionAuthUser = null;
+  let correctionSubmitInFlight = false;
+  let correctionActive = true;
+
+  function escapeCorrectionHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (character) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    })[character]);
+  }
+
+  function correctionCurrentValueFor(field) {
+    return document.getElementById(correctionFieldElements[field])?.textContent?.trim() || "";
+  }
+
+  function correctionTimestamp(value) {
+    if (value && typeof value.toMillis === "function") return value.toMillis();
+    if (value && typeof value.toDate === "function") return value.toDate().getTime();
+    if (value && typeof value.seconds === "number") return value.seconds * 1000;
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    return null;
+  }
+
+  function updateCorrectionSubmitButton() {
+    const btnSendCorrection = document.getElementById("btnSendCorrection");
+    if (!btnSendCorrection) return;
+    btnSendCorrection.disabled = correctionSubmitInFlight;
+    btnSendCorrection.textContent = correctionSubmitInFlight ? "Sending..." : "Send request";
+  }
+
+  function updatePendingCorrectionFields() {
+    if (!correctionFieldSelect) return;
+    const pending = new Set(correctionRequests
+      .filter((request) => String(request.status || "").trim().toLowerCase() === "pending")
+      .map((request) => request.field));
+    [...correctionFieldSelect.options].forEach((option) => {
+      if (!option.value) return;
+      const field = correctionFields.find((item) => item.field === option.value);
+      option.disabled = pending.has(option.value);
+      option.textContent = option.disabled ? `${field.label} - Request pending` : field.label;
+    });
+  }
+
+  function renderCorrectionRequests() {
+    if (!correctionRequestsContent) return;
+    if (correctionRequestsLoading) {
+      correctionRequestsContent.innerHTML = '<p class="cr-state" role="status">Loading your requests...</p>';
+      updateCorrectionSubmitButton();
+      return;
+    }
+    if (correctionRequestsError) {
+      correctionRequestsContent.innerHTML = `<p class="cr-state" role="alert">${escapeCorrectionHtml(correctionRequestsError)}</p><button class="cr-retry-button" type="button" data-retry-correction-requests>Retry</button>`;
+      updateCorrectionSubmitButton();
+      return;
+    }
+    if (!correctionRequests.length) {
+      correctionRequestsContent.innerHTML = '<p class="cr-state">No correction requests yet.</p>';
+      updateCorrectionSubmitButton();
+      return;
+    }
+    correctionRequestsContent.innerHTML = correctionRequests.map((request) => {
+      const rawStatus = String(request.status || "").trim().toLowerCase();
+      const status = rawStatus === "rejected"
+        ? "rejected"
+        : ["approved", "resolved"].includes(rawStatus) ? "approved" : "pending";
+      const statusClass = status === "pending" ? "" : ` cr-is-${status}`;
+      const timestamp = correctionTimestamp(request.createdAt);
+      const date = timestamp
+        ? new Intl.DateTimeFormat("en-US", {
+            timeZone: "Asia/Manila",
+            month: "short",
+            day: "numeric",
+            year: "numeric",
+          }).format(new Date(timestamp))
+        : "Date unavailable";
+      const label = request.fieldLabel
+        || correctionFields.find((item) => item.field === request.field)?.label
+        || "Organizer detail";
+      const reviewerNote = String(request.reviewNote || "").trim();
+      return `<article class="cr-request-item">
+        <p class="cr-request-field">${escapeCorrectionHtml(label)}</p>
+        <span class="cr-status-pill${statusClass}">${status[0].toUpperCase()}${status.slice(1)}</span>
+        <p class="cr-request-values">${escapeCorrectionHtml(request.currentValue)} &rarr; ${escapeCorrectionHtml(request.requestedValue)}</p>
+        <p class="cr-request-date">${escapeCorrectionHtml(date)}</p>
+        ${reviewerNote ? `<p class="cr-request-note"><strong>Reviewer note:</strong> ${escapeCorrectionHtml(reviewerNote)}</p>` : ""}
+      </article>`;
+    }).join("");
+    updatePendingCorrectionFields();
+    updateCorrectionSubmitButton();
+  }
+
+  function stopCorrectionRequests() {
+    correctionRequestsUnsubscribe?.();
+    correctionRequestsUnsubscribe = null;
+    clearTimeout(correctionRequestsTimeout);
+    correctionRequestsTimeout = null;
+  }
+
+  function startCorrectionRequests(user) {
+    stopCorrectionRequests();
+    correctionRequests = [];
+    correctionRequestsLoading = true;
+    correctionRequestsError = "";
+    renderCorrectionRequests();
+    updatePendingCorrectionFields();
+    if (!user?.uid || auth?.currentUser?.uid !== user.uid || !db) {
+      correctionRequestsLoading = false;
+      correctionRequestsError = "Sign in to view your correction requests.";
+      renderCorrectionRequests();
+      return;
+    }
+
+    correctionRequestsTimeout = setTimeout(() => {
+      if (!correctionRequestsLoading) return;
+      correctionRequestsLoading = false;
+      correctionRequestsError = "Requests are taking longer than expected to load.";
+      renderCorrectionRequests();
+    }, 5000);
+    try {
+      correctionRequestsUnsubscribe = subscribeMyCorrectionRequests(
+        user.uid,
+        (requests) => {
+          correctionRequests = requests;
+          correctionRequestsLoading = false;
+          correctionRequestsError = "";
+          clearTimeout(correctionRequestsTimeout);
+          correctionRequestsTimeout = null;
+          updatePendingCorrectionFields();
+          renderCorrectionRequests();
+        },
+        (error) => {
+          correctionRequestsLoading = false;
+          correctionRequestsError = error?.code === "permission-denied"
+            ? "You don't have permission to view your correction requests."
+            : "Couldn't load your requests. Check your connection and retry.";
+          clearTimeout(correctionRequestsTimeout);
+          correctionRequestsTimeout = null;
+          renderCorrectionRequests();
+        },
+      );
+    } catch (error) {
+      correctionRequestsLoading = false;
+      correctionRequestsError = error?.message || "Couldn't load your requests. Check your connection and retry.";
+      clearTimeout(correctionRequestsTimeout);
+      correctionRequestsTimeout = null;
+      renderCorrectionRequests();
+    }
+  }
+
+  async function startCorrectionAuth() {
+    const generation = ++correctionAuthGeneration;
+    correctionRequestsLoading = true;
+    correctionRequestsError = "";
+    renderCorrectionRequests();
+    correctionRequestsTimeout = setTimeout(() => {
+      if (!correctionRequestsLoading) return;
+      correctionRequestsLoading = false;
+      correctionRequestsError = "Authentication is taking longer than expected.";
+      renderCorrectionRequests();
+    }, 5000);
+    try {
+      await authReady;
+      if (!correctionActive || generation !== correctionAuthGeneration) return;
+      if (!auth || !isFirebaseConfigured) {
+        clearTimeout(correctionRequestsTimeout);
+        correctionRequestsTimeout = null;
+        correctionRequestsLoading = false;
+        correctionRequestsError = "Correction requests are unavailable.";
+        renderCorrectionRequests();
+        return;
+      }
+      correctionAuthUnsubscribe = onAuthStateChanged(auth, (user) => {
+        if (!correctionActive || generation !== correctionAuthGeneration) return;
+        clearTimeout(correctionRequestsTimeout);
+        correctionRequestsTimeout = null;
+        if (!user?.uid) {
+          stopCorrectionRequests();
+          correctionAuthUser = null;
+          correctionRequestsLoading = false;
+          correctionRequestsError = "Sign in to view your correction requests.";
+          renderCorrectionRequests();
+          window.location.replace("EventOrganizerLogin.html");
+          return;
+        }
+        correctionAuthUser = user;
+        startCorrectionRequests(user);
+      });
+    } catch (error) {
+      clearTimeout(correctionRequestsTimeout);
+      correctionRequestsTimeout = null;
+      correctionRequestsLoading = false;
+      correctionRequestsError = error?.message || "Couldn't initialize your correction requests.";
+      renderCorrectionRequests();
+    }
+  }
+
+  function stopCorrectionAuth() {
+    correctionActive = false;
+    correctionAuthGeneration += 1;
+    correctionAuthUnsubscribe?.();
+    correctionAuthUnsubscribe = null;
+    stopCorrectionRequests();
+  }
 
   function openCorrectionModal() {
     if (!correctionModal) return;
     if (correctionForm) correctionForm.reset();
     if (errCorrectionField) errCorrectionField.classList.remove("is-visible");
     if (errCorrectionMessage) errCorrectionMessage.classList.remove("is-visible");
+    if (errCorrectionReason) errCorrectionReason.classList.remove("is-visible");
+    if (correctionCurrentValue) correctionCurrentValue.value = "";
+    if (correctionReasonCount) correctionReasonCount.textContent = "0";
+    if (correctionSubmitStatus) correctionSubmitStatus.textContent = "";
+    correctionSubmitStatus?.classList.remove("cr-is-error");
+    updatePendingCorrectionFields();
+    const availableField = [...(correctionFieldSelect?.options || [])]
+      .find((option) => option.value && !option.disabled);
+    if (availableField) correctionFieldSelect.value = availableField.value;
+    if (correctionCurrentValue) {
+      correctionCurrentValue.value = correctionCurrentValueFor(correctionFieldSelect?.value || "");
+    }
     correctionModal.hidden = false;
     if (correctionFieldSelect) correctionFieldSelect.focus();
   }
 
   function closeCorrectionModalHandler() {
-    if (!correctionModal) return;
+    if (!correctionModal || correctionSubmitInFlight) return;
     correctionModal.hidden = true;
   }
 
+  correctionFields.forEach(({ field, label }) => {
+    const option = document.createElement("option");
+    option.value = field;
+    option.textContent = label;
+    correctionFieldSelect?.append(option);
+  });
+  correctionFieldSelect?.addEventListener("change", () => {
+    if (correctionCurrentValue) {
+      correctionCurrentValue.value = correctionCurrentValueFor(correctionFieldSelect.value);
+    }
+    errCorrectionField?.classList.remove("is-visible");
+  });
+  correctionReasonInput?.addEventListener("input", () => {
+    if (correctionReasonCount) correctionReasonCount.textContent = String(correctionReasonInput.value.length);
+    errCorrectionReason?.classList.remove("is-visible");
+  });
   if (btnRequestCorrection) btnRequestCorrection.addEventListener("click", openCorrectionModal);
   if (closeCorrectionModal) closeCorrectionModal.addEventListener("click", closeCorrectionModalHandler);
   if (btnCancelCorrection) btnCancelCorrection.addEventListener("click", closeCorrectionModalHandler);
@@ -476,44 +741,100 @@
     });
   }
 
-  if (correctionForm) {
-    correctionForm.addEventListener("submit", (e) => {
-      e.preventDefault();
-      const selectedField = correctionFieldSelect.value;
-      const message = correctionMessageInput.value.trim();
+  correctionForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const field = correctionFieldSelect?.value || "";
+    const currentValue = correctionCurrentValueFor(field);
+    const requestedValue = correctionMessageInput?.value.trim() || "";
+    const reason = correctionReasonInput?.value.trim() || "";
+    const isPending = !correctionRequestsLoading && !correctionRequestsError && correctionRequests.some((request) =>
+      request.field === field && String(request.status || "").trim().toLowerCase() === "pending",
+    );
+    const fieldError = !field || isPending;
+    const valueError = !requestedValue || requestedValue.length > 200 || requestedValue === currentValue;
+    const reasonError = reason.length < 10 || reason.length > 500;
 
-      let hasError = false;
-      if (!selectedField) {
-        if (errCorrectionField) errCorrectionField.classList.add("is-visible");
-        hasError = true;
-      } else {
-        if (errCorrectionField) errCorrectionField.classList.remove("is-visible");
+    if (errCorrectionField) {
+      errCorrectionField.textContent = isPending
+        ? "A request is already pending for this detail."
+        : "Select a read-only detail to correct.";
+      errCorrectionField.classList.toggle("is-visible", fieldError);
+    }
+    if (errCorrectionMessage) {
+      errCorrectionMessage.textContent = valueError
+        ? "Enter a different requested value (1-200 characters)."
+        : "";
+      errCorrectionMessage.classList.toggle("is-visible", valueError);
+    }
+    if (errCorrectionReason) {
+      errCorrectionReason.textContent = reasonError
+        ? "Explain the reason in 10-500 characters."
+        : "";
+      errCorrectionReason.classList.toggle("is-visible", reasonError);
+    }
+    if (fieldError || valueError || reasonError) return;
+    if (!auth?.currentUser?.uid || auth.currentUser.uid !== correctionAuthUser?.uid) {
+      if (correctionSubmitStatus) {
+        correctionSubmitStatus.textContent = "Sign in again before submitting.";
+        correctionSubmitStatus.classList.add("cr-is-error");
       }
+      return;
+    }
 
-      if (message.length < 10) {
-        if (errCorrectionMessage) errCorrectionMessage.classList.add("is-visible");
-        hasError = true;
-      } else {
-        if (errCorrectionMessage) errCorrectionMessage.classList.remove("is-visible");
-      }
-
-      if (hasError) return;
-
-      const requests = JSON.parse(localStorage.getItem("recovibeOrganizerCorrections") || "[]");
-      requests.push({
-        field: selectedField,
-        message,
-        timestamp: new Date().toISOString(),
-        organizerEmail: profile.email,
-        organizerName: profile.name,
+    correctionSubmitInFlight = true;
+    updateCorrectionSubmitButton();
+    if (correctionSubmitStatus) {
+      correctionSubmitStatus.textContent = "";
+      correctionSubmitStatus.classList.remove("cr-is-error");
+    }
+    try {
+      const requesterName = [
+        profile.firstName,
+        profile.middleName,
+        profile.lastName,
+      ].filter(Boolean).join(" ") || profile.name || auth.currentUser.displayName || "Event Organizer";
+      const requesterEmail = auth.currentUser.email || profile.email || "";
+      await submitCorrectionRequest({
+        field,
+        currentValue,
+        requestedValue,
+        reason,
+        requesterRole: "eventorganizer",
+        requesterName,
+        requesterEmail,
+        organization: profile.organization || "",
       });
-      localStorage.setItem("recovibeOrganizerCorrections", JSON.stringify(requests));
-
+      correctionSubmitInFlight = false;
+      updateCorrectionSubmitButton();
       closeCorrectionModalHandler();
       showToast("Correction request sent to OSAS.");
-      showFeedback("Correction request submitted. OSAS will review your request.");
-    });
-  }
+      showFeedback("Correction request submitted. OSAS will review it.");
+    } catch (error) {
+      if (correctionSubmitStatus) {
+        correctionSubmitStatus.textContent = error?.code === "permission-denied"
+          ? "You don't have permission to submit this request."
+          : error?.message || "Couldn't send your request. Please try again.";
+        correctionSubmitStatus.classList.add("cr-is-error");
+      }
+    } finally {
+      correctionSubmitInFlight = false;
+      updateCorrectionSubmitButton();
+    }
+  });
+
+  correctionRequestsContent?.addEventListener("click", (event) => {
+    if (!event.target.closest("[data-retry-correction-requests]")) return;
+    if (correctionAuthUser?.uid) startCorrectionRequests(correctionAuthUser);
+    else startCorrectionAuth();
+  });
+
+  window.addEventListener("pagehide", stopCorrectionAuth);
+  window.addEventListener("pageshow", (event) => {
+    if (!event.persisted) return;
+    correctionActive = true;
+    startCorrectionAuth();
+  });
+  startCorrectionAuth();
 
   /* -------------------------------------------------------------
      FEEDBACK ALERT DISMISS & LOGOUT

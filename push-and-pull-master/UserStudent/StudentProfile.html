@@ -329,6 +329,15 @@
               </div>
             </article>
 
+            <article class="profile-card full-width-card cr-card" id="correctionRequestsCard" aria-labelledby="correctionRequestsHeading">
+              <div class="card-header-flex">
+                <h2 class="card-title" id="correctionRequestsHeading">My correction requests</h2>
+              </div>
+              <div class="cr-list-content" id="correctionRequestsContent" aria-live="polite">
+                <p class="cr-state" role="status">Loading your requests...</p>
+              </div>
+            </article>
+
             <!-- 4. Preferences Card (Inline Editor) -->
             <article class="profile-card" id="preferencesPanel">
               <!-- View Mode -->
@@ -538,23 +547,31 @@
         <form id="correctionForm" novalidate>
           <div class="form-field" id="field-correction-detail">
             <label for="correctionFieldSelect">Which detail is wrong?</label>
-            <select id="correctionFieldSelect" required>
+            <select id="correctionFieldSelect" required class="card-input cr-input">
               <option value="">Select a detail</option>
-              <option value="Student number">Student number</option>
-              <option value="Year and section">Year and section</option>
-              <option value="Department">Department</option>
-              <option value="Organization">Organization</option>
             </select>
             <div class="field-error" id="errCorrectionField" role="alert"></div>
           </div>
 
+          <div class="form-field cr-field">
+            <label for="correctionCurrentValue">Current value</label>
+            <input id="correctionCurrentValue" class="card-input cr-input" type="text" readonly />
+          </div>
+
           <div class="form-field" id="field-correction-message">
-            <label for="correctionMessageInput">Tell OSAS what it should say</label>
-            <textarea id="correctionMessageInput" required minlength="10" rows="4" placeholder="Explain the correct details (at least 10 characters)..."></textarea>
-            <div class="field-helper">Minimum 10 characters.</div>
+            <label for="correctionMessageInput">What should it say?</label>
+            <textarea id="correctionMessageInput" required maxlength="200" rows="3" placeholder="Enter the correct value (1-200 characters)..." class="card-input cr-input"></textarea>
             <div class="field-error" id="errCorrectionMessage" role="alert"></div>
           </div>
 
+          <div class="form-field cr-field">
+            <label for="correctionReasonInput">Reason for this correction</label>
+            <textarea id="correctionReasonInput" required minlength="10" maxlength="500" rows="4" placeholder="Explain why this detail needs correction (10–500 characters)..." class="card-input cr-input"></textarea>
+            <div class="cr-counter"><span id="correctionReasonCount">0</span>/500</div>
+            <div class="field-error" id="errCorrectionReason" role="alert"></div>
+          </div>
+
+          <p class="cr-submit-status" id="correctionSubmitStatus" role="status" aria-live="polite"></p>
           <div class="modal-footer">
             <button type="button" class="btn-secondary" id="btnCancelCorrection">Cancel</button>
             <button type="submit" class="btn-primary" id="btnSendCorrection">Send</button>
