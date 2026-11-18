@@ -12,6 +12,7 @@ import {
 } from "../UserStudent/firebaseConfig.js";
 import { startTeacherNotificationData } from "./TeacherNotificationData.js";
 import { teacherEventReadFilters, teacherEventsQuery } from "./TeacherEventQuery.js";
+import { mountHelpBot } from "../recoVibeHelpBot.js";
 
 const DEBUG = false;
 const TIME_ZONE = "Asia/Manila";
@@ -67,6 +68,19 @@ let nextMinuteTimeout = null;
 let minuteInterval = null;
 let active = true;
 let authGeneration = 0;
+let profileReady = false;
+let pageLoadSignaled = false;
+
+function signalDashboardPageReady() {
+  if (
+    pageLoadSignaled ||
+    !profileReady ||
+    state.eventsLoading ||
+    state.notificationLoading
+  ) return;
+  pageLoadSignaled = true;
+  window.dispatchEvent(new Event("page-data-ready"));
+}
 
 function debug(...args) {
   if (DEBUG) console.debug("[Teacher Dashboard]", ...args);
@@ -725,6 +739,7 @@ function renderAll() {
   renderComingUp();
   renderCalendar();
   renderNotifications();
+  signalDashboardPageReady();
 }
 
 function recordEvents(snapshot) {
@@ -828,7 +843,11 @@ async function loadProfile(user) {
   state.profile = cached;
   if (user?.displayName) state.profile.displayName = user.displayName;
   updateSidebarProfile();
-  if (!user?.uid || !db) return;
+  if (!user?.uid || !db) {
+    profileReady = true;
+    signalDashboardPageReady();
+    return;
+  }
 
   const uidAtRead = auth.currentUser?.uid;
   try {
@@ -850,6 +869,13 @@ async function loadProfile(user) {
       message: error?.message || String(error),
       uid: uidAtRead,
     });
+  } finally {
+    const profileRole = String(state.profile.role || state.profile.userRole || "")
+      .trim()
+      .toLowerCase();
+    mountHelpBot({ role: profileRole === "teacher" ? "teacher" : "default" });
+    profileReady = true;
+    signalDashboardPageReady();
   }
 }
 
@@ -922,6 +948,7 @@ function onNotificationData(data) {
     ? data.error || "Notifications could not be loaded."
     : "";
   if (!state.notificationLoading) renderNotifications();
+  signalDashboardPageReady();
 }
 
 function setSidebarOpen(open) {

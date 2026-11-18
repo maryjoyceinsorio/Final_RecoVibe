@@ -67,19 +67,24 @@ button {
 .teacher-sidebar {
   position: sticky;
   top: 0;
+  left: 0;
   display: flex;
   flex: 0 0 264px;
   flex-direction: column;
   width: 264px;
   height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   padding: 20px 16px;
   overflow: hidden;
+  box-sizing: border-box;
   color: #f3e9dc;
   background: linear-gradient(180deg, var(--maroon-700), var(--maroon-800));
 }
 
 .sidebar-brand {
   display: flex;
+  flex: 0 0 auto;
   min-width: 0;
   align-items: center;
   gap: 10px;
@@ -134,14 +139,17 @@ button {
 
 .primary-nav {
   display: flex;
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   flex-direction: column;
   gap: 3px;
+  overflow-y: auto;
 }
 
 .nav-link {
   position: relative;
   display: flex;
+  flex: 0 0 auto;
   min-height: 44px;
   align-items: center;
   gap: 12px;

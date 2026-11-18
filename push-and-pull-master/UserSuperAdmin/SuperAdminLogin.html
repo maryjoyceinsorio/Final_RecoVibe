@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-page-loading="true">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -11,6 +11,158 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="SuperAdminLogin.css" />
+    <style>
+      .password-toggle-control {
+        position: relative;
+        width: 100%;
+        min-width: 0;
+      }
+      .field.password-field .password-toggle-control > input {
+        padding-right: 44px;
+      }
+      .password-toggle-control input::-ms-reveal,
+      .password-toggle-control input::-ms-clear {
+        display: none;
+      }
+      .password-toggle-control > .password-toggle-button {
+        position: absolute;
+        top: 50%;
+        right: 5px;
+        z-index: 2;
+        display: grid;
+        width: 32px;
+        height: 32px;
+        place-items: center;
+        padding: 0;
+        transform: translateY(-50%);
+        border: 0;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--ink-dim);
+        cursor: pointer;
+        transition: background-color 150ms ease, transform 150ms ease;
+      }
+      .password-toggle-control > .password-toggle-button:hover {
+        color: var(--ink);
+        background: var(--cream-dim);
+      }
+      .password-toggle-control > .password-toggle-button:active {
+        transform: translateY(-50%) scale(0.92);
+      }
+      .password-toggle-control > .password-toggle-button:focus-visible {
+        outline: 2px solid #7a1125;
+        outline-offset: 2px;
+      }
+      .password-toggle-control .password-toggle-button > svg {
+        position: absolute;
+        width: 18px;
+        height: 18px;
+        pointer-events: none;
+        transition: opacity 200ms ease-in-out, transform 200ms ease-in-out;
+      }
+      .password-toggle-control .password-toggle-eye {
+        opacity: 1;
+        transform: scale(1) rotate(0deg);
+      }
+      .password-toggle-control .password-toggle-eye-slash {
+        opacity: 0;
+        transform: scale(0.8) rotate(20deg);
+      }
+      .password-toggle-control .password-toggle-button.is-visible .password-toggle-eye {
+        opacity: 0;
+        transform: scale(0.8) rotate(-20deg);
+      }
+      .password-toggle-control .password-toggle-button.is-visible .password-toggle-eye-slash {
+        opacity: 1;
+        transform: scale(1) rotate(0deg);
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .password-toggle-control .password-toggle-button,
+        .password-toggle-control .password-toggle-button > svg {
+          transition: none;
+        }
+        .password-toggle-control .password-toggle-button:active {
+          transform: translateY(-50%);
+        }
+        .password-toggle-control .password-toggle-eye,
+        .password-toggle-control .password-toggle-eye-slash,
+        .password-toggle-control .password-toggle-button.is-visible .password-toggle-eye,
+        .password-toggle-control .password-toggle-button.is-visible .password-toggle-eye-slash {
+          transform: none;
+        }
+      }
+      .remember-row {
+        gap: 12px;
+        flex-wrap: nowrap;
+      }
+      .remember-row .remember {
+        min-height: 32px;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+      .remember-row .remember input[type="checkbox"] {
+        width: 18px;
+        height: 18px;
+        min-width: 18px;
+        min-height: 18px;
+        margin: 0;
+        accent-color: var(--gold);
+        flex: 0 0 18px;
+      }
+      .remember-row .remember input[type="checkbox"]:focus-visible {
+        outline: 2px solid var(--gold);
+        outline-offset: 2px;
+      }
+      .remember-row > .link-btn {
+        white-space: nowrap;
+      }
+    </style>
+  <style id="page-preloader-style">
+    html[data-page-loading="true"] [data-page-load-container] { position: relative; }
+    #userAvatar:empty,
+    #organizerAvatar:empty,
+    #teacherAvatar:empty,
+    #teacherCalendarAvatar:empty,
+    #sidebar-user-avatar:empty,
+    #userName:empty,
+    #organizerName:empty,
+    #teacherName:empty,
+    #teacherCalendarName:empty,
+    #sidebar-user-name:empty { visibility: hidden !important; }
+    #navNotifBadge:empty { display: none !important; }
+    html[data-page-loading="true"] [data-page-load-container] > :not(.page-preloader),
+    html[data-page-load-error="true"] [data-page-load-container] > :not(.page-preloader) { visibility: hidden !important; }
+    html[data-page-loading="true"] [data-page-load-container][hidden] { display: block !important; }
+    .page-preloader {
+      position: absolute;
+      z-index: 20;
+      inset: 0;
+      display: grid;
+      min-height: 100vh;
+      place-content: center;
+      justify-items: center;
+      gap: 12px;
+      background: #f7f6f4;
+      color: #7a1f2e;
+      font: 500 15px/1.4 Inter, "Segoe UI", Arial, sans-serif;
+      text-align: center;
+    }
+    .page-preloader[hidden] { display: none !important; }
+    .page-preloader-spinner {
+      width: 42px;
+      height: 42px;
+      border: 4px solid #e7d9b8;
+      border-top-color: #7a1f2e;
+      border-radius: 50%;
+      animation: page-preloader-spin 800ms linear infinite;
+    }
+    .page-preloader-error { max-width: 28rem; padding: 18px; }
+    .page-preloader-retry { margin-top: 12px; }
+    @keyframes page-preloader-spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) {
+      .page-preloader-spinner { animation: none; border-color: #7a1f2e; }
+    }
+  </style>
   </head>
   <body>
     <div class="screen" id="superAdminLoginPage">
@@ -25,7 +177,11 @@
           <p class="tagline">University, Organization, and Seminar Events.</p>
         </div>
       </div>
-      <main class="main">
+      <main class="main" data-page-load-container="true" aria-busy="true">
+    <div class="page-preloader" id="pagePreloader" role="status" aria-live="polite">
+      <span class="page-preloader-spinner" aria-hidden="true"></span>
+      <span>Loading...</span>
+    </div>
         <div class="card">
           <a href="../FirstPage.html" class="back-link"
             >‹ Back to portal selection</a
@@ -48,33 +204,38 @@
           </div>
           <div class="field password-field" id="field-pass">
             <label for="login-pass">Password</label>
-            <input
-              type="password"
-              id="login-pass"
-              placeholder="••••••••"
-              autocomplete="current-password"
-            />
-            <button
-              type="button"
-              class="pass-toggle"
-              id="pass-toggle"
-              aria-label="Show password"
-              aria-pressed="false"
-            >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.8"
+            <div class="password-toggle-control">
+              <input
+                type="password"
+                id="login-pass"
+                placeholder="••••••••"
+                autocomplete="current-password"
+              />
+              <button
+                type="button"
+                class="password-toggle-button"
+                id="pass-toggle"
+                aria-label="Show password"
+                aria-pressed="false"
+                aria-controls="login-pass"
               >
-                <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z" />
-                <circle cx="12" cy="12" r="3" />
-              </svg>
-            </button>
+                <svg class="password-toggle-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+                <svg class="password-toggle-eye-slash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M17.94 17.94A10.94 10.94 0 0 1 12 19c-7 0-11-7-11-7a20.6 20.6 0 0 1 4.22-5.06M9.9 4.24A9.6 9.6 0 0 1 12 4c7 0 11 7 11 7a20.7 20.7 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                  <path d="M1 1l22 22" />
+                </svg>
+              </button>
+            </div>
             <div class="error-msg">Enter your password.</div>
           </div>
-          <div class="row-between">
-            <span></span>
+          <div class="row-between remember-row">
+            <label class="remember" for="remember-me">
+              <input type="checkbox" id="remember-me" />
+              <span>Remember me</span>
+            </label>
             <a href="../UserStudent/ForgetPassword.html" class="link-btn"
               >Forgot password?</a
             >
@@ -86,5 +247,50 @@
       </main>
     </div>
     <script type="module" src="SuperAdminLogin.js"></script>
+    <script>
+    (() => {
+      const root = document.documentElement;
+      const container = document.querySelector("[data-page-load-container]");
+      const preloader = document.getElementById("pagePreloader");
+      let completed = false;
+      let timeoutId;
+      const finish = (timedOut = false) => {
+        if (completed) return;
+        completed = true;
+        clearTimeout(timeoutId);
+        if (timedOut) {
+          root.removeAttribute("data-page-loading");
+          root.removeAttribute("data-page-load-error");
+          if (container) container.setAttribute("aria-busy", "false");
+          const existingError = container && container.querySelector("[role='alert'], .notification-source-warning, .page-load-error");
+          if (
+            existingError &&
+            !existingError.hidden &&
+            existingError.textContent.trim() &&
+            getComputedStyle(existingError).visibility !== "hidden" &&
+            existingError.getClientRects().length
+          ) {
+            preloader.hidden = true;
+            return;
+          }
+          root.setAttribute("data-page-load-error", "true");
+          preloader.classList.add("page-preloader-error");
+          preloader.innerHTML = "Could not load data. Please try again.<button class=\"page-preloader-retry\" type=\"button\">Retry</button>";
+          preloader.querySelector("button").addEventListener("click", () => window.location.reload());
+          return;
+        }
+        root.removeAttribute("data-page-loading");
+        root.removeAttribute("data-page-load-error");
+        if (container) container.setAttribute("aria-busy", "false");
+        preloader.hidden = true;
+      };
+      window.addEventListener("page-data-ready", () => finish(), { once: true });
+      if (root.hasAttribute("data-page-waits-for-data")) {
+        timeoutId = setTimeout(() => finish(true), 10000);
+      } else {
+        finish();
+      }
+    })();
+  </script>
   </body>
 </html>

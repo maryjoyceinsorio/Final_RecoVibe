@@ -26,29 +26,16 @@ import {
     return `${clean.slice(0, 4)} ${clean.slice(4, 7)} ${clean.slice(7, 11)}`;
   }
 
-  const DEFAULT_TEACHER = {
-    firstName: "Maria",
-    middleName: "",
-    lastName: "Santos",
-    name: "Maria Santos",
-    email: "santos.maria@pup.edu.ph",
-    contactNumber: "0912 345 6789",
-    teacherId: "2024-FAC-0102",
-    department: "Department of Computer Studies",
-    role: "Faculty Member",
-    campus: "PUP Biñan Campus",
-  };
-
-  let profile = { ...DEFAULT_TEACHER };
+  let profile = {};
 
   try {
     const stored = JSON.parse(localStorage.getItem(storageKey) || "null");
     if (stored && typeof stored === "object") {
-      profile = { ...DEFAULT_TEACHER, ...stored };
+      profile = { ...stored };
       if (!profile.firstName && profile.name) {
         const parts = profile.name.trim().split(/\s+/).filter(Boolean);
-        profile.firstName = parts[0] || "Maria";
-        profile.lastName = parts.length > 1 ? parts[parts.length - 1] : "Santos";
+        profile.firstName = parts[0] || "";
+        profile.lastName = parts.length > 1 ? parts[parts.length - 1] : "";
         profile.middleName = parts.length > 2 ? parts.slice(1, -1).join(" ") : "";
       }
     }
@@ -56,7 +43,17 @@ import {
     console.warn("Unable to read teacher profile:", error);
   }
 
-  profile.email = profile.email || localStorage.getItem(teacherIdKey) || DEFAULT_TEACHER.email;
+  profile.email = profile.email || localStorage.getItem(teacherIdKey) || "";
+
+  let profileDisplayReady = false;
+  let correctionRequestsSettled = false;
+  let pageLoadSignaled = false;
+
+  function signalPageReadyIfLoaded() {
+    if (pageLoadSignaled || !profileDisplayReady || !correctionRequestsSettled) return;
+    pageLoadSignaled = true;
+    window.dispatchEvent(new Event("page-data-ready"));
+  }
 
   function showFeedback(message, isError = false) {
     const alert = document.getElementById("profileFeedbackAlert");
@@ -81,10 +78,10 @@ import {
     const firstName = String(profile.firstName || "").trim();
     const middleName = String(profile.middleName || "").trim();
     const lastName = String(profile.lastName || "").trim();
-    const fullName = [firstName, middleName, lastName].filter(Boolean).join(" ") || profile.name || "Teacher";
+    const fullName = [firstName, middleName, lastName].filter(Boolean).join(" ") || profile.name || "";
     profile.name = fullName;
 
-    const initials = Array.from(firstName || fullName || "T")[0]?.toUpperCase() || "T";
+    const initials = Array.from(firstName || fullName)[0]?.toUpperCase() || "";
 
     // Hero Banner
     const heroAvatar = document.getElementById("heroAvatar");
@@ -92,7 +89,7 @@ import {
     const heroUserName = document.getElementById("heroUserName");
     if (heroUserName) heroUserName.textContent = fullName;
     const heroRoleBadge = document.getElementById("heroRoleBadge");
-    if (heroRoleBadge) heroRoleBadge.textContent = profile.role ? (profile.role.includes("Faculty") ? "Faculty" : profile.role) : "Faculty";
+    if (heroRoleBadge) heroRoleBadge.textContent = profile.role ? (profile.role.includes("Faculty") ? "Faculty" : profile.role) : "";
 
     // Sidebar
     const organizerAvatar = document.getElementById("organizerAvatar");
@@ -114,11 +111,11 @@ import {
       }
     }
     const viewLastName = document.getElementById("viewLastName");
-    if (viewLastName) viewLastName.textContent = lastName || "Account";
+    if (viewLastName) viewLastName.textContent = lastName;
 
     // Contact Card View
     const viewEmail = document.getElementById("viewEmail");
-    if (viewEmail) viewEmail.textContent = profile.email || "teacher@pup.edu.ph";
+    if (viewEmail) viewEmail.textContent = profile.email || "";
     const viewContact = document.getElementById("viewContact");
     if (viewContact) {
       if (profile.contactNumber) {
@@ -130,13 +127,13 @@ import {
 
     // Teacher Details Card View
     const viewTeacherId = document.getElementById("viewTeacherId");
-    if (viewTeacherId) viewTeacherId.textContent = profile.teacherId || profile.employeeId || "2024-FAC-0102";
+    if (viewTeacherId) viewTeacherId.textContent = profile.teacherId || profile.employeeId || "";
     const viewDepartment = document.getElementById("viewDepartment");
-    if (viewDepartment) viewDepartment.textContent = profile.department || "Department of Computer Studies";
+    if (viewDepartment) viewDepartment.textContent = profile.department || "";
     const viewRole = document.getElementById("viewRole");
-    if (viewRole) viewRole.textContent = profile.role || "Faculty Member";
+    if (viewRole) viewRole.textContent = profile.role || "";
     const viewCampus = document.getElementById("viewCampus");
-    if (viewCampus) viewCampus.textContent = profile.campus || "PUP Biñan Campus";
+    if (viewCampus) viewCampus.textContent = profile.campus || "";
   }
 
   /* -------------------------------------------------------------
@@ -512,7 +509,7 @@ import {
   function renderCorrectionRequests() {
     if (!correctionRequestsContent) return;
     if (correctionRequestsLoading) {
-      correctionRequestsContent.innerHTML = '<div class="correction-request-skeleton" aria-hidden="true"><span></span><i></i><i></i></div>';
+      correctionRequestsContent.innerHTML = '<p role="status">Loading correction requests...</p>';
       updateCorrectionSubmitButton();
       return;
     }
@@ -596,6 +593,8 @@ import {
       correctionRequestsLoading = false;
       correctionRequestsError = "Sign in to view your correction requests.";
       renderCorrectionRequests();
+      correctionRequestsSettled = true;
+      signalPageReadyIfLoaded();
       return;
     }
     correctionRequestsTimeout = setTimeout(() => {
@@ -603,6 +602,8 @@ import {
       correctionRequestsLoading = false;
       correctionRequestsError = "Requests are taking longer than expected to load.";
       renderCorrectionRequests();
+      correctionRequestsSettled = true;
+      signalPageReadyIfLoaded();
     }, 5000);
     try {
       correctionRequestsUnsubscribe = subscribeMyCorrectionRequests(
@@ -613,6 +614,7 @@ import {
           correctionRequestsError = "";
           clearTimeout(correctionRequestsTimeout);
           correctionRequestsTimeout = null;
+          correctionRequestsSettled = true;
           correctionRequests.forEach((request) => {
             if (normalizeCorrectionStatus(request.status) !== "pending") {
               locallyPendingFields.delete(request.field);
@@ -620,6 +622,7 @@ import {
           });
           updatePendingFieldOptions();
           renderCorrectionRequests();
+          signalPageReadyIfLoaded();
         },
         (error) => {
           correctionDebug("Firestore read failed", error);
@@ -630,6 +633,8 @@ import {
           clearTimeout(correctionRequestsTimeout);
           correctionRequestsTimeout = null;
           renderCorrectionRequests();
+          correctionRequestsSettled = true;
+          signalPageReadyIfLoaded();
         },
       );
     } catch (error) {
@@ -639,6 +644,8 @@ import {
       clearTimeout(correctionRequestsTimeout);
       correctionRequestsTimeout = null;
       renderCorrectionRequests();
+      correctionRequestsSettled = true;
+      signalPageReadyIfLoaded();
     }
   }
 
@@ -857,6 +864,8 @@ import {
       correctionRequestsLoading = false;
       correctionRequestsError = "Requests are taking longer than expected to load.";
       renderCorrectionRequests();
+      correctionRequestsSettled = true;
+      signalPageReadyIfLoaded();
     }, 5000);
     try {
       await authReady;
@@ -868,6 +877,8 @@ import {
           correctionRequestsLoading = false;
           correctionRequestsError = "Sign in to view your correction requests.";
           renderCorrectionRequests();
+          correctionRequestsSettled = true;
+          signalPageReadyIfLoaded();
           window.location.replace("TeacherLogin.html");
         }
         return;
@@ -893,6 +904,8 @@ import {
       correctionRequestsLoading = false;
       correctionRequestsError = "Couldn't load your requests. Check your connection and retry.";
       renderCorrectionRequests();
+      correctionRequestsSettled = true;
+      signalPageReadyIfLoaded();
     }
   }
 
@@ -932,4 +945,6 @@ import {
 
   startCorrectionAuth();
   updateDisplay();
+  profileDisplayReady = true;
+  signalPageReadyIfLoaded();
 })();

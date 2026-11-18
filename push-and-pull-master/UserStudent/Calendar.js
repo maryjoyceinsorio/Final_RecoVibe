@@ -48,6 +48,13 @@ import {
   let profileLoadError = "";
   let holidayLoadError = "";
   let eventsLoading = true;
+  let calendarEventsReady = false;
+  let calendarPageReady = false;
+  function signalCalendarPageReady() {
+    if (calendarPageReady || !calendarEventsReady) return;
+    calendarPageReady = true;
+    window.dispatchEvent(new Event("page-data-ready"));
+  }
   let disposed = false;
   let authRequestSequence = 0;
   let holidayRequestSequence = 0;
@@ -831,8 +838,10 @@ import {
   function listenForCalendarEvents() {
     if (!db) {
       eventsLoading = false;
+      calendarEventsReady = true;
       eventLoadError = "Calendar events are unavailable because Firebase is not configured.";
       replaceEventsAndRender();
+      signalCalendarPageReady();
       return;
     }
 
@@ -857,25 +866,31 @@ import {
             normalizeCalendarEvent(eventDocument.id, eventDocument.data()),
           );
           eventsLoading = false;
+          calendarEventsReady = true;
           eventLoadError = "";
           replaceEventsAndRender();
+          signalCalendarPageReady();
         },
         (error) => {
           console.error("Unable to listen for student calendar events:", error);
           eventsLoading = false;
+          calendarEventsReady = true;
           eventLoadError = error?.code === "permission-denied"
             ? "Your account cannot read calendar events. Check your sign-in and Firestore access."
             : "Calendar events could not be loaded. Check your connection and try again.";
           replaceEventsAndRender();
+          signalCalendarPageReady();
         },
       );
     } catch (error) {
       console.error("Unable to attach the student calendar event listener:", error);
       eventsLoading = false;
+      calendarEventsReady = true;
       eventLoadError = error?.code === "permission-denied"
         ? "Your account cannot read calendar events. Check your sign-in and Firestore access."
         : "Calendar events could not be loaded. Check your connection and try again.";
       replaceEventsAndRender();
+      signalCalendarPageReady();
     }
   }
 
@@ -917,7 +932,9 @@ import {
         profileLoadError =
           "Your student profile could not be verified. Calendar events are hidden until it can be loaded.";
         eventsLoading = false;
+        calendarEventsReady = true;
         updateDataStatus();
+        signalCalendarPageReady();
         return;
       }
     }
@@ -927,13 +944,8 @@ import {
 
   async function refreshCalendarData() {
     const sequence = ++holidayRequestSequence;
-    const currentMonthIndex =
-      Number(todayISO().slice(0, 4)) * 12 + Number(todayISO().slice(5, 7)) - 1;
     const displayedMonthIndex = state.date.getFullYear() * 12 + state.date.getMonth();
     const monthIndexes = new Set([displayedMonthIndex]);
-    for (let offset = 0; offset < 12; offset += 1) {
-      monthIndexes.add(currentMonthIndex + offset);
-    }
 
     let holidayRequestHadError = false;
     const holidayResults = await Promise.all(
@@ -974,6 +986,7 @@ import {
     );
     window.RecoVibeCalendarShell?.setHolidays(holidays);
     replaceEventsAndRender();
+    signalCalendarPageReady();
   }
 
   function bindCalendarInteractions() {
@@ -1176,6 +1189,8 @@ import {
           eventsLoading = false;
           eventLoadError = "Calendar events could not be loaded for this account.";
           updateDataStatus();
+          calendarEventsReady = true;
+          signalCalendarPageReady();
         },
       );
     } else {

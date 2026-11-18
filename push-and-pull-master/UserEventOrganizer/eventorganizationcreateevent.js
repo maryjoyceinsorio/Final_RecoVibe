@@ -263,6 +263,12 @@ loadCachedOrganizations();
     console.error("Root element #createEventRoot not found.");
     return;
   }
+  let pageLoadSignaled = false;
+  const signalCreateEventPageReady = () => {
+    if (pageLoadSignaled) return;
+    pageLoadSignaled = true;
+    window.dispatchEvent(new Event("page-data-ready"));
+  };
   root.setAttribute("data-theme", "light");
   root.hidden = false;
 
@@ -285,11 +291,11 @@ loadCachedOrganizations();
   const currentRole = isOrganizerPage ? "Event Organizer" : "Teacher";
 
   const userIdentifier = isOrganizerPage
-    ? String(organizerId || organizerProfile.id || organizerProfile.email || "organizer-ibits").trim()
-    : String(teacherId || teacherProfile.id || teacherProfile.email || "teacher-faculty").trim();
+    ? String(organizerId || organizerProfile.id || organizerProfile.email || "").trim()
+    : String(teacherId || teacherProfile.id || teacherProfile.email || "").trim();
 
-  const teacherName = String(teacherProfile.name || teacherProfile.fullName || "Prof. Faculty").trim();
-  const organizerOrgName = String(organizerProfile.organization || organizerProfile.orgName || organizerProfile.name || "IBITS").trim();
+  const teacherName = String(teacherProfile.name || teacherProfile.fullName || "").trim();
+  const organizerOrgName = String(organizerProfile.organization || organizerProfile.orgName || organizerProfile.name || "").trim();
   let organizerOrganizationIdentifier = [
     organizerProfile.organizationId,
     organizerProfile.orgId,
@@ -925,140 +931,20 @@ loadCachedOrganizations();
     const filtered = list.filter((ev) => {
       if (!ev) return false;
       if (isOrganizerPage) {
-        const orgMatch = (ev.organizer || ev.organizerName || "").toLowerCase().includes(organizerOrgName.toLowerCase()) ||
-                         (ev.organizer || ev.organizerName || "").toLowerCase().includes("ibits") ||
-                         (ev.organizer || ev.organizerName || "").toLowerCase().includes("organizer");
-        const idMatch = String(ev.createdBy || ev.organizerId || "").toLowerCase() === userIdentifier.toLowerCase();
+        const eventOrganizer = String(ev.organizer || ev.organizerName || "").toLowerCase();
+        const orgMatch = Boolean(organizerOrgName && eventOrganizer.includes(organizerOrgName.toLowerCase()));
+        const idMatch = Boolean(userIdentifier && String(ev.createdBy || ev.organizerId || "").toLowerCase() === userIdentifier.toLowerCase());
         return orgMatch || idMatch;
       } else {
-        const creatorMatch = String(ev.createdBy || ev.teacherId || "").toLowerCase() === userIdentifier.toLowerCase();
+        const creatorMatch = Boolean(userIdentifier && String(ev.createdBy || ev.teacherId || "").toLowerCase() === userIdentifier.toLowerCase());
         const facultyMatch = Array.isArray(ev.participatingFaculty) && ev.participatingFaculty.some((f) =>
-          String(f.id || f.name || "").toLowerCase().includes(teacherName.toLowerCase()) ||
-          String(f.id || "").toLowerCase() === userIdentifier.toLowerCase()
+          Boolean(teacherName && String(f.id || f.name || "").toLowerCase().includes(teacherName.toLowerCase())) ||
+          Boolean(userIdentifier && String(f.id || "").toLowerCase() === userIdentifier.toLowerCase())
         );
-        const nameMatch = (ev.organizer || ev.organizerName || "").toLowerCase().includes(teacherName.toLowerCase());
+        const nameMatch = Boolean(teacherName && String(ev.organizer || ev.organizerName || "").toLowerCase().includes(teacherName.toLowerCase()));
         return creatorMatch || facultyMatch || nameMatch;
       }
     });
-
-    if (filtered.length === 0) {
-      const sampleEvents = isOrganizerPage ? [
-        {
-          id: "seed-org-1",
-          eventId: "seed-org-1",
-          title: "IBITS General Assembly 2025",
-          organizer: organizerOrgName,
-          organizerName: organizerOrgName,
-          source: "Organization",
-          category: "Orgs & Student Acts, Leadership & Career",
-          categories: ["Orgs & Student Acts", "Leadership & Career"],
-          targetYear: "All Levels",
-          date: "2025-09-18",
-          dateISO: "2025-09-18",
-          timeStart: "08:00 AM",
-          timeEnd: "12:00 PM",
-          venue: "AVR1 | PUP Biñan",
-          maxCapacity: 120,
-          description: "Annual general assembly for all IBITS members and computer studies students.",
-          isCommon: true,
-          participantDocuments: [{ name: "General_Assembly_Program.pdf", size: 245000, type: "PDF" }],
-        },
-        {
-          id: "seed-org-2",
-          eventId: "seed-org-2",
-          title: "Web Development Bootcamp & Tech Talk",
-          organizer: organizerOrgName,
-          organizerName: organizerOrgName,
-          source: "Organization",
-          category: "Tech & Innovation, Academic & Learning",
-          categories: ["Tech & Innovation", "Academic & Learning"],
-          targetYear: "2nd Year",
-          date: "2025-11-12",
-          dateISO: "2025-11-12",
-          timeStart: "01:00 PM",
-          timeEnd: "05:00 PM",
-          venue: "AVR2 | PUP Biñan",
-          maxCapacity: 80,
-          description: "Hands-on workshop covering modern web technologies and industry practices.",
-          isCommon: true,
-          participantDocuments: [{ name: "Bootcamp_Handout.docx", size: 180000, type: "DOCX" }],
-        },
-        {
-          id: "seed-org-3",
-          eventId: "seed-org-3",
-          title: "CodeFest 2025: Hackathon Championship",
-          organizer: organizerOrgName,
-          organizerName: organizerOrgName,
-          source: "Organization",
-          category: "Competitions, Tech & Innovation",
-          categories: ["Competitions", "Tech & Innovation"],
-          targetYear: "All Levels",
-          date: "2025-12-05",
-          dateISO: "2025-12-05",
-          timeStart: "08:00 AM",
-          timeEnd: "06:00 PM",
-          venue: "Open Field | PUP Biñan",
-          maxCapacity: 250,
-          description: "Inter-collegiate programming contest and development sprint.",
-          isCommon: false,
-          participantDocuments: [{ name: "Hackathon_Mechanics.pdf", size: 310000, type: "PDF" }],
-        },
-      ] : [
-        {
-          id: "seed-tch-1",
-          eventId: "seed-tch-1",
-          title: "Faculty Research & Curriculum Colloquium",
-          organizer: teacherName,
-          organizerName: teacherName,
-          source: "Teachers / Faculty",
-          category: "Academic & Learning, Seminars & Workshops",
-          categories: ["Academic & Learning", "Seminars & Workshops"],
-          targetYear: "All Levels",
-          date: "2025-10-15",
-          dateISO: "2025-10-15",
-          timeStart: "09:00 AM",
-          timeEnd: "12:00 PM",
-          venue: "AVR1 | PUP Biñan",
-          maxCapacity: 100,
-          description: "Curriculum alignment and faculty research showcase.",
-          isCommon: true,
-          participatingFaculty: [{ id: userIdentifier, name: teacherName, email: "faculty@pup.edu.ph" }],
-          participantDocuments: [{ name: "Research_Colloquium_Agenda.pdf", size: 320000, type: "PDF" }],
-        },
-        {
-          id: "seed-tch-2",
-          eventId: "seed-tch-2",
-          title: "Midterm Review & Academic Consultation Session",
-          organizer: teacherName,
-          organizerName: teacherName,
-          source: "Teachers / Faculty",
-          category: "Academic & Learning",
-          categories: ["Academic & Learning"],
-          targetYear: "1st Year",
-          date: "2025-11-20",
-          dateISO: "2025-11-20",
-          timeStart: "01:00 PM",
-          timeEnd: "05:00 PM",
-          venue: "AVR2 | PUP Biñan",
-          maxCapacity: 80,
-          description: "Departmental academic consultation and tutoring clinic.",
-          isCommon: false,
-          participatingFaculty: [{ id: userIdentifier, name: teacherName, email: "faculty@pup.edu.ph" }],
-          participantDocuments: [{ name: "Consultation_Schedule.pdf", size: 150000, type: "PDF" }],
-        },
-      ];
-
-      if (isOrganizerPage) {
-        if (!readJSON("recovibeOrganizerEvents", null)) {
-          writeJSON("recovibeOrganizerEvents", sampleEvents);
-        }
-      } else {
-        if (!readJSON("recovibeTeacherEvents", null)) {
-          writeJSON("recovibeTeacherEvents", sampleEvents);
-        }
-      }
-      return sampleEvents;
-    }
 
     return filtered;
   }
@@ -1274,6 +1160,7 @@ loadCachedOrganizations();
         </div>
       </div>
     `;
+    signalCreateEventPageReady();
   }
 
   // 10. Main Rendering Controller
@@ -1389,6 +1276,8 @@ loadCachedOrganizations();
       // If neither Firebase Auth nor local organizer session exists, redirect to login
       if (!organizerId && !organizerProfile?.email) {
         location.replace(isOrganizerPage ? "EventOrganizerLogin.html" : "../UserTeacher/TeacherLogin.html");
+      } else {
+        signalCreateEventPageReady();
       }
       return;
     }
@@ -1405,6 +1294,10 @@ loadCachedOrganizations();
       } catch (error) {
         console.warn("Could not verify event creator role from RTDB:", error);
       }
+    }
+
+    if (isOrganizerPage) {
+      await loadOrganizerAccountProfile(user.uid);
     }
 
     currentAuthUid = user.uid;
@@ -1425,6 +1318,7 @@ loadCachedOrganizations();
       attachReuseLibraryListener(user.uid);
       await loadDraftForEditing(user.uid);
     }
+    signalCreateEventPageReady();
   })).catch((error) => {
     console.error("Could not restore creator authentication state:", error);
     renderUnauthorized("Session Unavailable", "Please refresh the page and try again.");
@@ -1552,24 +1446,7 @@ loadCachedOrganizations();
         <div class="ce-status-line" id="reuseStatusLine" aria-live="polite" role="status" hidden></div>
 
         ${state.reuseLoading && Object.keys(reuseLibrary).length === 0 && loadCurrentUserEvents().length === 0
-          ? `
-            <div class="ce-existing-columns">
-              <div class="ce-existing-col">
-                <h3 class="ce-existing-col-title">Favorite Events (...)</h3>
-                <div class="ce-existing-col-list">
-                  <div class="ce-skeleton-card"></div>
-                  <div class="ce-skeleton-card"></div>
-                </div>
-              </div>
-              <div class="ce-existing-col">
-                <h3 class="ce-existing-col-title">Recently Events (...)</h3>
-                <div class="ce-existing-col-list">
-                  <div class="ce-skeleton-card"></div>
-                  <div class="ce-skeleton-card"></div>
-                </div>
-              </div>
-            </div>
-          `
+          ? '<p role="status">Loading saved events...</p>'
           : state.reuseError && loadCurrentUserEvents().length === 0
           ? `
             <div class="ce-existing-error" role="alert">

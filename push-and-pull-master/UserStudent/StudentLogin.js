@@ -21,7 +21,6 @@ const studentNumberInput = document.getElementById("student-number");
 const passwordInput = document.getElementById("student-pass");
 const submitButton = document.getElementById("login-submit");
 const rememberMe = document.getElementById("remember-me");
-const rememberMessage = document.getElementById("remember-message");
 const studentNumberPattern = /^(\d{4})-(\d{5})-BN-([01])$/;
 let studentNumberValidationShown = false;
 let studentNumberPasteError = "";
@@ -165,7 +164,17 @@ async function signIn() {
       return;
     }
 
-    await setPersistence(auth, rememberMe.checked ? browserLocalPersistence : browserSessionPersistence);
+    try {
+      await setPersistence(
+        auth,
+        rememberMe.checked ? browserLocalPersistence : browserSessionPersistence,
+      );
+    } catch (persistenceError) {
+      console.warn(
+        "[StudentLogin] Could not set auth persistence; using the default:",
+        persistenceError?.code || "unknown",
+      );
+    }
     const credential = await signInWithEmailAndPassword(auth, email, password);
     const profile = await loadStudentProfile(credential.user, {
       storage: rememberMe.checked ? "local" : "session",
@@ -266,27 +275,44 @@ passwordInput.addEventListener("blur", () => {
   const message = passwordInput.value ? "" : "Password is required.";
   setInvalid("field-pass", Boolean(message), message);
 });
-rememberMe.addEventListener("change", () => {
-  rememberMessage.hidden = !rememberMe.checked;
-});
-rememberMessage.hidden = !rememberMe.checked;
-
 (function () {
   const toggle = document.getElementById("pass-toggle");
-  const icon = document.getElementById("eye-icon");
-  const eyeOpen =
-    '<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"/><circle cx="12" cy="12" r="3"/>';
-  const eyeClosed =
-    '<path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-11-8-11-8a19.93 19.93 0 0 1 4.22-5.94M9.9 4.24A10.4 10.4 0 0 1 12 4c7 0 11 8 11 8a19.86 19.86 0 0 1-2.16 3.19M14.12 14.12a3 3 0 1 1-4.24-4.24"/><path d="M1 1l22 22"/>';
+  let isVisible = false;
+  let inputHadFocus = false;
+  let selectionStart = null;
+  let selectionEnd = null;
+  let selectionDirection = "none";
 
+  passwordInput.addEventListener("blur", () => {
+    selectionStart = passwordInput.selectionStart;
+    selectionEnd = passwordInput.selectionEnd;
+    selectionDirection = passwordInput.selectionDirection;
+  });
+  toggle.addEventListener("mousedown", (event) => {
+    inputHadFocus = document.activeElement === passwordInput;
+    selectionStart = passwordInput.selectionStart;
+    selectionEnd = passwordInput.selectionEnd;
+    selectionDirection = passwordInput.selectionDirection;
+    if (inputHadFocus) event.preventDefault();
+  });
   toggle.addEventListener("click", function () {
-    const isHidden = passwordInput.type === "password";
-    passwordInput.type = isHidden ? "text" : "password";
-    icon.innerHTML = isHidden ? eyeClosed : eyeOpen;
-    toggle.setAttribute(
-      "aria-label",
-      isHidden ? "Hide password" : "Show password",
-    );
-    toggle.setAttribute("aria-pressed", String(isHidden));
+    const restoreFocus = inputHadFocus;
+    inputHadFocus = false;
+    if (selectionStart === null || selectionEnd === null) {
+      selectionStart = passwordInput.selectionStart;
+      selectionEnd = passwordInput.selectionEnd;
+      selectionDirection = passwordInput.selectionDirection;
+    }
+    isVisible = !isVisible;
+    passwordInput.type = isVisible ? "text" : "password";
+    toggle.classList.toggle("is-visible", isVisible);
+    toggle.setAttribute("aria-label", isVisible ? "Hide password" : "Show password");
+    toggle.setAttribute("aria-pressed", String(isVisible));
+    requestAnimationFrame(() => {
+      if (restoreFocus) passwordInput.focus({ preventScroll: true });
+      if (selectionStart !== null && selectionEnd !== null) {
+        passwordInput.setSelectionRange(selectionStart, selectionEnd, selectionDirection);
+      }
+    });
   });
 })();

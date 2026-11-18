@@ -94,6 +94,19 @@ import { teacherEventReadFilters, teacherEventsQuery } from "./TeacherEventQuery
   let activeOrganizerEventsRef = null;
   let activeOrganizerEventsCallback = null;
   let holidayRequestSequence = 0;
+  let initialCalendarEventsReady = false;
+  let initialCalendarHolidaysReady = false;
+  let pageLoadSignaled = false;
+
+  function signalCalendarPageReady() {
+    if (
+      pageLoadSignaled ||
+      !initialCalendarEventsReady ||
+      !initialCalendarHolidaysReady
+    ) return;
+    pageLoadSignaled = true;
+    window.dispatchEvent(new Event("page-data-ready"));
+  }
 
   function debug(...args) {
     if (DEBUG) console.debug("[Teacher Calendar]", ...args);
@@ -432,7 +445,7 @@ import { teacherEventReadFilters, teacherEventsQuery } from "./TeacherEventQuery
     }
 
     if (state.isLoading) {
-      renderSkeletonGrid();
+      calendarDays.replaceChildren();
       renderUpcomingList();
       return;
     }
@@ -566,7 +579,7 @@ import { teacherEventReadFilters, teacherEventsQuery } from "./TeacherEventQuery
     }
 
     if (state.isLoading) {
-      upcomingList.innerHTML = '<div class="upcoming-empty">Loading events...</div>';
+      upcomingList.replaceChildren();
       return;
     }
 
@@ -649,17 +662,6 @@ import { teacherEventReadFilters, teacherEventsQuery } from "./TeacherEventQuery
         `;
       })
       .join("");
-  }
-
-  function renderSkeletonGrid() {
-    const cells = Array.from({ length: 35 }, () => `
-      <div class="cal-day-full is-skeleton">
-        <span class="skeleton-num"></span>
-        <div class="skeleton-bar"></div>
-        <div class="skeleton-bar short"></div>
-      </div>
-    `);
-    calendarDays.innerHTML = cells.join("");
   }
 
   function renderYearOptions() {
@@ -801,8 +803,19 @@ import { teacherEventReadFilters, teacherEventsQuery } from "./TeacherEventQuery
       if (modalLocation) modalLocation.textContent = event.venue;
       if (modalDescription) modalDescription.textContent = event.description || "No description.";
       if (modalSlots) {
-        modalSlots.textContent =
-          event.capacity != null ? `${event.capacity - (event.registeredCount || 0)} slots open` : "";
+        const rawCapacity =
+          event.capacity ?? event.maxCapacity ?? event.maxSlots;
+        const capacity =
+          rawCapacity == null || rawCapacity === ""
+            ? NaN
+            : Math.floor(Number(rawCapacity));
+        const registeredCount = Math.max(
+          0,
+          Math.floor(Number(event.registeredCount) || 0),
+        );
+        modalSlots.textContent = Number.isFinite(capacity) && capacity >= 0
+          ? `${Math.max(0, Math.min(capacity, capacity - registeredCount))} slots open`
+          : "";
       }
       if (modalLink) {
         if (isTeacher) {
@@ -1042,9 +1055,13 @@ import { teacherEventReadFilters, teacherEventsQuery } from "./TeacherEventQuery
         if (!state.isLoading) {
           renderCalendar();
         }
+        initialCalendarHolidaysReady = true;
+        signalCalendarPageReady();
       })
       .catch((err) => {
         console.warn("Could not load monthly holidays:", err);
+        initialCalendarHolidaysReady = true;
+        signalCalendarPageReady();
       });
 
     // 2. Query publicEvents from RTDB with resilient fallback timeout (500ms)
@@ -1066,6 +1083,8 @@ import { teacherEventReadFilters, teacherEventsQuery } from "./TeacherEventQuery
       } finally {
         state.isLoading = false;
         renderCalendar();
+        initialCalendarEventsReady = true;
+        signalCalendarPageReady();
       }
     }, 500);
 
@@ -1106,6 +1125,8 @@ import { teacherEventReadFilters, teacherEventsQuery } from "./TeacherEventQuery
             state.upcomingEvents = evs;
             renderUpcomingList();
             renderCalendar();
+            initialCalendarEventsReady = true;
+            signalCalendarPageReady();
           });
 
           renderCalendar();
@@ -1131,6 +1152,8 @@ import { teacherEventReadFilters, teacherEventsQuery } from "./TeacherEventQuery
           } finally {
             state.isLoading = false;
             renderCalendar();
+            initialCalendarEventsReady = true;
+            signalCalendarPageReady();
           }
         });
       } catch (queryErr) {
@@ -1147,6 +1170,8 @@ import { teacherEventReadFilters, teacherEventsQuery } from "./TeacherEventQuery
         );
         state.isLoading = false;
         renderCalendar();
+        initialCalendarEventsReady = true;
+        signalCalendarPageReady();
       }
     } else {
       rtdbResponded = true;
@@ -1161,6 +1186,8 @@ import { teacherEventReadFilters, teacherEventsQuery } from "./TeacherEventQuery
       );
       state.isLoading = false;
       renderCalendar();
+      initialCalendarEventsReady = true;
+      signalCalendarPageReady();
     }
 
     // 3. For Organizer: load own unpublished events

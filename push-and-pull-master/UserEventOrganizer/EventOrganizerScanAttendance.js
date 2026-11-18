@@ -1,7 +1,8 @@
-import { auth, authReady, db, rtdb, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
+import { auth, authReady, db, functions, rtdb, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
 import { onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { ref, onValue, off, get, set } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
-import { collection, getDocs, doc, getDoc, or, query, serverTimestamp, updateDoc, where } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { collection, getDocs, doc, getDoc, query, serverTimestamp, updateDoc, where } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { syncOrganizerOrganization } from "../organizationScope.js";
 
 // DOM Element References
 const organizerTodayDate = document.getElementById("organizerTodayDate");
@@ -41,6 +42,7 @@ const manualCheckInForm = document.getElementById("manualCheckInForm");
 const manualStudentNo = document.getElementById("manualStudentNo");
 const btnManualSubmit = document.getElementById("btnManualSubmit");
 const manualValidationError = document.getElementById("manualValidationError");
+const manualSearchResult = document.getElementById("manualSearchResult");
 
 const btnCompleteEvent = document.getElementById("btnCompleteEvent");
 const scanEmptyEventsBox = document.getElementById("scanEmptyEventsBox");
@@ -82,9 +84,18 @@ const btnExportCsv = document.getElementById("btnExportCsv");
 let currentEvents = [];
 let currentEventId = null;
 let organizerUid = "";
+let organizerOrganizationCode = "";
+let authContextVersion = 0;
 let organizerDisplayName = "";
 let eventsRefreshTimer = null;
 let eventLoadInProgress = false;
+let eventLoadPending = false;
+let scanPageLoadSignaled = false;
+function signalScanPageReady() {
+  if (scanPageLoadSignaled) return;
+  scanPageLoadSignaled = true;
+  window.dispatchEvent(new Event("page-data-ready"));
+}
 function showEventLoadFailure(error) {
   const details = {
     code: error?.code || "unknown",
@@ -94,7 +105,7 @@ function showEventLoadFailure(error) {
   if (eventSelect) {
     eventSelect.disabled = false;
     eventSelect.replaceChildren(
-      new Option("Failed to load events", ""),
+      new Option("Could not load events. Please try again.", ""),
       new Option("Retry loading events", "__retry__"),
     );
     eventSelect.value = "";
@@ -102,11 +113,13 @@ function showEventLoadFailure(error) {
       if (event.target.value === "__retry__") loadEventsList();
     };
   }
+  if (btnCompleteEvent) btnCompleteEvent.disabled = true;
   if (scanEmptyEventsBox) {
     scanEmptyEventsBox.hidden = false;
     scanEmptyEventsBox.querySelector("h3")?.replaceChildren(document.createTextNode("Failed to load events"));
     scanEmptyEventsBox.querySelector("p")?.replaceChildren(document.createTextNode("Check your connection and choose retry above."));
   }
+  signalScanPageReady();
 }
 
 function withTimeout(operation, timeoutMs, message) {
@@ -158,22 +171,11 @@ function eventIsOwnedByOrganizer(data) {
 }
 
 function eventIsScanReady(data) {
-  const statuses = [
-    data.status,
-    data.publicationStatus,
-    data.eventStatus,
-    data.approvalStatus,
-    data.approval?.status,
-    data.approvalData?.status,
-  ].map((value) => String(value || "").trim().toLowerCase().replace(/[\s_-]+/g, " "));
-  if (statuses.includes("cancelled") || statuses.includes("canceled") || statuses.includes("rejected")) {
+  const status = String(data.status || "").trim().toLowerCase().replace(/[ _-]+/g, " ");
+  if (["cancelled", "canceled", "rejected", "completed"].includes(status)) {
     return false;
   }
-  return statuses.includes("published") ||
-    statuses.includes("completed") ||
-    [data.published, data.isPublished, data.isLive].some((value) =>
-      value === true || value === 1 || ["true", "yes", "1"].includes(String(value || "").trim().toLowerCase()),
-    );
+  return ["approved", "published", "rescheduled"].includes(status) || data.published === true;
 }
 
 function normalizeAttendanceEvent(id, data) {
@@ -215,6 +217,11 @@ let pendingWalkInToken = null;
 let pendingWalkInState = null;
 let pendingManualStudentNo = null;
 let manualCheckInInProgress = false;
+let manualSearchTimer = null;
+let manualSearchRequestId = 0;
+let manualSearchMatches = [];
+let manualSearchTerm = "";
+let manualSearchEventId = null;
 
 // Initialize Date & Profile
 if (false) (() => {
@@ -300,28 +307,54 @@ function renderOrganizerProfile() {
 // Task 1: Auth & Role Guard (event organizers only)
 withTimeout(authReady, 15000, "Timed out waiting for authentication to initialize.")
   .then(() => onAuthStateChanged(auth, async (user) => {
+  const authRequestId = ++authContextVersion;
   if (!user) {
-    window.location.replace("EventOrganizerLogin.html");
-    return;
-  }
-
-  try {
-    const roleSnap = await withTimeout(
-      get(ref(rtdb, `roles/${user.uid}`)),
-      15000,
-      "Timed out verifying the event organizer role.",
-    );
-    if (roleSnap.val() !== "event_organizer") {
-      window.location.replace("EventOrganizerLogin.html");
-      return;
-    }
-  } catch (roleErr) {
-    console.error("Could not verify event organizer role:", roleErr);
+    organizerUid = "";
+    organizerOrganizationCode = "";
     window.location.replace("EventOrganizerLogin.html");
     return;
   }
 
   organizerUid = user.uid;
+  organizerOrganizationCode = "";
+  try {
+    organizerOrganizationCode = await withTimeout(
+      syncOrganizerOrganization(functions),
+      15000,
+      "Timed out verifying your organization.",
+    );
+    if (authRequestId !== authContextVersion) return;
+  } catch (verificationError) {
+    if (authRequestId !== authContextVersion) return;
+    await stopCameraScanner();
+    if (activeAttendanceRef) off(activeAttendanceRef);
+    if (activeEventAttendanceRef) off(activeEventAttendanceRef);
+    activeAttendanceRef = null;
+    activeEventAttendanceRef = null;
+    currentEvents = [];
+    currentEventId = null;
+    currentAttendanceRows = [];
+    currentAbsentRows = [];
+    [
+      btnCompleteEvent,
+      walkInToggle,
+      btnToggleCamera,
+      btnSwitchCamera,
+      btnManualSubmit,
+      manualStudentNo,
+      btnExportCsv,
+    ].forEach((control) => {
+      if (control) control.disabled = true;
+    });
+    if (metaDateTime) metaDateTime.textContent = "—";
+    if (metaVenue) metaVenue.textContent = "—";
+    if (metaCount) metaCount.textContent = "0 checked in";
+    updateRosterDisplay();
+    showEventLoadFailure(verificationError);
+    return;
+  }
+
+  if (authRequestId !== authContextVersion) return;
   renderOrganizerProfile();
 
   initApp().catch((error) => {
@@ -529,31 +562,51 @@ if (btnWalkInConfirm) {
 
 // Task 2: Event Selector & Default to Today / Next Upcoming
 async function loadEventsList() {
-  if (eventLoadInProgress) return;
+  if (eventLoadInProgress) {
+    eventLoadPending = true;
+    return;
+  }
   eventLoadInProgress = true;
+  const loadContextVersion = authContextVersion;
+  const loadOrganizerUid = organizerUid;
+  let loadOrganizationCode = "";
+  const isCurrentLoad = () =>
+    loadContextVersion === authContextVersion && loadOrganizerUid === organizerUid;
   console.log("[Scan Attendance] Starting published event load", { organizerUid });
-  if (eventSelect) eventSelect.replaceChildren(new Option("Loading published events...", ""));
+  if (eventSelect) eventSelect.replaceChildren();
 
   try {
     if (!isFirebaseConfigured || !db || !organizerUid) {
       throw new Error("Firestore is not configured.");
     }
+    loadOrganizationCode = await withTimeout(
+      syncOrganizerOrganization(functions),
+      15000,
+      "Timed out verifying your organization.",
+    );
+    if (!isCurrentLoad()) return;
+    organizerOrganizationCode = loadOrganizationCode;
     const eventsMap = new Map();
     const eventSnapshot = await withTimeout(
       getDocs(query(
         collection(db, "events"),
-        or(
-          where("organizerUid", "==", organizerUid),
-          where("organizerId", "==", organizerUid),
-          where("createdBy", "==", organizerUid),
-        ),
+        where("organizationCode", "==", loadOrganizationCode),
       )),
       15000,
       "Timed out loading your events.",
     );
+    if (!isCurrentLoad() || loadOrganizationCode !== organizerOrganizationCode) return;
     eventSnapshot.docs.forEach((eventDocument) => {
       const data = eventDocument.data();
-      if (eventIsOwnedByOrganizer(data) && eventIsScanReady(data)) {
+      const eventOrganizationCode = String(data.organizationCode || "")
+        .trim()
+        .replace(/\s+/g, " ")
+        .toUpperCase();
+      if (
+        eventOrganizationCode === loadOrganizationCode &&
+        eventIsOwnedByOrganizer(data) &&
+        eventIsScanReady(data)
+      ) {
         const event = normalizeAttendanceEvent(eventDocument.id, data);
         eventsMap.set(event.id, event);
       }
@@ -561,24 +614,16 @@ async function loadEventsList() {
     currentEvents = [...eventsMap.values()];
     console.log("[Scan Attendance] Published events found:", currentEvents.length);
     await populateEventDropdown();
-    if (requestedEventId && String(currentEventId) !== requestedEventId) {
-      await showEventDetails(requestedEventId);
-    }
   } catch (error) {
+    if (!isCurrentLoad()) return;
     currentEvents = [];
-    if (requestedEventId) {
-      try {
-        await showEventDetails(requestedEventId);
-        console.warn("[Scan Attendance] Event list query failed; loaded the URL event directly:", error);
-      } catch (eventError) {
-        console.error("[Scan Attendance] Event list and URL event reads failed:", error, eventError);
-        showEventLoadFailure(eventError);
-      }
-    } else {
-      showEventLoadFailure(error);
-    }
+    showEventLoadFailure(error);
   } finally {
     eventLoadInProgress = false;
+    if (eventLoadPending) {
+      eventLoadPending = false;
+      loadEventsList();
+    } else signalScanPageReady();
   }
   return;
 
@@ -739,10 +784,7 @@ async function populateEventDropdown() {
     setAttendanceControlsDisabled(true);
     if (eventSelect) {
       eventSelect.disabled = false;
-      eventSelect.replaceChildren(new Option(
-        requestedEventId ? "Loading selected event..." : "No published events are available",
-        "",
-      ));
+      eventSelect.replaceChildren(new Option("No published events", ""));
     }
     if (metaDateTime) metaDateTime.textContent = "—";
     if (metaVenue) metaVenue.textContent = "—";
@@ -764,6 +806,7 @@ async function populateEventDropdown() {
   if (scanLayoutGrid) scanLayoutGrid.style.display = "";
   if (scanRosterSection) scanRosterSection.style.display = "";
   setAttendanceControlsDisabled(false);
+  if (btnManualSubmit) btnManualSubmit.disabled = true;
 
   if (!eventSelect) return;
   eventSelect.replaceChildren(new Option("Select an event", ""));
@@ -778,11 +821,8 @@ async function populateEventDropdown() {
 
   if (requestedEventId) {
     bestMatchEvent = currentEvents.find((e) => String(e.id) === requestedEventId);
-    if (!bestMatchEvent) {
-      eventSelect.options[0].textContent = "Loading selected event...";
-      return;
-    }
-  } else if (currentEventId) {
+  }
+  if (!bestMatchEvent && currentEventId) {
     bestMatchEvent = currentEvents.find((event) => String(event.id) === String(currentEventId));
   }
 
@@ -817,6 +857,7 @@ async function populateEventDropdown() {
 
 async function showEventDetails(eventId) {
   if (!eventId) return;
+  clearManualSearch(true);
   console.log("[Scan Attendance] Loading event details:", eventId);
   await stopCameraScanner();
   dismissBanner();
@@ -830,7 +871,15 @@ async function showEventDetails(eventId) {
   }
 
   const eventData = eventSnapshot.data();
-  if (!eventIsOwnedByOrganizer(eventData) || !eventIsScanReady(eventData)) {
+  const eventOrganizationCode = String(eventData.organizationCode || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toUpperCase();
+  if (
+    !eventIsOwnedByOrganizer(eventData) ||
+    !eventIsScanReady(eventData) ||
+    eventOrganizationCode !== organizerOrganizationCode
+  ) {
     throw Object.assign(new Error("This event is not available for attendance."), { code: "permission-denied" });
   }
   const ev = normalizeAttendanceEvent(eventSnapshot.id, eventData);
@@ -838,6 +887,7 @@ async function showEventDetails(eventId) {
   if (existingIndex >= 0) currentEvents[existingIndex] = ev;
   else currentEvents.push(ev);
   currentEventId = String(eventId);
+  clearManualSearch(true);
   if (eventSelect) {
     if (
       eventSelect.options.length === 1 &&
@@ -867,6 +917,7 @@ async function showEventDetails(eventId) {
     manualStudentNo, btnExportCsv].forEach((control) => {
     if (control) control.disabled = false;
   });
+  if (btnManualSubmit) btnManualSubmit.disabled = true;
 
   const dateFormatted = ev.dateISO || "Date TBA";
   const timeRange = [ev.startAt, ev.endAt].filter(Boolean).join(" - ");
@@ -1982,164 +2033,302 @@ function handleAttendanceResult(result, originalToken) {
   }
 }
 
-// Task 6: Manual Lookup Fallback with Input Validation & Confirmation Modal
+// Task 6: Manual Lookup
 const STUDENT_NO_REGEX = /^\d{4}-\d{5}-BN-\d$/;
 
 function formatStudentNo(val) {
   return String(val || "").trim().toUpperCase();
 }
 
-if (manualStudentNo) {
-  manualStudentNo.addEventListener("input", () => {
+function clearManualSearch(clearInput = false) {
+  if (manualSearchTimer) {
+    clearTimeout(manualSearchTimer);
+    manualSearchTimer = null;
+  }
+  manualSearchRequestId += 1;
+  manualSearchMatches = [];
+  manualSearchTerm = "";
+  manualSearchEventId = null;
+  if (clearInput && manualStudentNo) manualStudentNo.value = "";
+  if (manualStudentNo) manualStudentNo.classList.remove("input-error");
+  if (manualValidationError) {
+    manualValidationError.hidden = true;
+    manualValidationError.textContent = "";
+  }
+  if (manualSearchResult) {
+    manualSearchResult.replaceChildren();
+    manualSearchResult.className = "manual-search-result";
+    manualSearchResult.hidden = true;
+  }
+  if (btnManualSubmit) btnManualSubmit.disabled = true;
+}
+
+function showManualSearchMessage(message, state = "") {
+  if (!manualSearchResult) return;
+  manualSearchResult.replaceChildren();
+  manualSearchResult.className = "manual-search-result";
+  if (state) manualSearchResult.classList.add(state);
+  const messageRow = document.createElement("p");
+  messageRow.className = "manual-search-message";
+  messageRow.textContent = message;
+  manualSearchResult.appendChild(messageRow);
+  manualSearchResult.hidden = false;
+}
+
+function renderManualSearchResults(matches, term, eventId) {
+  manualSearchMatches = matches;
+  manualSearchTerm = term;
+  manualSearchEventId = eventId;
+  if (!manualSearchResult) return;
+  manualSearchResult.replaceChildren();
+  manualSearchResult.className = "manual-search-result";
+
+  if (matches.length === 0) {
+    showManualSearchMessage("No registered student found for this Student Number.");
+  } else {
+    matches.forEach((student) => {
+      const row = document.createElement("div");
+      row.className = "manual-search-result-row";
+      const details = document.createElement("div");
+      details.className = "manual-search-result-details";
+      const name = document.createElement("span");
+      name.className = "manual-search-result-name";
+      name.textContent = student.name;
+      const meta = document.createElement("span");
+      meta.className = "manual-search-result-meta";
+      meta.textContent = [student.studentNo, student.course, student.section, student.organization]
+        .filter(Boolean)
+        .join(" · ");
+      const status = document.createElement("span");
+      status.className = `manual-search-status ${student.checkedIn ? "already" : "registered"}`;
+      status.textContent = student.checkedIn ? "Already checked in" : "Registered";
+      details.append(name, meta);
+      row.append(details, status);
+      manualSearchResult.appendChild(row);
+    });
+    const availableMatches = matches.filter((student) => !student.checkedIn);
+    if (availableMatches.length > 1) {
+      const messageRow = document.createElement("p");
+      messageRow.className = "manual-search-message";
+      messageRow.textContent = "More than one student matched. Continue typing to narrow your search.";
+      manualSearchResult.appendChild(messageRow);
+    }
+  }
+
+  manualSearchResult.hidden = false;
+  const currentEvent = currentEvents.find((event) => String(event.id) === String(eventId));
+  if (btnManualSubmit) {
+    btnManualSubmit.disabled =
+      manualCheckInInProgress ||
+      !currentEventId ||
+      currentEvent?.status === "completed" ||
+      matches.filter((student) => !student.checkedIn).length !== 1;
+  }
+}
+
+async function searchManualStudents(term, eventId, requestId) {
+  if (
+    requestId !== manualSearchRequestId ||
+    String(eventId || "") !== String(currentEventId || "") ||
+    formatStudentNo(manualStudentNo?.value) !== term
+  ) return;
+
+  if (!eventId || !rtdb) {
     if (manualValidationError) {
-      manualValidationError.hidden = true;
-      manualValidationError.textContent = "";
+      manualValidationError.textContent = "Could not load this event's registrations. Please try again.";
+      manualValidationError.hidden = false;
     }
-    manualStudentNo.classList.remove("input-error");
-  });
-}
+    if (manualSearchResult) manualSearchResult.hidden = true;
+    return;
+  }
 
-function closeManualConfirmModal() {
-  if (manualConfirmModalOverlay) manualConfirmModalOverlay.hidden = true;
-  pendingManualStudentNo = null;
-}
+  try {
+    const [registrationSnapshot, attendanceSnapshot] = await Promise.all([
+      get(ref(rtdb, `registrations/${eventId}`)),
+      get(ref(rtdb, `events/${eventId}/attendance`)),
+    ]);
+    if (
+      requestId !== manualSearchRequestId ||
+      String(eventId || "") !== String(currentEventId || "") ||
+      formatStudentNo(manualStudentNo?.value) !== term
+    ) return;
 
-if (btnCancelManualConfirm) {
-  btnCancelManualConfirm.addEventListener("click", closeManualConfirmModal);
-}
-
-if (manualConfirmModalOverlay) {
-  manualConfirmModalOverlay.addEventListener("click", (e) => {
-    if (e.target === manualConfirmModalOverlay) {
-      closeManualConfirmModal();
+    const registrationData = registrationSnapshot.val() || {};
+    const attendanceData = attendanceSnapshot.val() || {};
+    const matches = [];
+    if (registrationData && typeof registrationData === "object") {
+      Object.entries(registrationData).forEach(([uid, registration]) => {
+        if (!registration || typeof registration !== "object") return;
+        const student = registration.student && typeof registration.student === "object"
+          ? registration.student
+          : {};
+        const studentNo = formatStudentNo(
+          registration.studentNo ||
+          registration.studentNumber ||
+          student.studentNo ||
+          student.studentNumber ||
+          "",
+        );
+        if (!studentNo || !studentNo.includes(term)) return;
+        const alreadyCheckedIn = Boolean(attendanceData[uid]) ||
+          currentAttendanceRows.some((row) =>
+            String(row.uid || "") === String(uid) ||
+            stripStudentNo(row.studentNo) === stripStudentNo(studentNo)
+          );
+        matches.push({
+          uid,
+          studentNo,
+          name: registration.name ||
+            registration.studentName ||
+            registration.fullName ||
+            student.fullName ||
+            student.name ||
+            `${registration.firstName || student.firstName || ""} ${registration.lastName || student.lastName || ""}`.trim() ||
+            "Student",
+          course: registration.courseOrganization ||
+            registration.course ||
+            registration.department ||
+            student.courseOrganization ||
+            student.course ||
+            student.department ||
+            "",
+          section: registration.section || student.section || "",
+          organization: registration.organization || student.organization || "",
+          checkedIn: alreadyCheckedIn,
+        });
+      });
     }
-  });
+    matches.sort((left, right) => left.studentNo.localeCompare(right.studentNo));
+    renderManualSearchResults(matches, term, eventId);
+  } catch (error) {
+    if (
+      requestId !== manualSearchRequestId ||
+      String(eventId || "") !== String(currentEventId || "") ||
+      formatStudentNo(manualStudentNo?.value) !== term
+    ) return;
+    console.error("[Scan Attendance] Manual registration search failed:", error);
+    if (manualValidationError) {
+      manualValidationError.textContent = "Could not search this event's registrations. Please try again.";
+      manualValidationError.hidden = false;
+    }
+    if (manualSearchResult) manualSearchResult.hidden = true;
+    if (btnManualSubmit) btnManualSubmit.disabled = true;
+  }
+}
+
+function runManualSearch(immediate = false) {
+  if (manualSearchTimer) {
+    clearTimeout(manualSearchTimer);
+    manualSearchTimer = null;
+  }
+  const term = formatStudentNo(manualStudentNo?.value);
+  if (manualValidationError) {
+    manualValidationError.hidden = true;
+    manualValidationError.textContent = "";
+  }
+  manualStudentNo?.classList.remove("input-error");
+  if (!term) {
+    clearManualSearch();
+    return;
+  }
+
+  manualSearchMatches = [];
+  manualSearchTerm = term;
+  manualSearchEventId = currentEventId;
+  const requestId = ++manualSearchRequestId;
+  const eventId = currentEventId;
+  if (btnManualSubmit) btnManualSubmit.disabled = true;
+  showManualSearchMessage("Searching registered students…", "is-loading");
+  if (immediate) {
+    searchManualStudents(term, eventId, requestId);
+  } else {
+    manualSearchTimer = window.setTimeout(() => {
+      manualSearchTimer = null;
+      searchManualStudents(term, eventId, requestId);
+    }, 300);
+  }
+}
+
+async function checkInManualSearchResult() {
+  const availableMatches = manualSearchMatches.filter((student) => !student.checkedIn);
+  if (
+    manualCheckInInProgress ||
+    availableMatches.length !== 1 ||
+    !currentEventId ||
+    String(manualSearchEventId) !== String(currentEventId)
+  ) return;
+
+  const student = availableMatches[0];
+  const eventId = currentEventId;
+  const currentEvent = currentEvents.find((event) => String(event.id) === String(eventId));
+  if (currentEvent?.status === "completed") return;
+  manualCheckInInProgress = true;
+  if (btnManualSubmit) {
+    btnManualSubmit.disabled = true;
+    btnManualSubmit.textContent = "Checking in...";
+  }
+  if (manualValidationError) {
+    manualValidationError.hidden = true;
+    manualValidationError.textContent = "";
+  }
+
+  try {
+    const result = await handleLocalAttendanceProcessing(eventId, student.studentNo, false);
+    handleAttendanceResult(result, student.studentNo);
+    if (result.status === "ok") {
+      clearManualSearch(true);
+    } else if (result.status === "already") {
+      renderManualSearchResults(
+        manualSearchMatches.map((match) =>
+          match.uid === student.uid ? { ...match, checkedIn: true } : match
+        ),
+        manualSearchTerm,
+        manualSearchEventId,
+      );
+    } else if (result.status === "not_registered") {
+      manualSearchMatches = [];
+      showManualSearchMessage("No registered student found for this Student Number.");
+    }
+  } catch (error) {
+    console.error("Manual check-in error:", error);
+    showResultBanner({
+      type: "error",
+      title: "Lookup failed",
+      name: student.name,
+      meta: student.studentNo,
+      note: error.message || "Could not record attendance for this student number.",
+    });
+  } finally {
+    manualCheckInInProgress = false;
+    if (btnManualSubmit) {
+      btnManualSubmit.textContent = "Check In";
+      const currentEvent = currentEvents.find((event) => String(event.id) === String(currentEventId));
+      btnManualSubmit.disabled =
+        !currentEventId ||
+        currentEvent?.status === "completed" ||
+        manualSearchMatches.filter((match) => !match.checkedIn).length !== 1;
+    }
+  }
+}
+
+if (manualStudentNo) {
+  manualStudentNo.addEventListener("input", () => runManualSearch());
 }
 
 if (manualCheckInForm) {
-  manualCheckInForm.addEventListener("submit", (e) => {
-    e.preventDefault();
-
-    if (manualCheckInInProgress) return;
-
-    if (!currentEventId) {
-      if (manualValidationError) {
-        manualValidationError.textContent = "Please select an active event first.";
-        manualValidationError.hidden = false;
-      }
-      return;
-    }
-
-    const currentEv = currentEvents.find((ev) => String(ev.id) === String(currentEventId));
-    if (currentEv && currentEv.status === "completed") {
-      if (manualValidationError) {
-        manualValidationError.textContent = "This event is marked as completed. Attendance is closed.";
-        manualValidationError.hidden = false;
-      }
-      return;
-    }
-
-    const rawVal = (manualStudentNo?.value || "").trim();
-    if (!rawVal) {
-      if (manualValidationError) {
-        manualValidationError.textContent = "Please enter a student number.";
-        manualValidationError.hidden = false;
-      }
-      manualStudentNo?.classList.add("input-error");
-      manualStudentNo?.focus();
-      return;
-    }
-
-    const formattedNo = formatStudentNo(rawVal);
-    const isValidFormat = STUDENT_NO_REGEX.test(formattedNo);
-    if (!isValidFormat) {
-      if (manualValidationError) {
-        manualValidationError.textContent = "Student number must follow the format 2023-00123-BN-0.";
-        manualValidationError.hidden = false;
-      }
-      manualStudentNo?.classList.add("input-error");
-      manualStudentNo?.focus();
-      return;
-    }
-
-    // Check if student is already checked in
-    const cleanFormatted = stripStudentNo(formattedNo);
-    const alreadyChecked = currentAttendanceRows.find((r) => {
-      return stripStudentNo(r.studentNo) === cleanFormatted || stripStudentNo(r.uid) === cleanFormatted;
-    });
-    if (alreadyChecked) {
-      if (manualValidationError) {
-        manualValidationError.textContent = `Student ${formattedNo} is already checked in (${alreadyChecked.name || "Student"}).`;
-        manualValidationError.hidden = false;
-      }
-      manualStudentNo?.classList.add("input-error");
-      return;
-    }
-
-    // Check pre-registration vs walk-in
-    const allowWalkIn = isWalkInAllowed;
-    const isPreRegistered = currentAbsentRows.some((r) => {
-      return stripStudentNo(r.studentNo) === cleanFormatted || stripStudentNo(r.uid) === cleanFormatted;
-    });
-
-    if (!isPreRegistered && !allowWalkIn) {
-      if (manualValidationError) {
-        manualValidationError.textContent = `Student ${formattedNo} is not pre-registered, and walk-ins are disabled. Turn on "Allow walk-ins" to proceed.`;
-        manualValidationError.hidden = false;
-      }
-      manualStudentNo?.classList.add("input-error");
-      return;
-    }
-
-    // Clear validation error and open confirmation modal
-    if (manualValidationError) {
-      manualValidationError.hidden = true;
-      manualValidationError.textContent = "";
-    }
-    manualStudentNo?.classList.remove("input-error");
-
-    pendingManualStudentNo = formattedNo;
-    if (manualConfirmStudentNo) manualConfirmStudentNo.textContent = formattedNo;
-    if (manualConfirmWalkInNotice) {
-      manualConfirmWalkInNotice.hidden = isPreRegistered;
-    }
-    if (manualConfirmModalOverlay) manualConfirmModalOverlay.hidden = false;
-    btnAcceptManualConfirm?.focus();
-  });
-}
-
-if (btnAcceptManualConfirm) {
-  btnAcceptManualConfirm.addEventListener("click", async () => {
-    if (!pendingManualStudentNo || !currentEventId) return;
-    const studentNo = pendingManualStudentNo;
-    closeManualConfirmModal();
-    manualCheckInInProgress = true;
-
-    const allowWalkIn = isWalkInAllowed;
-    if (btnManualSubmit) {
-      btnManualSubmit.disabled = true;
-      btnManualSubmit.textContent = "Checking in...";
-    }
-
-    try {
-      const result = await handleLocalAttendanceProcessing(currentEventId, studentNo, allowWalkIn);
-      handleAttendanceResult(result, studentNo);
-      if (manualStudentNo) manualStudentNo.value = "";
-    } catch (err) {
-      console.error("Manual check-in error:", err);
-      showResultBanner({
-        type: "error",
-        title: "Lookup failed",
-        name: studentNo,
-        meta: "",
-        note: err.message || "Could not record attendance for this student number.",
-      });
-    } finally {
-      if (btnManualSubmit) {
-        btnManualSubmit.disabled = false;
-        btnManualSubmit.textContent = "Check In";
-      }
-      manualCheckInInProgress = false;
+  manualCheckInForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const term = formatStudentNo(manualStudentNo?.value);
+    const availableMatches = manualSearchMatches.filter((student) => !student.checkedIn);
+    if (
+      term &&
+      term === manualSearchTerm &&
+      String(manualSearchEventId) === String(currentEventId) &&
+      availableMatches.length === 1
+    ) {
+      checkInManualSearchResult();
+    } else {
+      runManualSearch(true);
     }
   });
 }

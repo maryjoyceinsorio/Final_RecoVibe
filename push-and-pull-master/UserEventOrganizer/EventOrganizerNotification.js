@@ -6,6 +6,12 @@ let currentOrganizerUid = "";
 let organizerIdentifiers = new Set();
 const organizerProfile = {};
 let firestoreNotificationError = "";
+let pageLoadSignaled = false;
+function signalNotificationsPageReady() {
+  if (pageLoadSignaled) return;
+  pageLoadSignaled = true;
+  window.dispatchEvent(new Event("page-data-ready"));
+}
 function debug(...args) {
   if (DEBUG) console.debug("[OrganizerNotifications]", ...args);
 }
@@ -421,6 +427,7 @@ function connectToSharedNotifications() {
   if (!service) {
     firestoreNotificationError = "Notifications could not be initialized. Please try again.";
     renderNotifications();
+    signalNotificationsPageReady();
     return;
   }
   service.subscribe((state) => {
@@ -440,6 +447,7 @@ function connectToSharedNotifications() {
       console.error("[OrganizerNotifications] Could not restore deleted notifications:", error);
     }
     renderNotifications();
+    if (!state.loading) signalNotificationsPageReady();
   });
 }
 

@@ -18,6 +18,10 @@ import {
   where,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/firebaseConfig.js";
+import {
+  approveCorrectionRequest,
+  rejectCorrectionRequest,
+} from "../correctionApproval.js";
 
 (() => {
   "use strict";
@@ -58,7 +62,9 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
     correctionReviewPending = new Set(),
     correctionPanelOpen = false,
     correctionHistoryExpanded = false,
-    correctionPanelReturnFocus = null;
+    correctionPanelReturnFocus = null,
+    queueLoaded = !isRtdbConfigured || !rtdb,
+    pageLoadSignaled = false;
   let notificationController = null,
     sharedNotificationState = {
       items: [],
@@ -72,6 +78,16 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
       correctionRequestsError: "",
     },
     authStateHandler = null;
+  function signalNotificationsPageReady() {
+    if (
+      pageLoadSignaled ||
+      sharedNotificationState.loading ||
+      sharedNotificationState.correctionRequestsLoading ||
+      !queueLoaded
+    ) return;
+    pageLoadSignaled = true;
+    window.dispatchEvent(new Event("page-data-ready"));
+  }
   document.querySelector(".admin-logout").onclick = async (event) => {
     event.preventDefault();
     try {
@@ -400,6 +416,7 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
         firestoreNotificationsError = state.error;
         render();
         renderCorrectionPanel();
+        signalNotificationsPageReady();
       });
     } catch (error) {
       sharedNotificationState = {
@@ -411,11 +428,16 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
       };
       document.querySelectorAll("[data-notification-count]").forEach((badge) => { badge.hidden = true; });
       render();
+      signalNotificationsPageReady();
     }
   }
 
   function subscribeToRtdbNotifications(uid) {
-    if (!isRtdbConfigured || !rtdb || !uid) return;
+    if (!isRtdbConfigured || !rtdb || !uid) {
+      queueLoaded = true;
+      signalNotificationsPageReady();
+      return;
+    }
     if (notifListenerRef) {
       off(notifListenerRef);
       notifListenerRef = null;
@@ -567,9 +589,13 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
           b.textContent = String(count);
           b.hidden = count === 0;
         });
+        queueLoaded = true;
+        signalNotificationsPageReady();
       },
       (err) => {
         console.warn("RTDB queue error:", err);
+        queueLoaded = true;
+        signalNotificationsPageReady();
       },
     );
   }
@@ -683,28 +709,31 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
     if (!correctionPanel || !correctionPanelOpen) return;
     const requests = sortedCorrectionRequests(sharedNotificationState.correctionRequests || []);
     const pending = requests.filter((request) => String(request.status || "").trim().toLowerCase() === "pending");
-    const history = requests.filter((request) => ["resolved", "rejected"].includes(String(request.status || "").trim().toLowerCase()));
+    const history = requests.filter((request) => ["approved", "resolved", "rejected"].includes(String(request.status || "").trim().toLowerCase()));
     const reviewCards = pending.map((request) => {
       const id = esc(request.id);
       const isSaving = correctionReviewPending.has(request.id);
+      const actionsDisabled = correctionReviewPending.size > 0;
       const error = correctionReviewErrors.get(request.id);
       const note = correctionReviewNotes.get(request.id) || "";
       return `<article class="correction-review-card">
         <header><div><h3>${esc(request.requesterName || "Teacher")}</h3><p>${esc(request.requesterEmail || "")}</p></div><span class="correction-status is-pending">Pending</span></header>
         <dl><div><dt>Role</dt><dd>${esc(request.role || "Teacher")}</dd></div><div><dt>Field</dt><dd>${esc(request.fieldLabel || request.field || "Detail")}</dd></div><div><dt>Current value</dt><dd>${esc(request.currentValue ?? "")}</dd></div><div><dt>Requested value</dt><dd>${esc(request.requestedValue ?? "")}</dd></div></dl>
         <p class="correction-review-reason"><strong>Why it is wrong</strong><span>${esc(request.reason || "")}</span></p>
-        <label class="correction-review-note">Reviewer note (optional)<textarea maxlength="300" rows="2" data-review-note="${id}" ${isSaving ? "disabled" : ""}>${esc(note)}</textarea></label>
-        ${error ? `<p class="correction-review-error" role="alert">${esc(error.message)} <button type="button" data-review-retry="${id}" data-review-status="${esc(error.status)}">Retry</button></p>` : ""}
-        <div class="correction-review-actions"><button type="button" data-review-action="resolved" data-request-id="${id}" ${isSaving ? "disabled" : ""}>${isSaving ? "Saving..." : "Mark resolved"}</button><button type="button" class="is-reject" data-review-action="rejected" data-request-id="${id}" ${isSaving ? "disabled" : ""}>Reject</button></div>
+        <label class="correction-review-note">Reviewer note (optional)<textarea maxlength="300" rows="2" data-review-note="${id}" ${actionsDisabled ? "disabled" : ""}>${esc(note)}</textarea></label>
+        <p class="correction-review-hint">Approving applies ${esc(request.fieldLabel || request.field || "")}: ${esc(request.requestedValue ?? "")} to the profile automatically.</p>
+        ${error ? `<p class="correction-review-error" role="alert">${esc(error.message)}</p>` : ""}
+        <div class="correction-review-actions"><button type="button" data-review-action="approve" data-request-id="${id}" ${actionsDisabled ? "disabled" : ""}>${isSaving ? "Saving..." : "Approve and update profile"}</button><button type="button" class="is-reject" data-review-action="reject" data-request-id="${id}" ${actionsDisabled ? "disabled" : ""}>Reject</button>${error?.unmapped ? `<button type="button" data-review-action="manual-resolved" data-request-id="${id}" ${actionsDisabled ? "disabled" : ""}>Mark resolved without updating</button>` : ""}</div>
       </article>`;
     }).join("");
     const historyCards = history.map((request) => {
       const status = String(request.status || "").trim().toLowerCase();
-      const statusLabel = status === "resolved" ? "Resolved" : "Rejected";
-      return `<article class="correction-history-card"><div><strong>${esc(request.requesterName || "Teacher")} - ${esc(request.fieldLabel || request.field || "Detail")}</strong><span>${esc(request.currentValue ?? "")} -&gt; ${esc(request.requestedValue ?? "")}</span><small>${esc(correctionRequestDate(request))}</small>${request.reviewNote ? `<p>${esc(request.reviewNote)}</p>` : ""}</div><span class="correction-status is-${status}">${statusLabel}</span></article>`;
+      const statusLabel = status === "approved" ? "Approved" : status === "resolved" ? "Resolved" : "Rejected";
+      const statusClass = status === "approved" ? "resolved" : status;
+      return `<article class="correction-history-card"><div><strong>${esc(request.requesterName || "Teacher")} - ${esc(request.fieldLabel || request.field || "Detail")}</strong><span>${esc(request.currentValue ?? "")} -&gt; ${esc(request.requestedValue ?? "")}</span><small>${esc(correctionRequestDate(request))}</small>${request.reviewNote ? `<p>${esc(request.reviewNote)}</p>` : ""}</div><span class="correction-status is-${statusClass}">${statusLabel}</span></article>`;
     }).join("");
     const loadingMarkup = sharedNotificationState.correctionRequestsLoading
-      ? '<div class="correction-review-skeleton" role="status"><span></span><span></span><span></span></div>'
+      ? '<div role="status">Loading correction requests...</div>'
       : "";
     const errorMarkup = sharedNotificationState.correctionRequestsError
       ? `<div class="correction-review-state" role="alert"><p>${esc(sharedNotificationState.correctionRequestsError)}</p><button type="button" data-retry-correction-requests>Retry</button></div>`
@@ -712,21 +741,18 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
     const body = sharedNotificationState.correctionRequestsLoading
       ? loadingMarkup
       : errorMarkup || (requests.length
-        ? `<p class="correction-review-hint">Update the teacher's record in User Management if you approve this.</p><section class="correction-pending-list" aria-label="Pending correction requests">${reviewCards || '<p class="correction-review-empty">No pending correction requests.</p>'}</section>${history.length ? `<details class="correction-history"${correctionHistoryExpanded ? " open" : ""}><summary>History (${history.length})</summary><div>${historyCards}</div></details>` : ""}`
+        ? `<section class="correction-pending-list" aria-label="Pending correction requests">${reviewCards || '<p class="correction-review-empty">No pending correction requests.</p>'}</section>${history.length ? `<details class="correction-history"${correctionHistoryExpanded ? " open" : ""}><summary>History (${history.length})</summary><div>${historyCards}</div></details>` : ""}`
         : '<p class="correction-review-empty">No correction requests</p>');
-    correctionPanel.innerHTML = `<div class="correction-review-dialog" role="dialog" aria-modal="true" aria-labelledby="correctionReviewTitle"><header class="correction-review-header"><div><h2 id="correctionReviewTitle">Teacher correction requests</h2><p>Review and record a decision. Teacher records are not changed automatically.</p></div><button type="button" class="correction-review-close" data-close-correction-panel aria-label="Close review panel">&times;</button></header><div class="correction-review-content">${body}</div></div>`;
+    correctionPanel.innerHTML = `<div class="correction-review-dialog" role="dialog" aria-modal="true" aria-labelledby="correctionReviewTitle"><header class="correction-review-header"><div><h2 id="correctionReviewTitle">Teacher correction requests</h2><p>Review and record a decision.</p></div><button type="button" class="correction-review-close" data-close-correction-panel aria-label="Close review panel" ${correctionReviewPending.size ? "disabled" : ""}>&times;</button></header><div class="correction-review-content">${body}</div></div>`;
     correctionPanel.querySelector("[data-close-correction-panel]").onclick = closeCorrectionPanel;
     correctionPanel.onclick = (event) => {
-      if (event.target === correctionPanel) closeCorrectionPanel();
+      if (event.target === correctionPanel && !correctionReviewPending.size) closeCorrectionPanel();
     };
     correctionPanel.querySelectorAll("[data-review-note]").forEach((textarea) => {
       textarea.oninput = () => correctionReviewNotes.set(textarea.dataset.reviewNote, textarea.value);
     });
     correctionPanel.querySelectorAll("[data-review-action]").forEach((button) => {
       button.onclick = () => reviewCorrectionRequest(button.dataset.requestId, button.dataset.reviewAction);
-    });
-    correctionPanel.querySelectorAll("[data-review-retry]").forEach((button) => {
-      button.onclick = () => reviewCorrectionRequest(button.dataset.reviewRetry, button.dataset.reviewStatus, true);
     });
     correctionPanel.querySelectorAll("[data-retry-correction-requests]").forEach((button) => {
       button.onclick = () => notificationController
@@ -746,36 +772,63 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
     correctionPanel.querySelector("[data-close-correction-panel]")?.focus();
   }
   function closeCorrectionPanel() {
+    if (correctionReviewPending.size) return;
     correctionPanelOpen = false;
     correctionPanel.hidden = true;
     correctionPanelReturnFocus?.focus?.();
   }
-  async function reviewCorrectionRequest(requestId, status, retry = false) {
+  async function reviewCorrectionRequest(requestId, action) {
     const request = (sharedNotificationState.correctionRequests || []).find((item) => item.id === requestId);
-    if (!request || correctionReviewPending.has(requestId)) return;
-    if (status === "rejected" && !retry && !window.confirm("Reject this correction request?")) return;
+    if (
+      !request ||
+      String(request.status || "").trim().toLowerCase() !== "pending" ||
+      correctionReviewPending.size
+    ) return;
+    const previousError = correctionReviewErrors.get(requestId);
+    if (action === "manual-resolved" && !previousError?.unmapped) return;
+    if (action === "reject" && !window.confirm("Reject this correction request?")) return;
     const reviewNote = String(correctionReviewNotes.get(requestId) || "").trim().slice(0, 300);
     correctionReviewPending.add(requestId);
     correctionReviewErrors.delete(requestId);
     renderCorrectionPanel();
     try {
-      await updateDoc(doc(db, "correctionRequests", requestId), {
-        status,
-        reviewedBy: currentAdminUid,
-        reviewedByName: currentAdminName,
-        reviewedAt: serverTimestamp(),
-        reviewNote,
-        updatedAt: serverTimestamp(),
-      });
+      if (action === "approve") {
+        await approveCorrectionRequest(db, auth, requestId, reviewNote);
+      } else if (action === "reject") {
+        await rejectCorrectionRequest(db, auth, requestId, reviewNote);
+      } else if (action === "manual-resolved") {
+        await updateDoc(doc(db, "correctionRequests", requestId), {
+          status: "resolved",
+          reviewedBy: currentAdminUid,
+          reviewedByName: currentAdminName,
+          reviewedAt: serverTimestamp(),
+          reviewNote: "Profile must be edited by hand.",
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        return;
+      }
       correctionReviewNotes.delete(requestId);
-      showCorrectionToast(status === "resolved" ? "Request marked resolved." : "Request rejected.");
+      showCorrectionToast(
+        action === "approve"
+          ? "Correction approved and profile updated."
+          : action === "manual-resolved"
+            ? "Request marked resolved without updating the profile."
+            : "Request rejected.",
+      );
     } catch (error) {
       if (DEBUG) console.debug("[correction-review] update failed", error.code || error);
-      const message = error.code === "permission-denied"
-        ? "You don't have permission to review this request."
-        : "Couldn't save the review. Check your connection and try again.";
-      correctionReviewErrors.set(requestId, { message, status });
-      showCorrectionToast(message, () => reviewCorrectionRequest(requestId, status, true));
+      const unmapped = action === "approve" &&
+        error?.message === "This field can't be updated automatically.";
+      const permissionDenied = error?.code === "permission-denied" ||
+        error?.code === "firestore/permission-denied";
+      const message = permissionDenied
+        ? "Firestore rules do not allow this write. No changes were made."
+        : error?.message || "Couldn't save the review. Check your connection and try again.";
+      correctionReviewErrors.set(requestId, {
+        message,
+        unmapped: unmapped || (action === "manual-resolved" && previousError?.unmapped),
+      });
     } finally {
       correctionReviewPending.delete(requestId);
       renderCorrectionPanel();
@@ -1154,7 +1207,11 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
     authStartupExpired = true;
     root.innerHTML = '<div class="admin-error" role="alert">Could not verify your Admin access in time. <button class="admin-row-action" type="button" id="retryNotifications">Try again</button></div>';
     root.querySelector("#retryNotifications").addEventListener("click", () => window.location.reload());
-  }, 15000);
+    if (!pageLoadSignaled) {
+      pageLoadSignaled = true;
+      window.dispatchEvent(new Event("page-data-ready"));
+    }
+  }, 9000);
   let stopAuthListener = null;
   if (auth) {
     authStateHandler = async (user) => {
@@ -1166,6 +1223,32 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
           await auth.authStateReady();
           if (authStartupExpired) return;
           if (auth.currentUser?.uid !== user.uid || !db) return;
+          try {
+            const cachedProfile = JSON.parse(localStorage.getItem("recovibeAdminProfile") || "null");
+            if (cachedProfile?.uid === user.uid) {
+              const cachedName = String(
+                cachedProfile.name ||
+                  [cachedProfile.firstName, cachedProfile.middleName, cachedProfile.lastName].filter(Boolean).join(" "),
+              ).trim();
+              if (cachedName) {
+                document.querySelector("[data-name]").textContent = cachedName.toUpperCase();
+                document.querySelector("[data-avatar]").textContent = cachedName
+                  .split(/\s+/)
+                  .slice(0, 2)
+                  .map((part) => part[0])
+                  .join("")
+                  .toUpperCase();
+              }
+              const cachedRole = getApprovalPosition(cachedProfile);
+              if (cachedRole) {
+                const roleElement = document.querySelector("[data-role]");
+                roleElement.textContent = cachedRole;
+                roleElement.title = cachedRole;
+              }
+            }
+          } catch (error) {
+            console.warn("Could not read the cached Admin profile for notifications:", error);
+          }
           const [adminResult, userResult] = await Promise.allSettled([
             getDoc(doc(db, "adminUser", user.uid)),
             getDoc(doc(db, "users", user.uid)),
@@ -1207,6 +1290,10 @@ import { auth, authReady, db, rtdb, isRtdbConfigured } from "../UserStudent/fire
           console.error("Could not verify notification-page Admin access:", error);
           root.innerHTML = '<div class="admin-error" role="alert">Could not verify your Admin access. <button class="admin-row-action" type="button" id="retryNotifications">Try again</button></div>';
           root.querySelector("#retryNotifications").addEventListener("click", () => window.location.reload());
+          if (!pageLoadSignaled) {
+            pageLoadSignaled = true;
+            window.dispatchEvent(new Event("page-data-ready"));
+          }
           return;
         }
         currentAdminUid = user.uid;

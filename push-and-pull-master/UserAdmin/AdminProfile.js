@@ -22,11 +22,18 @@ import { auth, authReady, db, isRtdbConfigured, rtdb } from "../UserStudent/fire
     namePattern = /^[A-Z][a-z]*(?: [A-Z][a-z]*)*$/,
     phonePattern = /^(09\d{9}|\+639\d{9})$/;
   let profileLoadExpired = false;
+  let pageLoadSignaled = false;
+  const signalProfilePageReady = () => {
+    if (pageLoadSignaled) return;
+    pageLoadSignaled = true;
+    window.dispatchEvent(new Event("page-data-ready"));
+  };
   const profileLoadTimer = setTimeout(() => {
     profileLoadExpired = true;
     root.innerHTML = '<div class="admin-error" role="alert">Could not load your verified Admin profile in time. <button class="admin-row-action" type="button" id="retryAdminProfile">Try again</button></div>';
     root.querySelector("#retryAdminProfile").addEventListener("click", () => window.location.reload());
-  }, 15000);
+    signalProfilePageReady();
+  }, 9000);
   try {
     await authReady;
     if (profileLoadExpired) return;
@@ -79,6 +86,7 @@ import { auth, authReady, db, isRtdbConfigured, rtdb } from "../UserStudent/fire
     console.error("Could not verify the signed-in Admin profile:", error);
     root.innerHTML = '<div class="admin-error" role="alert">Could not load your verified Admin profile. <button class="admin-row-action" type="button" id="retryAdminProfile">Try again</button></div>';
     root.querySelector("#retryAdminProfile").addEventListener("click", () => window.location.reload());
+    signalProfilePageReady();
     return;
   }
   let editing = false,
@@ -442,4 +450,5 @@ import { auth, authReady, db, isRtdbConfigured, rtdb } from "../UserStudent/fire
     }
   });
   display();
+  signalProfilePageReady();
 })();

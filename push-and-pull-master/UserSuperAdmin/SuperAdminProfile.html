@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-page-loading="true" data-page-waits-for-data="true">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -8,6 +8,52 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="SuperAdminProfile.css" />
+  <style id="page-preloader-style">
+    html[data-page-loading="true"] [data-page-load-container] { position: relative; }
+    #userAvatar:empty,
+    #organizerAvatar:empty,
+    #teacherAvatar:empty,
+    #teacherCalendarAvatar:empty,
+    #sidebar-user-avatar:empty,
+    #userName:empty,
+    #organizerName:empty,
+    #teacherName:empty,
+    #teacherCalendarName:empty,
+    #sidebar-user-name:empty { visibility: hidden !important; }
+    #navNotifBadge:empty { display: none !important; }
+    html[data-page-loading="true"] [data-page-load-container] > :not(.page-preloader),
+    html[data-page-load-error="true"] [data-page-load-container] > :not(.page-preloader) { visibility: hidden !important; }
+    html[data-page-loading="true"] [data-page-load-container][hidden] { display: block !important; }
+    .page-preloader {
+      position: absolute;
+      z-index: 20;
+      inset: 0;
+      display: grid;
+      min-height: 100vh;
+      place-content: center;
+      justify-items: center;
+      gap: 12px;
+      background: #f7f6f4;
+      color: #7a1f2e;
+      font: 500 15px/1.4 Inter, "Segoe UI", Arial, sans-serif;
+      text-align: center;
+    }
+    .page-preloader[hidden] { display: none !important; }
+    .page-preloader-spinner {
+      width: 42px;
+      height: 42px;
+      border: 4px solid #e7d9b8;
+      border-top-color: #7a1f2e;
+      border-radius: 50%;
+      animation: page-preloader-spin 800ms linear infinite;
+    }
+    .page-preloader-error { max-width: 28rem; padding: 18px; }
+    .page-preloader-retry { margin-top: 12px; }
+    @keyframes page-preloader-spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) {
+      .page-preloader-spinner { animation: none; border-color: #7a1f2e; }
+    }
+  </style>
   </head>
   <body>
     <svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute;overflow:hidden">
@@ -31,18 +77,22 @@
           <a href="UserManagement.html"><span class="organizer-nav-icon"><svg viewBox="0 0 20 20"><use href="#sa-users"/></svg></span><span>User Management</span></a>
           <a href="SuperAdminSystemSettings.html"><span class="organizer-nav-icon"><svg viewBox="0 0 20 20"><use href="#sa-settings"/></svg></span><span>System Settings</span></a>
           <a href="SuperAdminActSum.html"><span class="organizer-nav-icon"><svg viewBox="0 0 20 20"><use href="#sa-summary"/></svg></span><span>Activity Summary</span></a>
-          <a href="SuperAdminNotifications.html"><span class="organizer-nav-icon"><svg viewBox="0 0 20 20"><use href="#sa-bell"/></svg></span><span>Notifications</span></a>
+          <a href="SuperAdminNotification.html"><span class="organizer-nav-icon"><svg viewBox="0 0 20 20"><use href="#sa-bell"/></svg></span><span>Notifications</span></a>
           <a class="is-active" aria-current="page" href="SuperAdminProfile.html"><span class="organizer-nav-icon"><svg viewBox="0 0 20 20"><use href="#sa-profile"/></svg></span><span>Profile</span></a>
         </nav>
         <div class="sidebar-bottom"><div class="user-card"><div class="avatar" id="sidebar-user-avatar"></div><div class="user-meta"><div class="user-name" id="sidebar-user-name"></div><div class="user-role" id="sidebar-user-role"></div></div></div><a class="nav-item logout" href="SuperAdminLogin.html" id="superAdminLogout"><span class="nav-icon"><svg viewBox="0 0 20 20"><use href="#sa-logout"/></svg></span><span class="nav-label">Logout</span></a></div>
       </aside>
 
-      <main class="organizer-main" id="profileMain">
+      <main class="organizer-main" id="profileMain" data-page-load-container="true" aria-busy="true">
+    <div class="page-preloader" id="pagePreloader" role="status" aria-live="polite">
+      <span class="page-preloader-spinner" aria-hidden="true"></span>
+      <span>Loading...</span>
+    </div>
         <div class="content-container">
-          <header class="hero-banner"><div class="hero-left"><div class="hero-avatar" id="heroAvatar">S</div><div class="hero-info"><h1 class="hero-name" id="heroUserName">Super Admin</h1><div class="hero-badges"><span class="hero-badge">Super Admin</span></div></div></div><div class="hero-actions"><button type="button" class="btn-outlined-hero" id="changePassword">Change password</button></div></header>
+          <header class="hero-banner"><div class="hero-left"><div class="hero-avatar" id="heroAvatar"></div><div class="hero-info"><h1 class="hero-name" id="heroUserName"></h1><div class="hero-badges"><span class="hero-badge">Super Admin</span></div></div></div><div class="hero-actions"><button type="button" class="btn-outlined-hero" id="changePassword">Change password</button></div></header>
           <div class="profile-feedback-alert" id="profileFeedbackAlert" role="status" aria-live="polite" hidden><div class="alert-content"><span id="profileFeedbackText"></span></div><button type="button" class="alert-dismiss-btn" id="btnDismissFeedback" aria-label="Dismiss">&times;</button></div>
           <section class="profile-cards-grid" aria-label="Profile information">
-            <article class="profile-card"><div class="card-header-flex"><h2 class="card-title">Name</h2><button type="button" class="btn-outlined-card" id="btnEditName">Edit</button></div><div class="card-view-mode" id="nameCardView"><div class="fields-grid cols-3"><div class="field-item"><span class="field-label">First name</span><span class="field-value" id="viewFirstName">Super</span></div><div class="field-item"><span class="field-label">Middle name</span><span class="field-value" id="viewMiddleName"><span class="empty-muted">Not set</span></span></div><div class="field-item"><span class="field-label">Last name</span><span class="field-value" id="viewLastName">Admin</span></div></div></div><form class="card-edit-mode" id="nameCardEdit" hidden><div class="fields-grid cols-3"><div class="field-item"><label class="field-label" for="inputFirstName">First name</label><input class="card-input" id="inputFirstName" required/></div><div class="field-item"><label class="field-label" for="inputMiddleName">Middle name</label><input class="card-input" id="inputMiddleName"/></div><div class="field-item"><label class="field-label" for="inputLastName">Last name</label><input class="card-input" id="inputLastName" required/></div></div><div class="card-edit-footer"><span class="unsaved-count-text" id="nameUnsavedCount">No changes yet</span><div class="footer-actions"><button type="button" class="btn-secondary" id="nameCancelBtn">Cancel</button><button type="submit" class="btn-primary" id="nameSaveBtn">Save</button></div></div></form></article>
+            <article class="profile-card"><div class="card-header-flex"><h2 class="card-title">Name</h2><button type="button" class="btn-outlined-card" id="btnEditName">Edit</button></div><div class="card-view-mode" id="nameCardView"><div class="fields-grid cols-3"><div class="field-item"><span class="field-label">First name</span><span class="field-value" id="viewFirstName"></span></div><div class="field-item"><span class="field-label">Middle name</span><span class="field-value" id="viewMiddleName"><span class="empty-muted">Not set</span></span></div><div class="field-item"><span class="field-label">Last name</span><span class="field-value" id="viewLastName"></span></div></div></div><form class="card-edit-mode" id="nameCardEdit" hidden><div class="fields-grid cols-3"><div class="field-item"><label class="field-label" for="inputFirstName">First name</label><input class="card-input" id="inputFirstName" required/></div><div class="field-item"><label class="field-label" for="inputMiddleName">Middle name</label><input class="card-input" id="inputMiddleName"/></div><div class="field-item"><label class="field-label" for="inputLastName">Last name</label><input class="card-input" id="inputLastName" required/></div></div><div class="card-edit-footer"><span class="unsaved-count-text" id="nameUnsavedCount">No changes yet</span><div class="footer-actions"><button type="button" class="btn-secondary" id="nameCancelBtn">Cancel</button><button type="submit" class="btn-primary" id="nameSaveBtn">Save</button></div></div></form></article>
             <article class="profile-card"><div class="card-header-flex"><h2 class="card-title">Contact</h2><button type="button" class="btn-outlined-card" id="btnEditContact">Edit</button></div><div class="card-view-mode" id="contactCardView"><div class="fields-grid cols-2"><div class="field-item"><span class="field-label">Email address</span><span class="field-value" id="viewEmail">Not set</span></div><div class="field-item"><span class="field-label">Contact number</span><span class="field-value" id="viewContact"><span class="empty-muted">Not set</span></span></div></div></div><form class="card-edit-mode" id="contactCardEdit" hidden><div class="fields-grid cols-2"><div class="field-item"><label class="field-label" for="inputContactEmail">Email address</label><input class="card-input" id="inputContactEmail" type="email" required/></div><div class="field-item"><label class="field-label" for="inputContactPhone">Contact number</label><input class="card-input" id="inputContactPhone" type="tel"/></div></div><div class="card-edit-footer"><span class="unsaved-count-text" id="contactUnsavedCount">No changes yet</span><div class="footer-actions"><button type="button" class="btn-secondary" id="contactCancelBtn">Cancel</button><button type="submit" class="btn-primary" id="contactSaveBtn">Save</button></div></div></form></article>
             <article class="profile-card full-width-card"><div class="card-header-flex"><div class="card-title-locked-row"><h2 class="card-title">Super Admin details</h2><button type="button" class="btn-outlined-card" id="btnEditDetails">Edit</button></div></div><div class="card-view-mode" id="detailsCardView"><div class="fields-grid cols-4-responsive"><div class="field-item"><span class="field-label"><svg class="label-lock" viewBox="0 0 20 20" aria-hidden="true"><use href="#sa-lock"/></svg> ID</span><span class="field-value" id="viewAdminId">Not set</span></div><div class="field-item"><span class="field-label">Department / Office</span><span class="field-value" id="viewDepartment"><span class="empty-muted">Not set</span></span></div><div class="field-item"><span class="field-label">Designation</span><span class="field-value" id="viewDesignation"><span class="empty-muted">Not set</span></span></div><div class="field-item"><span class="field-label">Campus</span><span class="field-value" id="viewCampus"><span class="empty-muted">Not set</span></span></div></div></div><form class="card-edit-mode" id="detailsCardEdit" hidden><div class="fields-grid cols-4-responsive"><div class="field-item"><span class="field-label"><svg class="label-lock" viewBox="0 0 20 20" aria-hidden="true"><use href="#sa-lock"/></svg> ID</span><span class="field-value" id="editAdminId">Not set</span></div><div class="field-item"><label class="field-label" for="inputDepartment">Department / Office</label><input class="card-input" id="inputDepartment" /></div><div class="field-item"><label class="field-label" for="inputDesignation">Designation</label><input class="card-input" id="inputDesignation" /></div><div class="field-item"><label class="field-label" for="inputCampus">Campus</label><input class="card-input" id="inputCampus" /></div></div><div class="card-edit-footer"><span class="unsaved-count-text" id="detailsUnsavedCount">No changes yet</span><div class="footer-actions"><button type="button" class="btn-secondary" id="detailsCancelBtn">Cancel</button><button type="submit" class="btn-primary" id="detailsSaveBtn">Save</button></div></div></form></article>
           </section>
@@ -52,5 +102,189 @@
     <div class="account-form-modal" id="passwordFormModal" hidden><div class="modal-backdrop"></div><form class="modal-dialog" id="passwordForm"><button type="button" class="modal-close-btn" id="closePasswordModal">&times;</button><h2 class="modal-title">Change Password</h2><div class="form-field"><label for="currentPassword">Current Password</label><input class="card-input" id="currentPassword" type="password" required/></div><div class="form-field"><label for="newPassword">New Password</label><input class="card-input" id="newPassword" type="password" required minlength="6"/></div><div class="form-field"><label for="confirmPassword">Confirm New Password</label><input class="card-input" id="confirmPassword" type="password" required minlength="6"/></div><p class="account-form-status" id="passwordFormStatus"></p><div class="modal-footer"><button type="submit" class="btn-primary">Update Password</button></div></form></div>
     <script type="module" src="./superAdminGuard.js"></script>
     <script type="module" src="./SuperAdminProfile.js"></script>
+    <script>
+    (() => {
+      const root = document.documentElement;
+      const container = document.querySelector("[data-page-load-container]");
+      const preloader = document.getElementById("pagePreloader");
+      let completed = false;
+      let timeoutId;
+      const finish = (timedOut = false) => {
+        if (completed) return;
+        completed = true;
+        clearTimeout(timeoutId);
+        if (timedOut) {
+          root.removeAttribute("data-page-loading");
+          root.removeAttribute("data-page-load-error");
+          if (container) container.setAttribute("aria-busy", "false");
+          const existingError = container && container.querySelector("[role='alert'], .notification-source-warning, .page-load-error");
+          if (
+            existingError &&
+            !existingError.hidden &&
+            existingError.textContent.trim() &&
+            getComputedStyle(existingError).visibility !== "hidden" &&
+            existingError.getClientRects().length
+          ) {
+            preloader.hidden = true;
+            return;
+          }
+          root.setAttribute("data-page-load-error", "true");
+          preloader.classList.add("page-preloader-error");
+          preloader.innerHTML = "Could not load data. Please try again.<button class=\"page-preloader-retry\" type=\"button\">Retry</button>";
+          preloader.querySelector("button").addEventListener("click", () => window.location.reload());
+          return;
+        }
+        root.removeAttribute("data-page-loading");
+        root.removeAttribute("data-page-load-error");
+        if (container) container.setAttribute("aria-busy", "false");
+        preloader.hidden = true;
+      };
+      window.addEventListener("page-data-ready", () => finish(), { once: true });
+      if (root.hasAttribute("data-page-waits-for-data")) {
+        timeoutId = setTimeout(() => finish(true), 10000);
+      } else {
+        finish();
+      }
+    })();
+  </script>
+<script>
+   (() => {
+     const selector = 'a.logout, a.logout-link, a.admin-logout, #organizerLogout, #teacherLogout, #teacherCalendarLogout, #superAdminLogout, #logoutButton';
+     const style = document.createElement("style");
+     style.textContent = `
+       #rvLogoutConfirmOverlay{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;color:#292320;font:inherit}
+       #rvLogoutConfirmOverlay[hidden]{display:none}
+       #rvLogoutConfirmOverlay .confirm-modal-backdrop{position:absolute;inset:0;background:rgba(22,16,16,.56)}
+       #rvLogoutConfirmOverlay .confirm-modal-dialog{position:relative;box-sizing:border-box;width:min(400px,100%);max-height:calc(100vh - 32px);overflow-y:auto;margin:0;padding:24px;background:#fffdf8;border:1px solid #e6dcc9;border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,.28)}
+       #rvLogoutConfirmOverlay .confirm-modal-title{margin:0 0 12px;font-size:1.35rem}
+       #rvLogoutConfirmOverlay .confirm-modal-message{margin:0;line-height:1.5}
+       #rvLogoutConfirmOverlay .confirm-modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:24px}
+       #rvLogoutConfirmOverlay .confirm-modal-actions button{min-height:40px;padding:8px 18px;border:1px solid #7a1f2b;border-radius:8px;font:inherit;font-weight:600;cursor:pointer}
+       #rvLogoutConfirmOverlay .confirm-modal-actions .btn-secondary{background:transparent;color:#7a1f2b}
+       #rvLogoutConfirmOverlay .confirm-modal-actions .btn-primary{background:#7a1f2b;color:#fff}
+       #rvLogoutConfirmOverlay .confirm-modal-actions button:hover:not(:disabled){filter:brightness(.94)}
+       #rvLogoutConfirmOverlay .confirm-modal-actions button:focus-visible{outline:3px solid #c5a15b;outline-offset:2px}
+       #rvLogoutConfirmOverlay .confirm-modal-actions button:disabled{opacity:.65;cursor:wait}
+       #confirmModalOverlay{z-index:2147483647}
+     `;
+     document.head.appendChild(style);
+     let overlay = document.getElementById("confirmModalOverlay");
+     if (!overlay) {
+       const template = document.createElement("template");
+       const usesAccountModal = Boolean(document.querySelector(".account-form-modal"));
+       template.innerHTML = `<div id="rvLogoutConfirmOverlay" class="confirm-modal-overlay${usesAccountModal ? " account-form-modal" : ""}" role="dialog" aria-modal="true" aria-labelledby="rvLogoutConfirmTitle" hidden><div class="confirm-modal-backdrop"></div><div class="confirm-modal-dialog${usesAccountModal ? " modal-dialog" : ""}" tabindex="-1"><div class="confirm-modal-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="28" height="28"><path d="M12 9v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" stroke-linecap="round" stroke-linejoin="round"/></svg></div><h2 class="confirm-modal-title" id="rvLogoutConfirmTitle">Log out?</h2><p class="confirm-modal-message" id="rvLogoutConfirmMessage">Are you sure you want to log out of RecoVibe?</p><div class="confirm-modal-actions${usesAccountModal ? " modal-footer" : ""}"><button type="button" class="btn-secondary" data-rv-logout-cancel>Cancel</button><button type="button" class="btn-primary" data-rv-logout-confirm>Log out</button></div></div></div>`;
+       overlay = template.content.firstElementChild;
+       document.body.appendChild(overlay);
+     }
+     overlay.setAttribute("role", "dialog");
+     overlay.setAttribute("aria-modal", "true");
+     const title = overlay.querySelector("#confirmModalTitle, #rvLogoutConfirmTitle");
+     const message = overlay.querySelector("#confirmModalMessage, #rvLogoutConfirmMessage");
+     const cancel = overlay.querySelector("#confirmModalCancelBtn, [data-rv-logout-cancel]");
+     const confirm = overlay.querySelector("#confirmModalConfirmBtn, [data-rv-logout-confirm]");
+     const backdrop = overlay.querySelector(".confirm-modal-backdrop");
+     const panel = overlay.querySelector(".confirm-modal-dialog");
+     panel.tabIndex = -1;
+     title.textContent = "Log out?";
+     message.textContent = "Are you sure you want to log out of RecoVibe?";
+     cancel.textContent = "Cancel";
+     confirm.textContent = "Log out";
+     confirm.classList.remove("btn-danger");
+     confirm.classList.add("btn-primary");
+     let logoutControl = null;
+     let loggingOut = false;
+     let busySeen = false;
+     let timeoutId = 0;
+     let pollId = 0;
+     let observer = null;
+     const closeDialog = () => {
+       if (loggingOut) return;
+       overlay.hidden = true;
+       overlay.style.display = "none";
+       logoutControl?.focus();
+     };
+     const finishFailedLogout = () => {
+       if (!loggingOut) return;
+       loggingOut = false;
+       window.clearTimeout(timeoutId);
+       window.clearInterval(pollId);
+       observer?.disconnect();
+       observer = null;
+       overlay.removeAttribute("aria-busy");
+       cancel.disabled = false;
+       confirm.disabled = false;
+       confirm.textContent = "Log out";
+       cancel.focus();
+     };
+     document.addEventListener("click", (event) => {
+       const target = event.target instanceof Element ? event.target.closest("a, button") : null;
+       if (!target) return;
+       const label = (target.getAttribute("aria-label") || target.title || target.textContent).trim().toLowerCase();
+       if (!target.matches(selector) && label !== "logout") return;
+       if (target.dataset.rvLogoutProceed === "true") {
+         delete target.dataset.rvLogoutProceed;
+         return;
+       }
+       event.preventDefault();
+       event.stopImmediatePropagation();
+       if (!overlay.hidden) return;
+       logoutControl = target;
+       overlay.hidden = false;
+       overlay.style.display = "flex";
+       cancel.focus();
+     }, true);
+     cancel.addEventListener("click", closeDialog);
+     backdrop.addEventListener("click", closeDialog);
+     document.addEventListener("keydown", (event) => {
+       if (overlay.hidden) return;
+       if (event.key === "Escape") {
+         event.preventDefault();
+         event.stopPropagation();
+         closeDialog();
+         return;
+       }
+       if (event.key !== "Tab") return;
+       if (loggingOut) {
+         event.preventDefault();
+         return;
+       }
+       if (event.shiftKey && document.activeElement === cancel) {
+         event.preventDefault();
+         confirm.focus();
+       } else if (!event.shiftKey && document.activeElement === confirm) {
+         event.preventDefault();
+         cancel.focus();
+       }
+     }, true);
+     confirm.addEventListener("click", () => {
+       if (!logoutControl || loggingOut) return;
+       loggingOut = true;
+       busySeen = false;
+       cancel.disabled = true;
+       confirm.disabled = true;
+       confirm.textContent = "Logging out...";
+       overlay.setAttribute("aria-busy", "true");
+       panel.focus();
+       const checkLogoutState = () => {
+         const busy = logoutControl.disabled || logoutControl.getAttribute("aria-busy") === "true";
+         if (busy) busySeen = true;
+         else if (busySeen) finishFailedLogout();
+       };
+       observer = new MutationObserver(checkLogoutState);
+       observer.observe(logoutControl, { attributes: true, attributeFilter: ["disabled", "aria-busy"] });
+       pollId = window.setInterval(checkLogoutState, 100);
+       logoutControl.dataset.rvLogoutProceed = "true";
+       logoutControl.dataset.rvLogoutConfirmed = "true";
+       logoutControl.click();
+       delete logoutControl.dataset.rvLogoutConfirmed;
+       timeoutId = window.setTimeout(finishFailedLogout, 15000);
+     });
+     window.addEventListener("pagehide", () => {
+       window.clearTimeout(timeoutId);
+       window.clearInterval(pollId);
+       observer?.disconnect();
+     }, { once: true });
+   })();
+   </script>
   </body>
 </html>

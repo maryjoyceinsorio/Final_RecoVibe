@@ -8,6 +8,10 @@ body {
   display: none;
 }
 
+.sidebar .avatar:empty {
+  visibility: hidden;
+}
+
 #notificationMain {
   width: 100%;
 }

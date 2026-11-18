@@ -514,6 +514,7 @@ function hydrateUserProfile() {
   const btnSendCorrection = document.getElementById("btnSendCorrection");
   let correctionRequests = [];
   let correctionRequestsLoading = true;
+  let profilePageLoadSignaled = false;
   let correctionRequestsError = "";
   let correctionRequestsUnsubscribe = null;
   let correctionRequestsTimeout = null;
@@ -1084,11 +1085,19 @@ function hydrateUserProfile() {
     if (correctionRequestsError) {
       correctionRequestsContent.innerHTML = `<p class="cr-state" role="alert">${escapeCorrectionHtml(correctionRequestsError)}</p><button class="cr-retry-button" type="button" data-retry-correction-requests>Retry</button>`;
       updateCorrectionSubmitButton();
+      if (!profilePageLoadSignaled) {
+        profilePageLoadSignaled = true;
+        window.dispatchEvent(new Event("page-data-ready"));
+      }
       return;
     }
     if (!correctionRequests.length) {
       correctionRequestsContent.innerHTML = '<p class="cr-state">No correction requests yet.</p>';
       updateCorrectionSubmitButton();
+      if (!profilePageLoadSignaled) {
+        profilePageLoadSignaled = true;
+        window.dispatchEvent(new Event("page-data-ready"));
+      }
       return;
     }
 
@@ -1121,6 +1130,10 @@ function hydrateUserProfile() {
     }).join("");
     updatePendingCorrectionFields();
     updateCorrectionSubmitButton();
+    if (!profilePageLoadSignaled) {
+      profilePageLoadSignaled = true;
+      window.dispatchEvent(new Event("page-data-ready"));
+    }
   }
 
   function updatePendingCorrectionFields() {
@@ -1603,7 +1616,9 @@ function hydrateUserProfile() {
     logoutBtn.dataset.wired = "true";
     logoutBtn.addEventListener("click", async (event) => {
       event.preventDefault();
-      const confirmed = await showConfirmation({
+      const confirmedByLogoutDialog = logoutBtn.dataset.rvLogoutConfirmed === "true";
+      delete logoutBtn.dataset.rvLogoutConfirmed;
+      const confirmed = confirmedByLogoutDialog || await showConfirmation({
         title: "Log Out?",
         message: "Are you sure you want to log out of your RecoVibe account?",
         confirmText: "Log Out",

@@ -89,9 +89,13 @@ a {
   width: 264px;
   flex-shrink: 0;
   height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   position: sticky;
   top: 0;
+  left: 0;
   overflow: hidden;
+  box-sizing: border-box;
   background: linear-gradient(
     180deg,
     #7a1f2e 0%,
@@ -118,6 +122,7 @@ a {
 
 .sidebar-top {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
   margin-bottom: 28px;
@@ -221,7 +226,9 @@ a {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 .nav-item {
   display: flex;
@@ -304,6 +311,7 @@ a {
 }
 
 .sidebar-bottom {
+  flex: 0 0 auto;
   margin-top: auto;
   padding-top: 14px;
   border-top: 1px solid rgba(255, 255, 255, 0.14);
@@ -1984,6 +1992,7 @@ a {
     flex-direction: row;
     min-width: 0;
     overflow-x: auto;
+    overflow-y: hidden;
     gap: 4px;
     padding-top: 0;
     scrollbar-width: none;

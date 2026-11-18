@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en" data-page-loading="true">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Notifications | Super Admin</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+      background: #f7f5f5;
+      color: #333;
+      font: 16px/1.5 Arial, sans-serif;
+    }
+    .page-status {
+      display: grid;
+      justify-items: center;
+      gap: 12px;
+      padding: 24px;
+      text-align: center;
+    }
+    .spinner {
+      width: 36px;
+      height: 36px;
+      border: 3px solid #d6bd82;
+      border-top-color: #7a1f2e;
+      border-radius: 50%;
+      animation: spin 900ms linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) {
+      .spinner { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page-status" role="status" aria-live="polite">
+    <span class="spinner" aria-hidden="true"></span>
+    <span id="pageMessage">Loading...</span>
+  </main>
+  <script>
+    document.getElementById("pageMessage").textContent =
+      "Notifications are not available on this page yet.";
+    document.documentElement.removeAttribute("data-page-loading");
+  </script>
+</body>
+</html>

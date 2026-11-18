@@ -229,25 +229,25 @@
       event.room || event.roomNumber,
     ].filter(Boolean).join(" · ") || "N/A";
     const venueType = event.venueType || event.weatherContingency || "N/A";
-    const capacity =
-      event.maxCapacity ??
-      (event.capacityMode === "N/A"
-        ? null
-        : event.maxSlots ?? event.capacity ?? event.slots);
+    const rawCapacity =
+      event.capacity ?? event.maxCapacity ?? event.maxSlots ?? event.slots;
+    const parsedCapacity = rawCapacity == null || rawCapacity === ""
+      ? NaN
+      : Number(rawCapacity);
     const capacityKnown =
-      capacity != null &&
-      [event.maxCapacity, event.maxSlots, event.capacity, event.slots].some(
-        (value) => value != null,
-      );
-    const noCapacityLimit = capacity == null && event.capacityMode === "N/A";
+      Number.isFinite(parsedCapacity) && parsedCapacity >= 0;
+    const capacity = capacityKnown ? Math.floor(parsedCapacity) : null;
+    const noCapacityLimit =
+      capacity == null && event.capacityMode === "N/A";
+    const registeredCount = Math.max(
+      0,
+      Math.floor(Number(event.registeredCount) || 0),
+    );
     const slotsLeft =
-      event.slotsLeft ??
-      event.availableSlots ??
-      event.slotsOpen ??
-      (capacity == null
+      capacity == null
         ? Infinity
-        : Math.max(0, Number(capacity) - Number(event.registeredCount || 0)));
-    const openSlots = event.slotsOpen ?? event.availableSlots ?? slotsLeft;
+        : Math.max(0, Math.min(capacity, capacity - registeredCount));
+    const openSlots = slotsLeft;
     const expectedParticipants =
       event.expectedParticipants ?? event.registeredCount ??
       (!capacityKnown ? "N/A" : Math.max(0, Number(capacity) - Number(slotsLeft || 0)));
@@ -510,24 +510,26 @@
         ? null
         : Math.max(
             0,
-            Number(event.maxSlots ?? event.capacity ?? event.slots ?? 0) || 0,
+            Math.floor(
+              Number(
+                event.capacity ??
+                  event.maxCapacity ??
+                  event.maxSlots ??
+                  event.slots ??
+                  0,
+              ) || 0,
+            ),
           );
     const openSlots = (event) => {
       if (event.capacityMode === "N/A") return Infinity;
-      const stored = readObject(slotsKey)[String(event.id || event.eventId)];
       const eventCapacity = capacity(event);
+      const registeredCount = Math.max(
+        0,
+        Math.floor(Number(event.registeredCount) || 0),
+      );
       return Math.max(
         0,
-        Number(
-          stored !== undefined
-            ? stored
-            : (event.slotsOpen ??
-                event.availableSlots ??
-                event.slots ??
-                (eventCapacity === null
-                  ? Infinity
-                  : eventCapacity - Number(event.registeredCount || 0))),
-        ) || 0,
+        Math.min(eventCapacity, eventCapacity - registeredCount),
       );
     };
     const categoryTone = (value) => {

@@ -1,4 +1,10 @@
-import { signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {
+  browserLocalPersistence,
+  browserSessionPersistence,
+  setPersistence,
+  signInWithEmailAndPassword,
+  signOut,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { auth, authReady, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
 
@@ -10,6 +16,43 @@ import { auth, authReady, db, isFirebaseConfigured } from "../UserStudent/fireba
   const passwordInput = document.getElementById("login-pass");
   const loginButton = document.getElementById("login-submit");
   const banner = document.getElementById("login-banner");
+  const rememberMe = document.getElementById("remember-me");
+  const rememberedEmailKey = "rememberedEmail_event_organizer";
+  let signInVerified = false;
+
+  function clearRememberedEmail() {
+    try {
+      localStorage.removeItem(rememberedEmailKey);
+    } catch (error) {
+      console.warn("[EventOrganizerLogin] Could not clear remembered email:", error?.code || "unknown");
+    }
+  }
+
+  function saveRememberedEmail(email) {
+    if (!rememberMe.checked) {
+      clearRememberedEmail();
+      return;
+    }
+    try {
+      localStorage.setItem(rememberedEmailKey, email);
+    } catch (error) {
+      console.warn("[EventOrganizerLogin] Could not save remembered email:", error?.code || "unknown");
+    }
+  }
+
+  try {
+    const rememberedEmail = localStorage.getItem(rememberedEmailKey);
+    if (rememberedEmail) {
+      emailInput.value = rememberedEmail;
+      rememberMe.checked = true;
+    }
+  } catch (error) {
+    console.warn("[EventOrganizerLogin] Could not read remembered email:", error?.code || "unknown");
+  }
+  rememberMe.addEventListener("change", () => {
+    if (!rememberMe.checked) clearRememberedEmail();
+  });
+
   const setInvalid = (id, invalid) =>
     document.getElementById(id).classList.toggle("invalid", invalid);
   let signingIn = false;
@@ -91,9 +134,13 @@ import { auth, authReady, db, isFirebaseConfigured } from "../UserStudent/fireba
     setInvalid("field-email", !validEmail);
     setInvalid("field-pass", !password);
     banner.classList.remove("show");
-    if (!validEmail || !password) return;
+    if (!validEmail || !password) {
+      clearRememberedEmail();
+      return;
+    }
 
     if (!isFirebaseConfigured || !auth || !db) {
+      clearRememberedEmail();
       banner.textContent = "Sign in is unavailable. Please contact support.";
       banner.classList.add("show");
       return;
@@ -104,6 +151,7 @@ import { auth, authReady, db, isFirebaseConfigured } from "../UserStudent/fireba
         localStorage.getItem("recovibeSystemSettings") || "{}",
       );
       if (settings.loginEnabled === false) {
+        clearRememberedEmail();
         banner.textContent =
           "System maintenance is in progress. Organizer sign-in is temporarily disabled.";
         banner.classList.add("show");
@@ -122,6 +170,17 @@ import { auth, authReady, db, isFirebaseConfigured } from "../UserStudent/fireba
     let authenticated = false;
     try {
       await authReady;
+      try {
+        await setPersistence(
+          auth,
+          rememberMe.checked ? browserLocalPersistence : browserSessionPersistence,
+        );
+      } catch (persistenceError) {
+        console.warn(
+          "[EventOrganizerLogin] Could not set auth persistence; using the default:",
+          persistenceError?.code || "unknown",
+        );
+      }
       const credential = await signInWithEmailAndPassword(auth, email, password);
       authenticated = true;
       banner.textContent = "Verifying organizer account...";
@@ -141,6 +200,8 @@ import { auth, authReady, db, isFirebaseConfigured } from "../UserStudent/fireba
         "recovibeOrganizerProfile",
         JSON.stringify(organizerProfile),
       );
+      saveRememberedEmail(email);
+      signInVerified = true;
       window.location.assign("EventOrganizerDashBoard.html");
     } catch (error) {
       if (authenticated) {
@@ -188,6 +249,7 @@ import { auth, authReady, db, isFirebaseConfigured } from "../UserStudent/fireba
       }
       banner.classList.add("show");
     } finally {
+      if (!signInVerified) clearRememberedEmail();
       signingIn = false;
       loginButton.disabled = false;
       loginButton.textContent = "Sign in";
@@ -202,10 +264,43 @@ import { auth, authReady, db, isFirebaseConfigured } from "../UserStudent/fireba
   passwordInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") handleSignIn();
   });
-  document.getElementById("pass-toggle").addEventListener("click", function () {
-    const visible = passwordInput.type === "password";
-    passwordInput.type = visible ? "text" : "password";
-    this.setAttribute("aria-label", visible ? "Hide password" : "Show password");
-    this.setAttribute("aria-pressed", String(visible));
+  const passwordToggle = document.getElementById("pass-toggle");
+  let passwordVisible = false;
+  let inputHadFocus = false;
+  let selectionStart = null;
+  let selectionEnd = null;
+  let selectionDirection = "none";
+
+  passwordInput.addEventListener("blur", () => {
+    selectionStart = passwordInput.selectionStart;
+    selectionEnd = passwordInput.selectionEnd;
+    selectionDirection = passwordInput.selectionDirection;
+  });
+  passwordToggle.addEventListener("mousedown", (event) => {
+    inputHadFocus = document.activeElement === passwordInput;
+    selectionStart = passwordInput.selectionStart;
+    selectionEnd = passwordInput.selectionEnd;
+    selectionDirection = passwordInput.selectionDirection;
+    if (inputHadFocus) event.preventDefault();
+  });
+  passwordToggle.addEventListener("click", () => {
+    const restoreFocus = inputHadFocus;
+    inputHadFocus = false;
+    if (selectionStart === null || selectionEnd === null) {
+      selectionStart = passwordInput.selectionStart;
+      selectionEnd = passwordInput.selectionEnd;
+      selectionDirection = passwordInput.selectionDirection;
+    }
+    passwordVisible = !passwordVisible;
+    passwordInput.type = passwordVisible ? "text" : "password";
+    passwordToggle.classList.toggle("is-visible", passwordVisible);
+    passwordToggle.setAttribute("aria-label", passwordVisible ? "Hide password" : "Show password");
+    passwordToggle.setAttribute("aria-pressed", String(passwordVisible));
+    requestAnimationFrame(() => {
+      if (restoreFocus) passwordInput.focus({ preventScroll: true });
+      if (selectionStart !== null && selectionEnd !== null) {
+        passwordInput.setSelectionRange(selectionStart, selectionEnd, selectionDirection);
+      }
+    });
   });
 })();

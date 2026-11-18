@@ -359,6 +359,97 @@
   outline: 2px solid rgb(216 159 58 / 40%);
 }
 
+.sa-password-toggle {
+  position: relative;
+  min-width: 0;
+}
+
+.sa-password-toggle input {
+  padding-right: 44px;
+}
+
+.sa-password-toggle input::-ms-reveal,
+.sa-password-toggle input::-ms-clear {
+  display: none;
+}
+
+.sa-password-toggle-button {
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  padding: 0;
+  transform: translateY(-50%);
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #51484a;
+  cursor: pointer;
+  transition: background-color 150ms ease, transform 150ms ease;
+}
+
+.sa-password-toggle-button:hover {
+  background: #eee8e7;
+}
+
+.sa-password-toggle-button:active {
+  transform: translateY(-50%) scale(0.92);
+}
+
+.sa-password-toggle-button:focus-visible {
+  outline: 2px solid #72141c;
+  outline-offset: 2px;
+}
+
+.sa-password-toggle-button svg {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  pointer-events: none;
+  transition: opacity 200ms ease, transform 200ms ease;
+}
+
+.sa-password-toggle .sa-password-eye {
+  opacity: 1;
+  transform: scale(1) rotate(0deg);
+}
+
+.sa-password-toggle .sa-password-eye-slash {
+  opacity: 0;
+  transform: scale(0.9) rotate(-8deg);
+}
+
+.sa-password-toggle.is-visible .sa-password-eye {
+  opacity: 0;
+  transform: scale(0.9) rotate(8deg);
+}
+
+.sa-password-toggle.is-visible .sa-password-eye-slash {
+  opacity: 1;
+  transform: scale(1) rotate(0deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sa-password-toggle-button,
+  .sa-password-toggle-button svg {
+    transition: none;
+  }
+
+  .sa-password-toggle-button:active {
+    transform: translateY(-50%);
+  }
+
+  .sa-password-toggle .sa-password-eye,
+  .sa-password-toggle .sa-password-eye-slash,
+  .sa-password-toggle.is-visible .sa-password-eye,
+  .sa-password-toggle.is-visible .sa-password-eye-slash {
+    transform: none;
+  }
+}
+
 #new-user-role-suffix {
   text-transform: uppercase;
 }

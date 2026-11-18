@@ -22,8 +22,16 @@ import { auth, rtdb, functions } from "../UserStudent/firebaseConfig.js";
   let draftsRef = null;
   let indexLoaded = false;
   let draftsLoaded = false;
+  const initialEventReadsPending = new Set();
+  let pageLoadSignaled = false;
   let loadErrorOccurred = false;
   let missingNewTimer = null;
+
+  function signalPageReadyIfLoaded() {
+    if (pageLoadSignaled || !indexLoaded || !draftsLoaded || initialEventReadsPending.size) return;
+    pageLoadSignaled = true;
+    window.dispatchEvent(new Event("page-data-ready"));
+  }
 
   // Keep in sync with the other role's page.
   const escapeHTML = (value) =>
@@ -374,8 +382,11 @@ import { auth, rtdb, functions } from "../UserStudent/firebaseConfig.js";
 
     if (!rtdb) {
       loadErrorOccurred = true;
+      indexLoaded = true;
+      draftsLoaded = true;
       showNotice("Couldn't load your events.");
       render();
+      signalPageReadyIfLoaded();
       return;
     }
 
@@ -385,6 +396,12 @@ import { auth, rtdb, functions } from "../UserStudent/firebaseConfig.js";
       (snapshot) => {
         indexLoaded = true;
         const ids = new Set(Object.keys(snapshot.val() || {}));
+        if (!pageLoadSignaled) {
+          ids.forEach((id) => {
+            initialEventReadsPending.add(`${id}:event`);
+            initialEventReadsPending.add(`${id}:approval`);
+          });
+        }
         [...activeRefs.keys()].forEach((idKey) => {
           const rawId = idKey.split(":")[0];
           if (!ids.has(rawId)) {
@@ -392,8 +409,11 @@ import { auth, rtdb, functions } from "../UserStudent/firebaseConfig.js";
             activeRefs.delete(idKey);
             eventsById.delete(rawId);
             approvalsById.delete(rawId);
+            initialEventReadsPending.delete(`${rawId}:event`);
+            initialEventReadsPending.delete(`${rawId}:approval`);
           }
         });
+        signalPageReadyIfLoaded();
 
         ids.forEach((id) => {
           if (activeRefs.has(id)) return;
@@ -410,6 +430,8 @@ import { auth, rtdb, functions } from "../UserStudent/firebaseConfig.js";
                 activeRefs.delete(id);
                 off(eventRef);
                 renderOwnedEvents();
+                initialEventReadsPending.delete(`${id}:event`);
+                signalPageReadyIfLoaded();
                 return;
               }
               eventsById.set(id, {
@@ -421,31 +443,48 @@ import { auth, rtdb, functions } from "../UserStudent/firebaseConfig.js";
                 location: event.location || event.venue || "",
               });
               renderOwnedEvents();
+              initialEventReadsPending.delete(`${id}:event`);
+              signalPageReadyIfLoaded();
             },
             (error) => {
               console.error("Could not load owned teacher event:", error);
               loadErrorOccurred = true;
               renderOwnedEvents();
+              initialEventReadsPending.delete(`${id}:event`);
+              signalPageReadyIfLoaded();
             },
           );
 
-          onValue(approvalRef, (approvalSnapshot) => {
-            if (approvalSnapshot.exists()) {
-              approvalsById.set(id, approvalSnapshot.val());
-            }
-            renderOwnedEvents();
-          });
+          onValue(
+            approvalRef,
+            (approvalSnapshot) => {
+              if (approvalSnapshot.exists()) {
+                approvalsById.set(id, approvalSnapshot.val());
+              }
+              renderOwnedEvents();
+              initialEventReadsPending.delete(`${id}:approval`);
+              signalPageReadyIfLoaded();
+            },
+            (error) => {
+              console.error("Could not load teacher event approval:", error);
+              initialEventReadsPending.delete(`${id}:approval`);
+              signalPageReadyIfLoaded();
+            },
+          );
 
           activeRefs.set(id, eventRef);
           activeRefs.set(`${id}:approval`, approvalRef);
         });
 
         renderOwnedEvents();
+        signalPageReadyIfLoaded();
       },
       (error) => {
         console.error("Could not load teacher event index:", error);
         loadErrorOccurred = true;
+        indexLoaded = true;
         renderOwnedEvents();
+        signalPageReadyIfLoaded();
       },
     );
 
@@ -476,11 +515,14 @@ import { auth, rtdb, functions } from "../UserStudent/firebaseConfig.js";
             ]),
         );
         renderOwnedEvents();
+        signalPageReadyIfLoaded();
       },
       (error) => {
         console.error("Could not load teacher drafts:", error);
         loadErrorOccurred = true;
+        draftsLoaded = true;
         renderOwnedEvents();
+        signalPageReadyIfLoaded();
       },
     );
   }
@@ -1061,6 +1103,11 @@ import { auth, rtdb, functions } from "../UserStudent/firebaseConfig.js";
     } catch (error) {
       console.error("Could not verify teacher role:", error);
       showNotice("Couldn't verify your account. Please sign in again.");
+      loadErrorOccurred = true;
+      indexLoaded = true;
+      draftsLoaded = true;
+      render();
+      signalPageReadyIfLoaded();
     }
   });
 })();

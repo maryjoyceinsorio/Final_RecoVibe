@@ -22,6 +22,7 @@ import {
   isFirebaseConfigured,
   isRtdbConfigured,
 } from "../UserStudent/firebaseConfig.js";
+import { mountHelpBot } from "../recoVibeHelpBot.js";
 
 (() => {
   "use strict";
@@ -37,6 +38,12 @@ import {
   let sharedNotificationItems = [];
   let dashboardLoadTimer;
   let dashboardLoadExpired = false;
+  let pageLoadSignaled = false;
+  function signalDashboardPageReady() {
+    if (pageLoadSignaled) return;
+    pageLoadSignaled = true;
+    window.dispatchEvent(new Event("page-data-ready"));
+  }
   const dashboardTableState = {
     query: "",
     status: "",
@@ -109,6 +116,7 @@ import {
     }
     root.innerHTML = `<div class="admin-error" role="alert">${message} <button class="admin-row-action" id="retryDashboardData" type="button">Try again</button></div>`;
     root.querySelector("#retryDashboardData")?.addEventListener("click", init);
+    signalDashboardPageReady();
   }
   function getCurrentAdminStage(adminProfile) {
     const normalize = (value) => String(value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -754,16 +762,18 @@ import {
     if (!isFirebaseConfigured || !db) {
       root.innerHTML =
         '<div class="admin-error">Event data is unavailable. Please contact support.</div>';
+      signalDashboardPageReady();
       return;
     }
-    root.innerHTML = '<div class="admin-loading">Loading event activity…</div>';
+    root.replaceChildren();
     dashboardLoadExpired = false;
     dashboardLoadTimer = setTimeout(() => {
       dashboardLoadExpired = true;
       unsubscribeEvents?.();
       root.innerHTML = '<div class="admin-error" role="alert">Could not load dashboard data in time. <button class="admin-row-action" id="retryDashboardData" type="button">Try again</button></div>';
       root.querySelector("#retryDashboardData")?.addEventListener("click", init);
-    }, 15000);
+      signalDashboardPageReady();
+    }, 9000);
 
     try {
       await authReady;
@@ -818,6 +828,11 @@ import {
         return;
       }
       profile = { ...verifiedProfile, uid: user.uid, email: user.email || "" };
+      mountHelpBot({
+        role: String(profile.roleSuffix || "").trim().toUpperCase() === "OSAS"
+          ? "osas"
+          : "admin",
+      });
       const name = profile.name || [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(" ") || user.displayName || user.email?.split("@")[0] || "";
       document.querySelector("[data-name]").textContent = name.toUpperCase();
       document.querySelector("[data-avatar]").textContent = initials(name);
@@ -835,6 +850,7 @@ import {
           dashboardLoadExpired = false;
           firestoreEvents = snapshot.docs.map(normalizeEvent);
           render();
+          signalDashboardPageReady();
         },
         (error) => {
           unsubscribeEvents?.();

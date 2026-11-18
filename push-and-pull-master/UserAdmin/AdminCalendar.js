@@ -31,7 +31,13 @@ import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase
     loadedMonthDataKey = "",
     authUnsubscribe = null,
     authTimeout = null,
-    startupAttempt = 0;
+    startupAttempt = 0,
+    pageLoadSignaled = false;
+  const signalCalendarPageReady = () => {
+    if (pageLoadSignaled) return;
+    pageLoadSignaled = true;
+    window.dispatchEvent(new Event("page-data-ready"));
+  };
   const monthNames = [
     "January",
     "February",
@@ -152,6 +158,7 @@ import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase
     statusElement.hidden = false;
     calendarLayout.hidden = true;
     statusElement.querySelector("#retryCalendar").addEventListener("click", start);
+    signalCalendarPageReady();
   }
   function start() {
     stopAuthWait();
@@ -176,7 +183,7 @@ import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase
       if (finish()) {
         showStartError(new Error("Calendar startup timed out."));
       }
-    }, 15000);
+    }, 9000);
     authUnsubscribe = onAuthStateChanged(auth, async (user) => {
       if (finished || attempt !== startupAttempt) return;
       if (!user) {
@@ -202,6 +209,7 @@ import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase
           } else if (verified && loaded) {
             calendarLayout.hidden = false;
             statusElement.hidden = true;
+            signalCalendarPageReady();
           }
         }
       }
@@ -586,19 +594,7 @@ import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase
       (item) => String(item.eventId || item.id) === String(id),
     );
     if (!event || event.capacityMode === "N/A") return 0;
-    const capacity = Number(
-      event.maxCapacity ?? event.capacity ?? event.maxSlots,
-    );
-    const open = Number(
-      event.openSlots ??
-        event.slotsOpen ??
-        event.availableSlots ??
-        event.slots ??
-        capacity,
-    );
-    return Number.isFinite(capacity) && Number.isFinite(open)
-      ? Math.max(0, capacity - open)
-      : 0;
+    return Math.max(0, Number(event.registeredCount) || 0);
   }
   function closePopup() {
     if (!activePopup) return;

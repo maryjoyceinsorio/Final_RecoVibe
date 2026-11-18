@@ -2,22 +2,18 @@
 
 import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
-  ref,
+  collection,
+  onSnapshot,
   query,
-  orderByChild,
-  startAt,
-  endAt,
-  onValue,
-  off,
-} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+  where,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {
   auth,
   authReady,
-  rtdb,
-  isRtdbConfigured,
+  db,
+  isFirebaseConfigured,
 } from "../UserStudent/firebaseConfig.js";
 import { fetchMonthHolidays } from "../holidayService.js";
-import { isEventVisibleToStudent } from "../UserStudent/eventAudience.js";
 import { getEventDateRange } from "../UserStudent/calendarDateRange.mjs";
 
 (() => {
@@ -75,6 +71,7 @@ import { getEventDateRange } from "../UserStudent/calendarDateRange.mjs";
     publicEvents: [],
     upcomingEvents: [],
     organizerUnpublishedEvents: [],
+    eventsById: new Map(),
     holidays: [],
     isLoading: true,
     loadError: false,
@@ -82,12 +79,31 @@ import { getEventDateRange } from "../UserStudent/calendarDateRange.mjs";
     organizerProfile: null,
   };
 
-  let activeFallbackTimer = null;
-  let activePublicEventsRef = null;
-  let activePublicEventsCallback = null;
-  let activeOrganizerEventsRef = null;
-  let activeOrganizerEventsCallback = null;
+  let activeEventUnsubscribers = [];
+  let eventSnapshotsBySource = new Map();
+  let pendingInitialSnapshots = new Set();
+  let failedEventSources = new Set();
+  let initialSnapshotTimeout = null;
+  let eventRenderFrame = null;
+  let activeDetailEventId = null;
+  let activeDetailVersion = null;
+  let noticeElement = null;
+  let noticeTimeout = null;
+  let initialCalendarEventsReady = false;
+  let initialCalendarHolidaysReady = false;
+  let pageLoadSignaled = false;
+  const invalidDateEventIds = new Set();
   let holidayRequestSequence = 0;
+
+  function signalCalendarPageReady() {
+    if (
+      pageLoadSignaled ||
+      !initialCalendarEventsReady ||
+      !initialCalendarHolidaysReady
+    ) return;
+    pageLoadSignaled = true;
+    window.dispatchEvent(new Event("page-data-ready"));
+  }
 
   // --- Philippine Time Date Helpers ---
   function toPhDateStr(timestampOrString) {
@@ -242,68 +258,55 @@ import { getEventDateRange } from "../UserStudent/calendarDateRange.mjs";
   function isOwnOrganizerEvent(event) {
     if (isTeacher || !event) return false;
     const uid = state.currentUser?.uid;
-    if (uid && (event.organizerId === uid || event.organizerUid === uid)) {
-      return true;
-    }
-    if (event.isOwnEvent === true) return true;
-    const myOrg = state.organizerProfile?.organization;
-    if (
-      myOrg &&
-      event.organization &&
-      String(event.organization).trim().toLowerCase() ===
-        String(myOrg).trim().toLowerCase()
-    ) {
-      return true;
-    }
-    return false;
+    return Boolean(
+      uid &&
+        [event.organizerUid, event.organizerId, event.createdBy].some(
+          (ownerId) => String(ownerId || "") === String(uid),
+        ),
+    );
   }
 
   function isUnpublishedEvent(event) {
     if (!event) return false;
     const status = String(event.status || "").trim().toLowerCase();
-    return [
-      "draft",
-      "pending",
-      "needs revision",
-      "needs_revision",
-      "rejected",
-      "cancelled",
-      "canceled",
-    ].includes(status);
+    if (["cancelled", "canceled"].includes(status)) return true;
+    return !(
+      ["published", "completed", "rescheduled"].includes(status) ||
+      String(event.publicationStatus || "").trim().toLowerCase() === "published" ||
+      event.published === true ||
+      event.isPublished === true
+    );
   }
 
-function normalizeEvent(id, data) {
+  function normalizeEvent(id, data) {
     const dateRange = getEventDateRange(data);
-    let startMs = 0;
-    if (typeof data.startAt === "number") {
-      startMs = data.startAt;
-    } else if (data.startAt) {
-      startMs = new Date(data.startAt).getTime();
-    } else if (dateRange) {
-      startMs = dateRange.start.getTime();
-    } else if (data.dateISO || data.date) {
-      startMs = new Date(`${data.dateISO || data.date}T08:00:00+08:00`).getTime();
+    if (
+      !dateRange ||
+      Number.isNaN(dateRange.start.getTime()) ||
+      Number.isNaN(dateRange.end.getTime())
+    ) {
+      if (!invalidDateEventIds.has(String(id))) {
+        invalidDateEventIds.add(String(id));
+        console.warn("[OrganizerCalendar] Skipping event with unusable date.");
+      }
+      return null;
     }
 
-    let endMs = 0;
-    if (typeof data.endAt === "number") {
-      endMs = data.endAt;
-    } else if (data.endAt) {
-      endMs = new Date(data.endAt).getTime();
-    } else if (dateRange) {
-      endMs = dateRange.end.getTime();
-    } else if (data.endDateISO || data.endDate) {
-      endMs = new Date(`${data.endDateISO || data.endDate}T17:00:00+08:00`).getTime();
-    } else {
-      endMs = startMs;
-    }
-
-    let startDay = toPhDateStr(startMs || data.startAt || data.dateISO || data.date);
-    let endDay = toPhDateStr(endMs || data.endAt || startMs);
+    const startMs = dateRange.start.getTime();
+    const endMs = dateRange.end.getTime();
+    const startDay = toPhDateStr(startMs);
+    let endDay = toPhDateStr(endMs);
 
     // Safety guard laban sa overflow o mahabang araw kung walang explicit end date
-    if (!data.endAt && !data.endDate && !data.endDateISO && (!dateRange || dateRange.start.getTime() === dateRange.end.getTime())) {
+    if (!data.endAt && !data.endDate && !data.endDateISO && dateRange.start.getTime() === dateRange.end.getTime()) {
       endDay = startDay;
+    }
+    if (!startDay || !endDay || startDay > endDay) {
+      if (!invalidDateEventIds.has(String(id))) {
+        invalidDateEventIds.add(String(id));
+        console.warn("[OrganizerCalendar] Skipping event with unusable date.");
+      }
+      return null;
     }
 
     const title = data.name || data.eventName || data.title || "Untitled event";
@@ -336,7 +339,7 @@ function normalizeEvent(id, data) {
       categoryKey,
       isMultiDay: Boolean(startDay && endDay && startDay !== endDay),
       isOwn: isOwnOrganizerEvent(data),
-      isUnpublished: isUnpublishedEvent({ status }),
+      isUnpublished: isUnpublishedEvent({ ...data, status }),
       statusLabel: status.charAt(0).toUpperCase() + status.slice(1),
       time:
         data.time ||
@@ -374,46 +377,19 @@ function normalizeEvent(id, data) {
   function getAllEvents() {
     const map = new Map();
 
-    state.publicEvents.forEach((ev) => {
-      map.set(String(ev.id), ev);
-    });
-
-    state.upcomingEvents.forEach((ev) => {
-      if (!map.has(String(ev.id))) {
-        map.set(String(ev.id), ev);
-      }
-    });
-
-    if (!isTeacher) {
-      // Organizers see their own unpublished events
-      state.organizerUnpublishedEvents.forEach((ev) => {
-        map.set(String(ev.id), ev);
-      });
-    }
+    state.eventsById.forEach((event, id) => map.set(String(id), event));
 
     // Merge monthly holidays
     state.holidays.forEach((hol) => {
       map.set(String(hol.id), hol);
     });
 
-    const deduplicated = new Map();
-    const duplicateRecords = [];
-    map.forEach((event) => {
-      const eventKey = [
-        String(event.title || "").trim().toLowerCase(),
-        event.startDay || "",
-        event.endDay || "",
-        String(event.venue || event.location || "").trim().toLowerCase(),
-      ].join("|");
-      if (!deduplicated.has(eventKey)) deduplicated.set(eventKey, event);
-      else duplicateRecords.push({ kept: deduplicated.get(eventKey).id, duplicate: event.id, title: event.title });
+    return [...map.values()].filter((event) => {
+      if (event.categoryKey === "holiday") return true;
+      const isOwnUnpublished =
+        !isTeacher && event.isOwn && event.isUnpublished;
+      return isOwnUnpublished || !event.isUnpublished;
     });
-    if (duplicateRecords.length) console.warn("[OrganizerCalendar] Duplicate event records hidden from display:", duplicateRecords);
-
-    return [...deduplicated.values()].filter((event) =>
-      event.categoryKey === "holiday" ||
-      isEventVisibleToStudent(event, state.organizerProfile || {}),
-    );
   }
 
   function getFilteredEvents() {
@@ -466,14 +442,14 @@ function normalizeEvent(id, data) {
       `;
       document.getElementById("calTryAgainBtn")?.addEventListener("click", () => {
         state.loadError = false;
-        subscribeMonthData();
+        subscribeMonthData(true);
       });
       renderUpcomingList();
       return;
     }
 
     if (state.isLoading) {
-      renderSkeletonGrid();
+      calendarDays.replaceChildren();
       renderUpcomingList();
       return;
     }
@@ -548,7 +524,7 @@ function normalizeEvent(id, data) {
               ? `is-multiday ${isStart ? "multiday-start" : ""} ${isEnd ? "multiday-end" : ""}`
               : "";
             const mineMarker =
-              !isTeacher && ev.isOwn
+              !isTeacher && ev.isOwn && ev.isUnpublished
                 ? '<span class="mine-marker">Mine</span>'
                 : "";
             const unpubTag =
@@ -602,7 +578,7 @@ function normalizeEvent(id, data) {
     if (!upcomingList) return;
 
     if (state.isLoading) {
-      upcomingList.innerHTML = '<div class="upcoming-empty">Loading events...</div>';
+      upcomingList.replaceChildren();
       return;
     }
 
@@ -657,7 +633,7 @@ function normalizeEvent(id, data) {
         }
 
         const mineTag =
-          !isTeacher && ev.isOwn
+          !isTeacher && ev.isOwn && ev.isUnpublished
             ? '<span class="mine-marker">Mine</span>'
             : "";
         const unpubTag =
@@ -685,17 +661,6 @@ function normalizeEvent(id, data) {
         `;
       })
       .join("");
-  }
-
-  function renderSkeletonGrid() {
-    const cells = Array.from({ length: 35 }, () => `
-      <div class="cal-day-full is-skeleton">
-        <span class="skeleton-num"></span>
-        <div class="skeleton-bar"></div>
-        <div class="skeleton-bar short"></div>
-      </div>
-    `);
-    calendarDays.innerHTML = cells.join("");
   }
 
   function renderYearOptions() {
@@ -760,7 +725,7 @@ function normalizeEvent(id, data) {
           const statusText = ev.statusLabel || (isHol ? "Holiday" : "Published");
 
           const mineTag =
-            !isTeacher && ev.isOwn
+            !isTeacher && ev.isOwn && ev.isUnpublished
               ? '<span class="mine-marker" style="margin-right:6px;">Mine</span>'
               : "";
           const unpubTag =
@@ -807,6 +772,8 @@ function normalizeEvent(id, data) {
     const all = getAllEvents();
     const event = all.find((item) => String(item.id) === String(eventId));
     if (!event || event.isHoliday) return;
+    activeDetailEventId = String(event.id);
+    activeDetailVersion = event.snapshotVersion || "";
 
     const isOwnUnpub = !isTeacher && event.isOwn && event.isUnpublished;
 
@@ -815,7 +782,7 @@ function normalizeEvent(id, data) {
       if (isOwnUnpub) {
         options.actionLabel = "Edit Event";
         options.onAction = () => {
-          window.location.href = `EventOrganizerCreateEvent.html?edit=${encodeURIComponent(event.id)}`;
+          window.location.href = `EventOrganizerCreateEvent.html?eventId=${encodeURIComponent(event.id)}`;
         };
       }
       window.RecovibeEventDetails.open(event, options);
@@ -837,8 +804,19 @@ function normalizeEvent(id, data) {
       if (modalLocation) modalLocation.textContent = event.venue;
       if (modalDescription) modalDescription.textContent = event.description || "No description.";
       if (modalSlots) {
-        modalSlots.textContent =
-          event.capacity != null ? `${event.capacity - (event.registeredCount || 0)} slots open` : "";
+        const rawCapacity =
+          event.capacity ?? event.maxCapacity ?? event.maxSlots;
+        const capacity =
+          rawCapacity == null || rawCapacity === ""
+            ? NaN
+            : Math.floor(Number(rawCapacity));
+        const registeredCount = Math.max(
+          0,
+          Math.floor(Number(event.registeredCount) || 0),
+        );
+        modalSlots.textContent = Number.isFinite(capacity) && capacity >= 0
+          ? `${Math.max(0, Math.min(capacity, capacity - registeredCount))} slots open`
+          : "";
       }
       if (modalLink) {
         if (isTeacher) {
@@ -854,218 +832,38 @@ function normalizeEvent(id, data) {
   }
 
   function closeDetailModal() {
+    activeDetailEventId = null;
+    activeDetailVersion = null;
+    window.RecovibeEventDetails?.close?.();
     if (detailModal) detailModal.classList.remove("is-open");
   }
 
-  // --- Data Subscription (RTDB publicEvents with resilient fallback) ---
+  // --- Firestore Event Subscription ---
   function cleanupListeners() {
-    if (activeFallbackTimer) {
-      clearTimeout(activeFallbackTimer);
-      activeFallbackTimer = null;
+    activeEventUnsubscribers.splice(0).forEach((unsubscribe) => unsubscribe());
+    eventSnapshotsBySource.clear();
+    pendingInitialSnapshots.clear();
+    failedEventSources.clear();
+    if (initialSnapshotTimeout !== null) {
+      clearTimeout(initialSnapshotTimeout);
+      initialSnapshotTimeout = null;
     }
-    if (activePublicEventsRef && activePublicEventsCallback) {
-      try {
-        off(activePublicEventsRef, "value", activePublicEventsCallback);
-      } catch (e) {}
-      activePublicEventsRef = null;
-      activePublicEventsCallback = null;
-    }
-    if (activeOrganizerEventsRef && activeOrganizerEventsCallback) {
-      try {
-        off(activeOrganizerEventsRef, "value", activeOrganizerEventsCallback);
-      } catch (e) {}
-      activeOrganizerEventsRef = null;
-      activeOrganizerEventsCallback = null;
+    if (eventRenderFrame !== null) {
+      cancelAnimationFrame(eventRenderFrame);
+      eventRenderFrame = null;
     }
   }
 
-  async function fetchApprovedEvents() {
-    const list = [];
-    const seen = new Set();
-
-    // 1. Try Firestore events
-    try {
-      const { db, isFirebaseConfigured } = await import(
-        "../UserStudent/firebaseConfig.js"
-      );
-      if (isFirebaseConfigured && db) {
-        const { collection, getDocs, query, where } = await import(
-          "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js"
-        );
-        const eventsRef = collection(db, "events");
-        const publicSnapshots = await Promise.all([
-          getDocs(query(eventsRef, where("status", "in", [
-            "approved", "Approved", "APPROVED",
-            "published", "Published", "PUBLISHED",
-            "completed", "Completed", "COMPLETED",
-            "rescheduled", "Rescheduled", "RESCHEDULED",
-          ]))),
-          getDocs(query(eventsRef, where("publicationStatus", "in", [
-            "published", "Published", "PUBLISHED",
-          ]))),
-          getDocs(query(eventsRef, where("published", "==", true))),
-          getDocs(query(eventsRef, where("isPublished", "==", true))),
-        ]);
-        const publicDocuments = new Map();
-        publicSnapshots.forEach((snapshot) => {
-          snapshot.docs.forEach((document) => {
-            publicDocuments.set(document.id, document);
-          });
-        });
-        publicDocuments.forEach((doc) => {
-          const data = doc.data();
-          const s = String(data.status || "").trim().toLowerCase();
-          const isApprovedOrPub =
-            data.published === true ||
-            ["approved", "published", "completed", "rescheduled"].includes(s);
-          const isUnpub = [
-            "draft",
-            "rejected",
-            "cancelled",
-            "canceled",
-          ].includes(s);
-          if (isApprovedOrPub && !isUnpub) {
-            const ev = normalizeEvent(doc.id, data);
-            if (!seen.has(ev.id)) {
-              seen.add(ev.id);
-              list.push(ev);
-            }
-          }
-        });
-      }
-    } catch (e) {
-      console.warn("Firestore events query error:", e);
-    }
-
-    // 2. Global window.RECOVIBE_EVENTS
-    if (Array.isArray(window.RECOVIBE_EVENTS)) {
-      window.RECOVIBE_EVENTS.forEach((data) => {
-        const id = String(data.id || data.eventId || "");
-        if (!id || seen.has(id)) return;
-        const s = String(data.status || "").trim().toLowerCase();
-        if (
-          ["published", "completed", "approved", "rescheduled"].includes(s) ||
-          data.published === true
-        ) {
-          const ev = normalizeEvent(id, data);
-          seen.add(ev.id);
-          list.push(ev);
-        }
-      });
-    }
-
-    // 3. LocalStorage public events / organizer events
-    [
-      "recovibePublicEvents",
-      "recovibeOrganizerEvents",
-      "recovibeTeacherEvents",
-    ].forEach((key) => {
-      try {
-        const stored = JSON.parse(localStorage.getItem(key) || "[]");
-        if (Array.isArray(stored)) {
-          stored.forEach((data) => {
-            const id = String(data.id || data.eventId || "");
-            if (!id || seen.has(id)) return;
-            const s = String(data.status || "").trim().toLowerCase();
-            if (
-              ["published", "completed", "approved", "rescheduled"].includes(s) ||
-              data.published === true
-            ) {
-              const ev = normalizeEvent(id, data);
-              seen.add(ev.id);
-              list.push(ev);
-            }
-          });
-        }
-      } catch {}
-    });
-
-    return list;
-  }
-
-  function loadOrganizerUnpublished(monthStartDay, monthEndDay) {
-    if (isTeacher) return;
-
-    const loadLocalDrafts = () => {
-      const unpubList = [];
-      try {
-        const localDrafts = JSON.parse(
-          localStorage.getItem("recovibeOrganizerEvents") || "[]",
-        );
-        if (Array.isArray(localDrafts)) {
-          localDrafts.forEach((ld) => {
-            if (isUnpublishedEvent(ld)) {
-              const ev = normalizeEvent(ld.id || ld.eventId || `local_${Date.now()}`, ld, true);
-              if (ev.startDay <= monthEndDay && ev.endDay >= monthStartDay) {
-                if (!unpubList.some((e) => String(e.id) === String(ev.id))) {
-                  unpubList.push(ev);
-                }
-              }
-            }
-          });
-        }
-      } catch {}
-      return unpubList;
-    };
-
-    state.organizerUnpublishedEvents = loadLocalDrafts();
-
-    if (state.currentUser && rtdb) {
-      try {
-        activeOrganizerEventsRef = ref(rtdb, `organizerEvents/${state.currentUser.uid}`);
-        activeOrganizerEventsCallback = (snapshot) => {
-          const val = snapshot.val() || {};
-          const rtdbUnpub = [];
-
-          Object.entries(val).forEach(([id, data]) => {
-            if (!data) return;
-            if (!isUnpublishedEvent(data)) return;
-
-            const ev = normalizeEvent(id, data, true);
-            if (ev.startDay <= monthEndDay && ev.endDay >= monthStartDay) {
-              rtdbUnpub.push(ev);
-            }
-          });
-
-          const localList = loadLocalDrafts();
-          localList.forEach((ld) => {
-            if (!rtdbUnpub.some((e) => String(e.id) === String(ld.id))) {
-              rtdbUnpub.push(ld);
-            }
-          });
-
-          state.organizerUnpublishedEvents = rtdbUnpub;
-          if (!state.isLoading) {
-            renderCalendar();
-          }
-        };
-
-        onValue(activeOrganizerEventsRef, activeOrganizerEventsCallback, (err) => {
-          console.warn("Error reading organizer unpublished events:", err);
-        });
-      } catch (e) {
-        console.warn("RTDB organizer listener error:", e);
-      }
-    }
-  }
-
-  async function subscribeMonthData() {
-    cleanupListeners();
-    state.isLoading = true;
-    state.loadError = false;
-    renderCalendar();
+  async function subscribeMonthData(retry = false) {
+    if (retry) cleanupListeners();
+    if (noticeElement) noticeElement.hidden = navigator.onLine;
+    state.isLoading = activeEventUnsubscribers.length === 0;
+    state.loadError =
+      failedEventSources.size > 0 ||
+      (!state.isLoading && pendingInitialSnapshots.size > 0);
 
     const year = state.date.getFullYear();
     const month = state.date.getMonth();
-
-    const lastDayNum = new Date(year, month + 1, 0).getDate();
-    const monthStartDay = `${year}-${String(month + 1).padStart(2, "0")}-01`;
-    const monthEndDay = `${year}-${String(month + 1).padStart(2, "0")}-${String(lastDayNum).padStart(2, "0")}`;
-
-    const queryStartDate = new Date(year, month, 1 - 31);
-    const queryStartIso = `${queryStartDate.getFullYear()}-${String(queryStartDate.getMonth() + 1).padStart(2, "0")}-${String(queryStartDate.getDate()).padStart(2, "0")}`;
-    const queryStartMs = new Date(`${queryStartIso}T00:00:00+08:00`).getTime();
-    const monthEndMs = new Date(`${monthEndDay}T23:59:59.999+08:00`).getTime();
 
     // 1. Fetch holidays for this visible month
     const currentSeq = ++holidayRequestSequence;
@@ -1093,128 +891,199 @@ function normalizeEvent(id, data) {
         if (!state.isLoading) {
           renderCalendar();
         }
+        initialCalendarHolidaysReady = true;
+        signalCalendarPageReady();
       })
       .catch((err) => {
-        console.warn("Could not load monthly holidays:", err);
+        console.warn("[OrganizerCalendar] Holiday load failed:", err?.code || "unknown");
+        initialCalendarHolidaysReady = true;
+        signalCalendarPageReady();
       });
 
-    // 2. Query publicEvents from RTDB with resilient fallback timeout (500ms)
-    let rtdbResponded = false;
-
-    activeFallbackTimer = setTimeout(async () => {
-      if (rtdbResponded) return;
-      rtdbResponded = true;
-      try {
-        const allEvs = await fetchApprovedEvents();
-        state.upcomingEvents = allEvs;
-        state.publicEvents = allEvs.filter(
-          (ev) => ev.startDay <= monthEndDay && ev.endDay >= monthStartDay,
-        );
-        state.loadError = false;
-      } catch (err) {
-        console.warn("Error loading fallback events:", err);
-        state.loadError = true;
-      } finally {
-        state.isLoading = false;
-        renderCalendar();
-      }
-    }, 500);
-
-    if (rtdb) {
-      try {
-        activePublicEventsRef = query(
-          ref(rtdb, "publicEvents"),
-          orderByChild("startAt"),
-          startAt(queryStartMs),
-          endAt(monthEndMs),
-        );
-
-        activePublicEventsCallback = (snapshot) => {
-          rtdbResponded = true;
-          if (activeFallbackTimer) {
-            clearTimeout(activeFallbackTimer);
-            activeFallbackTimer = null;
-          }
-          state.isLoading = false;
-          state.loadError = false;
-
-          const val = snapshot.val() || {};
-          const records = [];
-
-          Object.entries(val).forEach(([id, data]) => {
-            if (!data) return;
-            const status = String(data.status || "").trim().toLowerCase();
-            if (status !== "published" && status !== "completed") return;
-
-            const ev = normalizeEvent(id, data);
-            if (ev.startDay <= monthEndDay && ev.endDay >= monthStartDay) {
-              records.push(ev);
-            }
-          });
-
-          state.publicEvents = records;
-
-          fetchApprovedEvents().then((evs) => {
-            state.upcomingEvents = evs;
-            renderUpcomingList();
-          });
-
-          renderCalendar();
-        };
-
-        onValue(activePublicEventsRef, activePublicEventsCallback, async (err) => {
-          console.warn("Error reading publicEvents from RTDB:", err);
-          rtdbResponded = true;
-          if (activeFallbackTimer) {
-            clearTimeout(activeFallbackTimer);
-            activeFallbackTimer = null;
-          }
-          try {
-            const allEvs = await fetchApprovedEvents();
-            state.upcomingEvents = allEvs;
-            state.publicEvents = allEvs.filter(
-              (ev) => ev.startDay <= monthEndDay && ev.endDay >= monthStartDay,
-            );
-            state.loadError = false;
-          } catch (e) {
-            state.loadError = true;
-          } finally {
-            state.isLoading = false;
-            renderCalendar();
-          }
-        });
-      } catch (queryErr) {
-        console.warn("RTDB query error:", queryErr);
-        rtdbResponded = true;
-        if (activeFallbackTimer) {
-          clearTimeout(activeFallbackTimer);
-          activeFallbackTimer = null;
-        }
-        const allEvs = await fetchApprovedEvents();
-        state.upcomingEvents = allEvs;
-        state.publicEvents = allEvs.filter(
-          (ev) => ev.startDay <= monthEndDay && ev.endDay >= monthStartDay,
-        );
-        state.isLoading = false;
-        renderCalendar();
-      }
-    } else {
-      rtdbResponded = true;
-      if (activeFallbackTimer) {
-        clearTimeout(activeFallbackTimer);
-        activeFallbackTimer = null;
-      }
-      const allEvs = await fetchApprovedEvents();
-      state.upcomingEvents = allEvs;
-      state.publicEvents = allEvs.filter(
-        (ev) => ev.startDay <= monthEndDay && ev.endDay >= monthStartDay,
-      );
-      state.isLoading = false;
+    if (activeEventUnsubscribers.length) {
       renderCalendar();
+      return;
     }
 
-    // 3. For Organizer: load own unpublished events
-    loadOrganizerUnpublished(monthStartDay, monthEndDay);
+    if (!isFirebaseConfigured || !db || !state.currentUser) {
+      state.isLoading = false;
+      state.loadError = true;
+      initialCalendarEventsReady = true;
+      renderCalendar();
+      signalCalendarPageReady();
+      return;
+    }
+
+    const eventsRef = collection(db, "events");
+    const listenerQueries = [
+      ["public-status", query(eventsRef, where("status", "in", [
+        "published", "Published", "PUBLISHED",
+        "completed", "Completed", "COMPLETED",
+        "rescheduled", "Rescheduled", "RESCHEDULED",
+      ]))],
+      ["public-publication-status", query(eventsRef, where("publicationStatus", "in", [
+        "published", "Published", "PUBLISHED",
+      ]))],
+      ["public-published", query(eventsRef, where("published", "==", true))],
+      ["public-is-published", query(eventsRef, where("isPublished", "==", true))],
+      ["owner-organizer-uid", query(eventsRef, where("organizerUid", "==", state.currentUser.uid))],
+      ["owner-organizer-id", query(eventsRef, where("organizerId", "==", state.currentUser.uid))],
+      ["owner-created-by", query(eventsRef, where("createdBy", "==", state.currentUser.uid))],
+    ];
+    pendingInitialSnapshots = new Set(listenerQueries.map(([source]) => source));
+
+    listenerQueries.forEach(([source, eventsQuery]) => {
+      activeEventUnsubscribers.push(
+        onSnapshot(
+          eventsQuery,
+          { includeMetadataChanges: true },
+          (snapshot) => {
+            const previousDocuments = eventSnapshotsBySource.get(source) || new Map();
+            const sourceDocuments = new Map();
+            snapshot.docs.forEach((eventDocument) => {
+              if (eventDocument.metadata.hasPendingWrites) {
+                if (previousDocuments.has(eventDocument.id)) {
+                  sourceDocuments.set(eventDocument.id, previousDocuments.get(eventDocument.id));
+                }
+                return;
+              }
+              sourceDocuments.set(eventDocument.id, eventDocument);
+            });
+            eventSnapshotsBySource.set(source, sourceDocuments);
+            pendingInitialSnapshots.delete(source);
+            if (pendingInitialSnapshots.size === 0 && initialSnapshotTimeout !== null) {
+              clearTimeout(initialSnapshotTimeout);
+              initialSnapshotTimeout = null;
+            }
+
+            const mergedDocuments = new Map();
+            eventSnapshotsBySource.forEach((documents) => {
+              documents.forEach((eventDocument, id) => {
+                const current = mergedDocuments.get(id);
+                const currentTime = current?.updateTime?.toMillis?.() || 0;
+                const newTime = eventDocument.updateTime?.toMillis?.() || 0;
+                if (!current || newTime >= currentTime) {
+                  mergedDocuments.set(id, eventDocument);
+                }
+              });
+            });
+
+            const eventsById = new Map();
+            mergedDocuments.forEach((eventDocument, id) => {
+              const data = eventDocument.data();
+              const status = String(data.status || "").trim().toLowerCase();
+              const isCancelled = ["cancelled", "canceled"].includes(status);
+              const isPublished =
+                !isCancelled &&
+                (["published", "completed", "rescheduled"].includes(status) ||
+                  String(data.publicationStatus || "").trim().toLowerCase() === "published" ||
+                  data.published === true ||
+                  data.isPublished === true);
+              const isOwn = [data.organizerUid, data.organizerId, data.createdBy].some(
+                (ownerId) => String(ownerId || "") === String(state.currentUser.uid),
+              );
+              if (!isPublished && (!isOwn || isTeacher)) return;
+              const event = normalizeEvent(id, data);
+              if (!event) return;
+              event.snapshotVersion = JSON.stringify(data);
+              eventsById.set(id, event);
+            });
+
+            state.eventsById = eventsById;
+            state.publicEvents = [...eventsById.values()].filter(
+              (event) => !event.isUnpublished,
+            );
+            state.upcomingEvents = [...eventsById.values()];
+            state.organizerUnpublishedEvents = [...eventsById.values()].filter(
+              (event) => event.isOwn && event.isUnpublished,
+            );
+            state.loadError =
+              failedEventSources.size > 0 ||
+              (!state.isLoading && pendingInitialSnapshots.size > 0);
+            if (pendingInitialSnapshots.size === 0) state.isLoading = false;
+
+            if (eventRenderFrame === null) {
+              eventRenderFrame = requestAnimationFrame(() => {
+                eventRenderFrame = null;
+                renderCalendar();
+                if (pendingInitialSnapshots.size === 0) {
+                  initialCalendarEventsReady = true;
+                  signalCalendarPageReady();
+                }
+                if (dayModal?.classList.contains("is-open") && state.selectedDayIso) {
+                  openDay(state.selectedDayIso);
+                }
+                if (activeDetailEventId) {
+                  const detailEvent = getAllEvents().find(
+                    (event) => String(event.id) === activeDetailEventId,
+                  );
+                  if (detailEvent) {
+                    if (detailEvent.snapshotVersion !== activeDetailVersion) {
+                      const detailContent = document.querySelector(
+                        ".event-details-overlay.is-open .student-event-content",
+                      );
+                      const detailScrollTop = detailContent?.scrollTop || 0;
+                      if (window.RecovibeEventDetails?.close) {
+                        window.RecovibeEventDetails.close();
+                      }
+                      openEventDetails(activeDetailEventId);
+                      const updatedDetailContent = document.querySelector(
+                        ".event-details-overlay.is-open .student-event-content",
+                      );
+                      if (updatedDetailContent) {
+                        updatedDetailContent.scrollTop = detailScrollTop;
+                      }
+                    }
+                  } else {
+                    closeDetailModal();
+                    if (noticeElement) {
+                      noticeElement.textContent = "This event is no longer available.";
+                      noticeElement.hidden = false;
+                      clearTimeout(noticeTimeout);
+                      noticeTimeout = setTimeout(() => {
+                        if (noticeElement && navigator.onLine) noticeElement.hidden = true;
+                      }, 4000);
+                    }
+                  }
+                }
+              });
+            }
+          },
+          (error) => {
+            console.error("[OrganizerCalendar] Event listener failed:", error?.code || "unknown");
+            failedEventSources.add(source);
+            pendingInitialSnapshots.delete(source);
+            if (pendingInitialSnapshots.size === 0 && initialSnapshotTimeout !== null) {
+              clearTimeout(initialSnapshotTimeout);
+              initialSnapshotTimeout = null;
+            }
+            state.isLoading = false;
+            state.loadError = true;
+            renderCalendar();
+            if (pendingInitialSnapshots.size === 0) {
+              initialCalendarEventsReady = true;
+              signalCalendarPageReady();
+            }
+          },
+        ),
+      );
+    });
+
+    initialSnapshotTimeout = setTimeout(() => {
+      if (pendingInitialSnapshots.size > 0) {
+        console.error(
+          "[OrganizerCalendar] Initial event snapshot timed out:",
+          "deadline-exceeded",
+        );
+        state.isLoading = false;
+        state.loadError = true;
+        renderCalendar();
+        initialCalendarEventsReady = true;
+        signalCalendarPageReady();
+      }
+      initialSnapshotTimeout = null;
+    }, 9000);
+    renderCalendar();
   }
 
   function setCalendarMonth(year, month) {
@@ -1265,6 +1134,28 @@ function normalizeEvent(id, data) {
 
   // --- Event Listeners Setup ---
   function setupEventListeners() {
+    if (calendarDays?.parentElement) {
+      noticeElement = document.createElement("div");
+      noticeElement.setAttribute("role", "status");
+      noticeElement.style.cssText =
+        "margin: 0 0 10px; padding: 8px 12px; border-radius: 6px; background: #fff7e6; color: #6b5140; font-size: 13px;";
+      noticeElement.hidden = true;
+      calendarDays.parentElement.insertBefore(noticeElement, calendarDays);
+    }
+
+    const updateOnlineNotice = () => {
+      if (!noticeElement) return;
+      if (!navigator.onLine) {
+        noticeElement.textContent = "You are offline. Showing the last saved events.";
+        noticeElement.hidden = false;
+      } else if (noticeElement.textContent.startsWith("You are offline.")) {
+        noticeElement.hidden = true;
+      }
+    };
+    window.addEventListener("offline", updateOnlineNotice);
+    window.addEventListener("online", updateOnlineNotice);
+    updateOnlineNotice();
+
     monthSelect?.addEventListener("change", () => {
       setCalendarMonth(state.date.getFullYear(), Number(monthSelect.value));
     });
@@ -1373,9 +1264,25 @@ function normalizeEvent(id, data) {
         closeDetailModal();
       }
     });
+    document.addEventListener("click", (e) => {
+      const sharedOverlay = e.target.closest?.(".event-details-overlay");
+      if (
+        activeDetailEventId &&
+        sharedOverlay &&
+        (e.target === sharedOverlay ||
+          e.target.closest?.(".event-details-close"))
+      ) {
+        activeDetailEventId = null;
+      }
+    });
 
     window.addEventListener("beforeunload", cleanupListeners);
     window.addEventListener("pagehide", cleanupListeners);
+    window.addEventListener("pageshow", () => {
+      if (state.currentUser && !activeEventUnsubscribers.length) {
+        subscribeMonthData(true);
+      }
+    });
   }
 
   // --- Profile & Role Sidebar Hydration ---
@@ -1471,27 +1378,60 @@ function normalizeEvent(id, data) {
     if (auth) {
       authReady.then(() => onAuthStateChanged(auth, (user) => {
         state.currentUser = user;
-        if (!user && !isTeacher) {
-          const localOrganizer = localStorage.getItem("recovibeOrganizerId");
-          if (!localOrganizer && isRtdbConfigured) {
+        cleanupListeners();
+        if (!user) {
+          closeDetailModal();
+          state.eventsById = new Map();
+          state.publicEvents = [];
+          state.upcomingEvents = [];
+          state.organizerUnpublishedEvents = [];
+          state.isLoading = false;
+          state.loadError = false;
+          renderCalendar();
+          if (!isTeacher) {
             window.location.replace("EventOrganizerLogin.html");
-            return;
           }
+          return;
         }
-        subscribeMonthData().then(() => {
+
+        const role = String(
+          state.organizerProfile?.role || state.organizerProfile?.userRole || "",
+        ).toLowerCase().replace(/[\s_.-]+/g, "");
+        const profileUid = String(state.organizerProfile?.uid || "");
+        if (
+          !isTeacher &&
+          (!["eventorganizer", "organizer", "eo"].includes(role) ||
+            (profileUid && profileUid !== String(user.uid)))
+        ) {
+          closeDetailModal();
+          state.eventsById = new Map();
+          state.publicEvents = [];
+          state.upcomingEvents = [];
+          state.organizerUnpublishedEvents = [];
+          state.isLoading = false;
+          state.loadError = false;
+          renderCalendar();
+          return;
+        }
+
+        subscribeMonthData(true).then(() => {
           if (dayParam) {
             openDay(dayParam);
           }
         });
       })).catch((error) => {
-        console.error("Could not restore organizer authentication state:", error);
+        console.error(
+          "[OrganizerCalendar] Authentication restore failed:",
+          error?.code || "unknown",
+        );
+        state.isLoading = false;
+        state.loadError = true;
+        renderCalendar();
       });
     } else {
-      subscribeMonthData().then(() => {
-        if (dayParam) {
-          openDay(dayParam);
-        }
-      });
+      state.isLoading = false;
+      state.loadError = true;
+      renderCalendar();
     }
   }
 

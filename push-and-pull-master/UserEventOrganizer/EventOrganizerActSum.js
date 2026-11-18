@@ -177,6 +177,7 @@ import "./OrganizerNotificationBadge.js";
     errorState.hidden = false;
     errorMessage.textContent = msg;
     downloadCopyBtn.disabled = true;
+    window.dispatchEvent(new Event("page-data-ready"));
   }
 
   retryBtn.addEventListener("click", () => {
@@ -208,6 +209,7 @@ import "./OrganizerNotificationBadge.js";
           dataContainer.hidden = false;
           downloadCopyBtn.disabled = false;
           renderReport();
+          window.dispatchEvent(new Event("page-data-ready"));
         },
         (err) => {
           console.error("Error reading events:", err);

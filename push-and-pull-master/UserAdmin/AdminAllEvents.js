@@ -145,6 +145,7 @@ import { auth, authReady, db, isFirebaseConfigured } from "../UserStudent/fireba
   function showLoadError(message) {
     root.innerHTML = `<div class="admin-error" role="alert">${esc(message)} <button class="admin-row-action" id="retryAllEvents" type="button">Try again</button></div>`;
     root.querySelector("#retryAllEvents").addEventListener("click", init);
+    window.dispatchEvent(new Event("page-data-ready"));
   }
   function esc(value) {
     return String(value ?? "").replace(
@@ -214,23 +215,22 @@ import { auth, authReady, db, isFirebaseConfigured } from "../UserStudent/fireba
     return firestoreEvents;
   }
   function capacity(event) {
-    return event.capacityMode === "N/A" ||
-      (event.maxCapacity == null && event.capacity == null)
-      ? null
-      : Number(event.maxCapacity ?? event.capacity ?? event.maxSlots);
+    const value =
+      event.capacity ?? event.maxCapacity ?? event.maxSlots ?? event.slots;
+    if (event.capacityMode === "N/A" || value == null || value === "") {
+      return null;
+    }
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : null;
   }
   function openSlots(event) {
-    if (event.capacityMode === "N/A" || capacity(event) === null) return null;
-    return Math.max(
+    const total = capacity(event);
+    if (event.capacityMode === "N/A" || total === null) return null;
+    const registeredCount = Math.max(
       0,
-      Number(
-        event.openSlots ??
-          event.slotsOpen ??
-          event.availableSlots ??
-          event.slots ??
-          capacity(event),
-      ) || 0,
+      Math.floor(Number(event.registeredCount) || 0),
     );
+    return Math.max(0, Math.min(total, total - registeredCount));
   }
   function matches(event) {
     const date = (event.dateISO || event.date || "").slice(0, 10),
@@ -539,13 +539,13 @@ import { auth, authReady, db, isFirebaseConfigured } from "../UserStudent/fireba
       showLoadError("Event data is unavailable. Please check your connection and try again.");
       return;
     }
-    root.innerHTML = '<div class="admin-loading">Loading events…</div>';
+    root.replaceChildren();
     loadExpired = false;
     loadTimer = setTimeout(() => {
       loadExpired = true;
       unsubscribeEvents?.();
       showLoadError("Could not load events in time. Please check your connection and try again.");
-    }, 15000);
+    }, 9000);
     try {
       await loadVerifiedAdminProfile();
       if (loadExpired) return;
@@ -588,6 +588,7 @@ import { auth, authReady, db, isFirebaseConfigured } from "../UserStudent/fireba
           })
           .filter(Boolean);
         render();
+        window.dispatchEvent(new Event("page-data-ready"));
       },
       (error) => {
         if (loadExpired) return;

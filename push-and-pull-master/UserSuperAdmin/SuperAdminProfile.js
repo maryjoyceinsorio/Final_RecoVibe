@@ -1,17 +1,17 @@
 (() => {
   const storageKey = "recovibeAdminProfile";
   const fallback = {
-    firstName: "Super",
+    firstName: "",
     middleName: "",
-    lastName: "Admin",
-    name: "Super Admin",
+    lastName: "",
+    name: "",
     role: "Super Admin",
     email: "",
     contactNumber: "",
     accountNumber: "",
     department: "",
     organization: "",
-    campus: "PUP Biñan Campus",
+    campus: "",
   };
 
   let profile = { ...fallback };
@@ -22,9 +22,9 @@
     console.warn("Unable to read Super Admin profile:", error);
   }
 
-  const text = (id, value) => {
+  const text = (id, value, fallbackText = "Not set") => {
     const element = document.getElementById(id);
-    if (element) element.textContent = value || "Not set";
+    if (element) element.textContent = value || fallbackText;
   };
 
   function showFeedback(message) {
@@ -41,15 +41,14 @@
     const first = String(profile.firstName || "").trim();
     const middle = String(profile.middleName || "").trim();
     const last = String(profile.lastName || "").trim();
-    const fullName = [first, middle, last].filter(Boolean).join(" ") || profile.name || "Super Admin";
+    const fullName = [first, middle, last].filter(Boolean).join(" ") || profile.name || "";
     profile.name = fullName;
-    const initial = (first || fullName || "S").charAt(0).toUpperCase();
-    const office = profile.department || profile.organization || "PUP Biñan Campus";
+    const initial = (first || fullName).charAt(0).toUpperCase();
     const accountId = profile.accountNumber || profile.accountNo || profile.employeeId || profile.uid || "Not set";
-    text("heroAvatar", initial);
-    text("sidebar-user-avatar", initial);
-    text("heroUserName", fullName);
-    text("sidebar-user-name", fullName);
+    text("heroAvatar", initial, "");
+    text("sidebar-user-avatar", initial, "");
+    text("heroUserName", fullName, "");
+    text("sidebar-user-name", fullName, "");
     text("viewFirstName", first);
     const middleEl = document.getElementById("viewMiddleName");
     if (middleEl) middleEl.innerHTML = middle ? middle : '<span class="empty-muted">Not set</span>';
@@ -62,7 +61,7 @@
     if (departmentEl) departmentEl.innerHTML = profile.department || profile.organization || '<span class="empty-muted">Not set</span>';
     const designationEl = document.getElementById("viewDesignation");
     if (designationEl) designationEl.innerHTML = profile.designation || profile.role || '<span class="empty-muted">Not set</span>';
-    text("viewCampus", profile.campus || "PUP Biñan Campus");
+    text("viewCampus", profile.campus);
   }
 
   const detailsView = document.getElementById("detailsCardView");
@@ -164,6 +163,7 @@
   window.addEventListener("superadmin-profile-authorized", (event) => {
     if (event.detail?.profile) profile = { ...profile, ...event.detail.profile };
     updateDisplay();
+    window.dispatchEvent(new Event("page-data-ready"));
   });
   updateDisplay();
 })();

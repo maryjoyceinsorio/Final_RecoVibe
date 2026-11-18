@@ -52,6 +52,7 @@ import {
   let draftsLoaded = false;
   let firestoreEventsLoaded = false;
   let loadErrorOccurred = false;
+  let pageLoadSignaled = false;
   let missingEventTimeout = null;
   const activeEventListeners = new Map();
   const approvalsMap = new Map();
@@ -60,6 +61,12 @@ import {
   let activeEventsListenerRef = null;
   const realtimeDatabaseConfigured = Boolean(rtdb?.app?.options?.databaseURL);
   const firestoreDb = db;
+
+  function signalMyEventsPageReady() {
+    if (pageLoadSignaled) return;
+    pageLoadSignaled = true;
+    window.dispatchEvent(new Event("page-data-ready"));
+  }
 
   const searchInput = document.getElementById("eventSearch");
   const dateFilter = document.getElementById("eventDateFilter");
@@ -644,9 +651,7 @@ import {
       return;
     }
 
-    const loadingEvents =
-      !firestoreEventsLoaded ||
-      (realtimeDatabaseConfigured && (!indexLoaded || !draftsLoaded));
+    const loadingEvents = !firestoreEventsLoaded;
     if (loadingEvents && !loadErrorOccurred) {
       if (eventTableBody) {
         eventTableBody.innerHTML = `
@@ -1175,6 +1180,12 @@ import {
         approval.status = "published";
       }
       renderEvents();
+      if (
+        !authResolving &&
+        (authUnauthenticated || (indexLoaded && draftsLoaded && firestoreEventsLoaded))
+      ) {
+        signalMyEventsPageReady();
+      }
       if (activeTrackingEventId === activeEventId) {
         renderTrackerContent(event, getHistoryBasedApproval(event));
       }
@@ -1959,7 +1970,6 @@ import {
     if (!realtimeDatabaseConfigured) {
       indexLoaded = true;
       draftsLoaded = true;
-      firestoreEventsLoaded = true;
       if (!db) {
         loadErrorOccurred = true;
         showEventNotice("Couldn't load your events.");
@@ -2011,7 +2021,6 @@ import {
             },
             (error) => {
               console.error("Couldn't load an owned event:", error);
-              loadErrorOccurred = true;
               renderOwnedEvents();
             },
           );
@@ -2022,7 +2031,6 @@ import {
       (error) => {
         console.error("Couldn't load your event index:", error);
         indexLoaded = true;
-        loadErrorOccurred = true;
         renderOwnedEvents();
       },
     );
@@ -2057,7 +2065,6 @@ import {
       (error) => {
         console.error("Couldn't load event drafts:", error);
         draftsLoaded = true;
-        loadErrorOccurred = true;
         renderOwnedEvents();
       },
     );
@@ -2207,6 +2214,12 @@ import {
           new Date(a.createdAt || a.updatedAt || 0).getTime();
       });
     renderEvents();
+    if (
+      !authResolving &&
+      (authUnauthenticated || firestoreEventsLoaded)
+    ) {
+      signalMyEventsPageReady();
+    }
     const params = new URLSearchParams(location.search);
     const eventId = params.get("event") || params.get("openEvent");
     if (eventId && indexLoaded && !activeTrackingEventId) {

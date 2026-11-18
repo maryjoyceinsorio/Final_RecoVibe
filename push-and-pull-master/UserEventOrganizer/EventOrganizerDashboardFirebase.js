@@ -7,6 +7,7 @@ import {
   where,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
+import { mountHelpBot } from "../recoVibeHelpBot.js";
 
 const { toMillis, formatCreatedDate } = window.RecovibeOrganizerDashboardDates;
 const CREATION_DATE_FIELDS = [
@@ -29,8 +30,21 @@ let unsubscribeNotifications = null;
 let unsubscribeAuth = null;
 let organizerEvents = [];
 let signingOut = false;
+let dashboardPageLoadSignaled = false;
+const pendingInitialDashboardSources = new Set(["events", "notifications"]);
 const dashboardMessages = new Map();
 if (notificationsBadge) notificationsBadge.hidden = true;
+
+function signalDashboardPageReady() {
+  if (dashboardPageLoadSignaled) return;
+  dashboardPageLoadSignaled = true;
+  window.dispatchEvent(new Event("page-data-ready"));
+}
+
+function settleInitialDashboardSource(source) {
+  pendingInitialDashboardSources.delete(source);
+  if (pendingInitialDashboardSources.size === 0) signalDashboardPageReady();
+}
 
 function setDashboardMessage(source, message) {
   if (!dashboardStatus) return;
@@ -460,6 +474,7 @@ function startDashboardListeners(user) {
         organizerEvents = snapshot.docs.map(normalizeEvent);
         setDashboardMessage("events", "");
         renderDashboard();
+        settleInitialDashboardSource("events");
       },
       (error) => {
         console.error("Unable to load organizer dashboard events:", error.code, error.message);
@@ -469,11 +484,13 @@ function startDashboardListeners(user) {
             ? "You don't have permission to view your organizer events."
             : "Could not load your events. Check your connection and try again.",
         );
+        settleInitialDashboardSource("events");
       },
     );
   } catch (error) {
     console.error("Unable to start organizer event listener:", error.code, error.message);
     setDashboardMessage("events", "Could not start loading your events. Please try again.");
+    settleInitialDashboardSource("events");
   }
 
   try {
@@ -493,6 +510,7 @@ function startDashboardListeners(user) {
           notificationsBadge.hidden = unreadCount === 0;
         }
         setDashboardMessage("notifications", "");
+        settleInitialDashboardSource("notifications");
       },
       (error) => {
         console.error("Unable to load organizer notifications:", error.code, error.message);
@@ -502,16 +520,20 @@ function startDashboardListeners(user) {
             ? "You don't have permission to view your notification count."
             : "Could not update your notification count.",
         );
+        settleInitialDashboardSource("notifications");
       },
     );
   } catch (error) {
     console.error("Unable to start organizer notification listener:", error.code, error.message);
     setDashboardMessage("notifications", "Could not update your notification count.");
+    settleInitialDashboardSource("notifications");
   }
 }
 
 if (!isFirebaseConfigured || !auth || !db) {
   setDashboardMessage("events", "Event data is unavailable. Please contact support.");
+  pendingInitialDashboardSources.clear();
+  signalDashboardPageReady();
 } else {
   auth
     .authStateReady()
@@ -525,6 +547,7 @@ if (!isFirebaseConfigured || !auth || !db) {
             window.location.replace(loginPath);
             return;
           }
+          mountHelpBot({ role: "eventorganizer" });
           setDashboardMessage("events", "Loading your dashboard...");
           startDashboardListeners(user);
           renderDashboard();
@@ -532,12 +555,16 @@ if (!isFirebaseConfigured || !auth || !db) {
         (error) => {
           console.error("Unable to observe organizer authentication state:", error.code, error.message);
           setDashboardMessage("events", "Could not verify your session. Check your connection and try again.");
+          pendingInitialDashboardSources.clear();
+          signalDashboardPageReady();
         },
       );
     })
     .catch((error) => {
       console.error("Unable to initialize organizer authentication state:", error.code, error.message);
       setDashboardMessage("events", "Could not verify your session. Check your connection and try again.");
+      pendingInitialDashboardSources.clear();
+      signalDashboardPageReady();
     });
 }
 

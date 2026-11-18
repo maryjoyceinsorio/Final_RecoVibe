@@ -15,8 +15,6 @@ import {
   ref,
   onValue,
   off,
-  query,
-  orderByChild,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 import { httpsCallable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
 import {
@@ -60,6 +58,8 @@ let profileResolved = false;
 let participationLoading = true;
 let firestoreEventsLoaded = false;
 let publicEventsLoaded = false;
+let pageLoadSignaled = false;
+let participationRetryInProgress = false;
 const pendingInitialRegistrationSnapshots = new Set();
 const loggedUnmatchedRegistrationIds = new Set();
 
@@ -99,8 +99,8 @@ const datePickerState = {
   previousBodyOverflow: null,
 };
 
-let activePublicEventsRef = null;
-let activePublicEventsListener = null;
+const publicEventListeners = new Map();
+const pendingPublicEventLoads = new Set();
 let firestoreEventsUnsubscribe = null;
 let firestoreRegistrationGeneration = 0;
 let rtdbRegistrationsUnsubscribe = null;
@@ -493,6 +493,7 @@ function refreshUserRegistrations() {
   for (const [eventId, registration] of firestoreRegistrationsMap) {
     userRegistrationsMap.set(eventId, registration);
   }
+  syncPublicEventListeners();
   syncAttendanceListeners();
   reportUnmatchedRegistrations();
   updateParticipationLoadingState();
@@ -521,6 +522,11 @@ function updateParticipationLoadingState() {
 function maybeFinishInitialLoad() {
   updateParticipationLoadingState();
   render();
+  if (!participationLoading) participationRetryInProgress = false;
+  if (!participationLoading && !pageLoadSignaled) {
+    pageLoadSignaled = true;
+    window.dispatchEvent(new Event("page-data-ready"));
+  }
 }
 
 function reportUnmatchedRegistrations() {
@@ -540,6 +546,7 @@ function listenForFirestoreRegistrations(uid) {
   if (!db || !isFirebaseConfigured || !uid) {
     firestoreEventsLoaded = true;
     updateParticipationLoadingState();
+    maybeFinishInitialLoad();
     return;
   }
 
@@ -618,6 +625,7 @@ function listenForFirestoreRegistrations(uid) {
       });
       updateParticipationLoadingState();
       refreshUserRegistrations();
+      maybeFinishInitialLoad();
     },
     (error) => {
       console.error("Could not load the student's Firestore registrations:", error);
@@ -630,8 +638,57 @@ function listenForFirestoreRegistrations(uid) {
       pendingInitialRegistrationSnapshots.clear();
       updateParticipationLoadingState();
       render();
+      maybeFinishInitialLoad();
     },
   );
+}
+
+function syncPublicEventListeners() {
+  if (!isRtdbConfigured || !rtdb) {
+    publicEventsLoaded = true;
+    return;
+  }
+
+  const registeredEventIds = new Set(userRegistrationsMap.keys());
+  publicEventListeners.forEach((unsubscribe, eventId) => {
+    if (registeredEventIds.has(eventId)) return;
+    unsubscribe();
+    publicEventListeners.delete(eventId);
+    pendingPublicEventLoads.delete(eventId);
+  });
+
+  registeredEventIds.forEach((eventId) => {
+    if (publicEventListeners.has(eventId)) return;
+    pendingPublicEventLoads.add(eventId);
+    const eventRef = ref(rtdb, `publicEvents/${eventId}`);
+    const unsubscribe = onValue(
+      eventRef,
+      (snapshot) => {
+        if (snapshot.exists()) {
+          try {
+            const event = normalizeEventData(eventId, snapshot.val());
+            rawEventsMap.set(event.id, event);
+          } catch (error) {
+            console.warn(`[My Participation] Skipping invalid public event ${eventId}:`, error);
+          }
+        }
+        pendingPublicEventLoads.delete(eventId);
+        publicEventsLoaded = pendingPublicEventLoads.size === 0;
+        reportUnmatchedRegistrations();
+        maybeFinishInitialLoad();
+      },
+      (error) => {
+        console.error(`Could not load public event ${eventId} for participation:`, error);
+        pendingPublicEventLoads.delete(eventId);
+        publicEventsLoaded = pendingPublicEventLoads.size === 0;
+        reportUnmatchedRegistrations();
+        maybeFinishInitialLoad();
+      },
+    );
+    publicEventListeners.set(eventId, unsubscribe);
+  });
+
+  publicEventsLoaded = pendingPublicEventLoads.size === 0;
 }
 
 /* ---------------------------------------------------------
@@ -702,46 +759,30 @@ function loadParticipationData() {
 
   refreshUserRegistrations();
 
-  // RTDB Public Events Query
-  if (isRtdbConfigured) {
-    if (!activePublicEventsRef || !activePublicEventsListener) {
-      const eventsRoot = ref(rtdb, "publicEvents");
-      const q = query(eventsRoot, orderByChild("startAt"));
+  syncPublicEventListeners();
+  publicEventsLoaded = !isRtdbConfigured || pendingPublicEventLoads.size === 0;
+  reportUnmatchedRegistrations();
+  maybeFinishInitialLoad();
+}
 
-      activePublicEventsRef = q;
-      activePublicEventsListener = onValue(
-        q,
-        (snapshot) => {
-          if (snapshot.exists()) {
-            snapshot.forEach((child) => {
-              try {
-                const ev = normalizeEventData(child.key, child.val());
-                rawEventsMap.set(ev.id, ev);
-              } catch (error) {
-                console.warn(`[My Participation] Skipping invalid public event ${child.key}:`, error);
-              }
-            });
-          }
-          firestoreParticipationError = false;
-          firestoreParticipationErrorMessage = "";
-          publicEventsLoaded = true;
-          reportUnmatchedRegistrations();
-          render();
-        },
-        (error) => {
-          console.error("Could not load public events for participation:", error);
-          firestoreParticipationError = true;
-          publicEventsLoaded = true;
-          reportUnmatchedRegistrations();
-          render();
-        },
-      );
-    }
-  } else {
-    publicEventsLoaded = true;
-    reportUnmatchedRegistrations();
-    render();
-  }
+function retryParticipationData() {
+  if (participationRetryInProgress || !currentUid) return;
+  participationRetryInProgress = true;
+  pageLoadSignaled = false;
+  firestoreParticipationError = false;
+  firestoreParticipationErrorMessage = "";
+  participationLoading = true;
+  pendingInitialRegistrationSnapshots.clear();
+  publicEventsLoaded = !isRtdbConfigured;
+  publicEventListeners.forEach((unsubscribe) => unsubscribe());
+  publicEventListeners.clear();
+  pendingPublicEventLoads.clear();
+  stopFirestoreRegistrationListeners();
+  refreshUserRegistrations();
+  listenForFirestoreRegistrations(currentUid);
+  loadParticipationData();
+  maybeFinishInitialLoad();
+  render();
 }
 
 /* ---------------------------------------------------------
@@ -1726,17 +1767,7 @@ function bindFilterControls() {
     listEl.addEventListener("click", (e) => {
       const retryButton = e.target.closest("[data-action='retry-participation']");
       if (retryButton) {
-        firestoreParticipationError = false;
-        participationLoading = true;
-        if (activePublicEventsRef && activePublicEventsListener) {
-          off(activePublicEventsRef, "value", activePublicEventsListener);
-          activePublicEventsRef = null;
-          activePublicEventsListener = null;
-        }
-        publicEventsLoaded = !isRtdbConfigured;
-        listenForFirestoreRegistrations(currentUid);
-        loadParticipationData();
-        render();
+        retryParticipationData();
         return;
       }
 
@@ -2221,11 +2252,9 @@ function cleanupParticipationListeners() {
     rtdbRegistrationsUnsubscribe();
     rtdbRegistrationsUnsubscribe = null;
   }
-  if (activePublicEventsRef && activePublicEventsListener) {
-    off(activePublicEventsRef, "value", activePublicEventsListener);
-    activePublicEventsRef = null;
-    activePublicEventsListener = null;
-  }
+  publicEventListeners.forEach((unsubscribe) => unsubscribe());
+  publicEventListeners.clear();
+  pendingPublicEventLoads.clear();
   if (serverTimeOffsetUnsubscribe) {
     off(ref(rtdb, ".info/serverTimeOffset"), "value", serverTimeOffsetUnsubscribe);
     serverTimeOffsetUnsubscribe = null;
@@ -2348,6 +2377,10 @@ function cleanupParticipationListeners() {
       participationLoading = false;
       firestoreParticipationError = true;
       render();
+      if (!pageLoadSignaled) {
+        pageLoadSignaled = true;
+        window.dispatchEvent(new Event("page-data-ready"));
+      }
     });
   } else {
     window.location.replace("StudentLogin.html");
@@ -2358,5 +2391,6 @@ function cleanupParticipationListeners() {
     render();
   }, 30000);
 
+  window.addEventListener("page-data-retry", retryParticipationData);
   window.addEventListener("pagehide", cleanupParticipationListeners, { once: true });
 })();

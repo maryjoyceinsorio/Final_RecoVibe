@@ -22,6 +22,15 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
   "use strict";
 
   const tableBody = document.getElementById("user-table-tbody");
+  let pageLoadSignaled = false;
+  const pendingInitialUserSources = new Set(["users", "staff"]);
+  function settleInitialUserSource(source) {
+    pendingInitialUserSources.delete(source);
+    if (!pendingInitialUserSources.size && !pageLoadSignaled) {
+      pageLoadSignaled = true;
+      window.dispatchEvent(new Event("page-data-ready"));
+    }
+  }
   const roleDialog = document.getElementById("account-type-dialog");
   const createDialog = document.getElementById("create-user-dialog");
   const detailsDialog = document.getElementById("user-details-modal-backdrop");
@@ -31,6 +40,30 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
   const passwordConfirmationInput = document.getElementById(
     "new-user-password-confirmation",
   );
+  const passwordToggles = [
+    {
+      input: passwordInput,
+      button: passwordInput.closest(".sa-password-toggle").querySelector("button"),
+      showLabel: "Show password",
+      hideLabel: "Hide password",
+      visible: false,
+      timer: null,
+      selectionStart: null,
+      selectionEnd: null,
+      selectionDirection: "none",
+    },
+    {
+      input: passwordConfirmationInput,
+      button: passwordConfirmationInput.closest(".sa-password-toggle").querySelector("button"),
+      showLabel: "Show confirm password",
+      hideLabel: "Hide confirm password",
+      visible: false,
+      timer: null,
+      selectionStart: null,
+      selectionEnd: null,
+      selectionDirection: "none",
+    },
+  ];
   const statusButton = document.getElementById("toggle-user-status-button");
   const deleteButton = document.getElementById("delete-user-button");
   const editButton = document.getElementById("edit-user-button");
@@ -72,6 +105,84 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
   let pendingEditChanges = [];
   let unsubscribeStudents;
   let unsubscribeStaff;
+
+  function resetPasswordHideTimer(toggle) {
+    if (toggle.timer) clearTimeout(toggle.timer);
+    toggle.timer = toggle.visible
+      ? setTimeout(() => setPasswordVisibility(toggle, false), 30000)
+      : null;
+  }
+
+  function setPasswordVisibility(toggle, visible, restoreFocus = false) {
+    const selectionStart =
+      toggle.selectionStart === null
+        ? toggle.input.selectionStart
+        : toggle.selectionStart;
+    const selectionEnd =
+      toggle.selectionEnd === null ? toggle.input.selectionEnd : toggle.selectionEnd;
+    const selectionDirection = toggle.selectionDirection;
+    toggle.visible = visible;
+    toggle.input.type = visible ? "text" : "password";
+    toggle.button.closest(".sa-password-toggle").classList.toggle("is-visible", visible);
+    toggle.button.setAttribute("aria-label", visible ? toggle.hideLabel : toggle.showLabel);
+    toggle.button.setAttribute("aria-pressed", String(visible));
+
+    if (restoreFocus) {
+      requestAnimationFrame(() => {
+        if (!createDialog.open) return;
+        toggle.input.focus({ preventScroll: true });
+        if (selectionStart !== null && selectionEnd !== null) {
+          toggle.input.setSelectionRange(selectionStart, selectionEnd, selectionDirection);
+          toggle.selectionStart = selectionStart;
+          toggle.selectionEnd = selectionEnd;
+        }
+      });
+    }
+
+    resetPasswordHideTimer(toggle);
+  }
+
+  function resetPasswordToggles() {
+    passwordToggles.forEach((toggle) => setPasswordVisibility(toggle, false));
+  }
+
+  passwordToggles.forEach((toggle) => {
+    toggle.input.addEventListener("blur", () => {
+      toggle.selectionStart = toggle.input.selectionStart;
+      toggle.selectionEnd = toggle.input.selectionEnd;
+      toggle.selectionDirection = toggle.input.selectionDirection;
+    });
+    toggle.button.addEventListener("mousedown", (event) => {
+      toggle.selectionStart = toggle.input.selectionStart;
+      toggle.selectionEnd = toggle.input.selectionEnd;
+      toggle.selectionDirection = toggle.input.selectionDirection;
+      event.preventDefault();
+    });
+    toggle.button.addEventListener("click", () => {
+      setPasswordVisibility(toggle, !toggle.visible, true);
+    });
+    [toggle.input, toggle.button].forEach((element) => {
+      ["input", "keydown", "keyup", "pointerdown", "pointerup"].forEach((eventName) => {
+        element.addEventListener(eventName, () => {
+          toggle.selectionStart = toggle.input.selectionStart;
+          toggle.selectionEnd = toggle.input.selectionEnd;
+          toggle.selectionDirection = toggle.input.selectionDirection;
+        });
+      });
+    });
+  });
+
+  ["input", "keydown", "pointerdown"].forEach((eventName) => {
+    createForm.addEventListener(eventName, () => {
+      passwordToggles.forEach((toggle) => {
+        if (toggle.visible) resetPasswordHideTimer(toggle);
+      });
+    });
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) resetPasswordToggles();
+  });
 
   function showMessage(message, isError = false) {
     if (!toast) return;
@@ -1196,6 +1307,7 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
         newUserContactInput.value = "09";
       }
       roleDialog.close();
+      resetPasswordToggles();
       createDialog.showModal();
       (createForm.elements.firstName || createForm.elements.lastName)?.focus();
     });
@@ -1258,6 +1370,7 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
 
   createDialog.addEventListener("close", () => {
     createForm.reset();
+    resetPasswordToggles();
     if (noMiddleCheckbox) noMiddleCheckbox.checked = false;
     if (middleInput) middleInput.disabled = false;
     isAccountManuallyEdited = false;
@@ -1292,20 +1405,23 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
   if (!isFirebaseConfigured || !db) {
     tableBody.innerHTML =
       '<tr><td class="user-table-empty" colspan="6">User data is unavailable. Please check Firebase configuration.</td></tr>';
+    pendingInitialUserSources.clear();
+    settleInitialUserSource("users");
     return;
   }
 
-  tableBody.innerHTML =
-    '<tr><td class="user-table-empty" colspan="6">Loading user accounts…</td></tr>';
+  tableBody.replaceChildren();
   unsubscribeStudents = onSnapshot(
     collection(db, "users"),
     (snapshot) => {
       console.info("[UserManagement] users snapshot size:", snapshot.size);
       handleUsersSnapshot("users", snapshot);
+      settleInitialUserSource("users");
     },
     (error) => {
       console.error("Unable to load student accounts:", error);
       showMessage("Could not load student accounts.", true);
+      settleInitialUserSource("users");
     },
   );
 
@@ -1314,10 +1430,12 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
     (snapshot) => {
       console.info("[UserManagement] adminUser snapshot size:", snapshot.size);
     handleUsersSnapshot("adminUser", snapshot);
+      settleInitialUserSource("staff");
     },
     (error) => {
       console.error("Unable to load adminUser accounts:", error);
       showMessage("Could not load staff accounts.", true);
+      settleInitialUserSource("staff");
     },
   );
 

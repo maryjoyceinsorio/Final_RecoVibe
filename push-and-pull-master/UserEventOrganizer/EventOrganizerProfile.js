@@ -14,6 +14,13 @@ import {
 (() => {
   const profileStorageKey = "recovibeOrganizerProfile";
   const organizerIdKey = "recovibeOrganizerId";
+  let profilePageLoadSignaled = false;
+
+  function signalProfilePageReady() {
+    if (profilePageLoadSignaled) return;
+    profilePageLoadSignaled = true;
+    window.dispatchEvent(new Event("page-data-ready"));
+  }
 
   function formatPhilippinePhone(raw) {
     const digits = String(raw || "").replace(/\D/g, "");
@@ -30,16 +37,16 @@ import {
   }
 
   const DEFAULT_ORGANIZER = {
-    firstName: "Alex",
+    firstName: "",
     middleName: "",
-    lastName: "Rivera",
-    name: "Alex Rivera",
-    email: "organizer@pup.edu.ph",
-    contactNumber: "0912 345 6789",
+    lastName: "",
+    name: "",
+    email: "",
+    contactNumber: "",
     organizerId: "",
-    organization: "IBITS",
+    organization: "",
     role: "Event Organizer",
-    campus: "PUP Biñan Campus",
+    campus: "",
   };
 
   let profile = { ...DEFAULT_ORGANIZER };
@@ -50,8 +57,8 @@ import {
       profile = { ...DEFAULT_ORGANIZER, ...stored };
       if (!profile.firstName && profile.name) {
         const parts = profile.name.trim().split(/\s+/).filter(Boolean);
-        profile.firstName = parts[0] || "Alex";
-        profile.lastName = parts.length > 1 ? parts[parts.length - 1] : "Rivera";
+        profile.firstName = parts[0] || "";
+        profile.lastName = parts.length > 1 ? parts[parts.length - 1] : "";
         profile.middleName = parts.length > 2 ? parts.slice(1, -1).join(" ") : "";
       }
     }
@@ -87,11 +94,11 @@ import {
     const firstName = String(profile.firstName || "").trim();
     const middleName = String(profile.middleName || "").trim();
     const lastName = String(profile.lastName || "").trim();
-    const fullName = [firstName, middleName, lastName].filter(Boolean).join(" ") || profile.name || "Event Organizer";
+    const fullName = [firstName, middleName, lastName].filter(Boolean).join(" ") || profile.name || "";
     profile.name = fullName;
 
-    const initials = Array.from(firstName || fullName || "E")[0]?.toUpperCase() || "EO";
-    const org = profile.organization || "IBITS";
+    const initials = Array.from(firstName || fullName)[0]?.toUpperCase() || "";
+    const org = profile.organization || "";
     const storedOrganizerId = [
       profile.accountNumber,
       profile.accountNo,
@@ -124,7 +131,7 @@ import {
     const organizerName = document.getElementById("organizerName");
     if (organizerName) organizerName.textContent = fullName;
     const organizerRole = document.getElementById("organizerRole");
-    if (organizerRole) organizerRole.textContent = `${org} account`;
+    if (organizerRole) organizerRole.textContent = org ? `${org} account` : "Event Organizer";
 
     // Name Card View
     const viewFirstName = document.getElementById("viewFirstName");
@@ -138,11 +145,11 @@ import {
       }
     }
     const viewLastName = document.getElementById("viewLastName");
-    if (viewLastName) viewLastName.textContent = lastName || "Organizer";
+    if (viewLastName) viewLastName.textContent = lastName;
 
     // Contact Card View
     const viewEmail = document.getElementById("viewEmail");
-    if (viewEmail) viewEmail.textContent = profile.email || "organizer@pup.edu.ph";
+    if (viewEmail) viewEmail.textContent = profile.email || "Not set";
     const viewContact = document.getElementById("viewContact");
     if (viewContact) {
       if (profile.contactNumber) {
@@ -156,11 +163,11 @@ import {
     const viewOrganizerId = document.getElementById("viewOrganizerId");
     if (viewOrganizerId) viewOrganizerId.textContent = organizerId || "Not set";
     const viewOrganization = document.getElementById("viewOrganization");
-    if (viewOrganization) viewOrganization.textContent = org;
+    if (viewOrganization) viewOrganization.textContent = org || "Not set";
     const viewRole = document.getElementById("viewRole");
     if (viewRole) viewRole.textContent = profile.role || "Event Organizer";
     const viewCampus = document.getElementById("viewCampus");
-    if (viewCampus) viewCampus.textContent = profile.campus || "PUP Biñan Campus";
+    if (viewCampus) viewCampus.textContent = profile.campus || "Not set";
   }
 
   /* -------------------------------------------------------------
@@ -593,6 +600,7 @@ import {
       correctionRequestsLoading = false;
       correctionRequestsError = "Sign in to view your correction requests.";
       renderCorrectionRequests();
+      signalProfilePageReady();
       return;
     }
 
@@ -601,6 +609,7 @@ import {
       correctionRequestsLoading = false;
       correctionRequestsError = "Requests are taking longer than expected to load.";
       renderCorrectionRequests();
+      signalProfilePageReady();
     }, 5000);
     try {
       correctionRequestsUnsubscribe = subscribeMyCorrectionRequests(
@@ -613,6 +622,7 @@ import {
           correctionRequestsTimeout = null;
           updatePendingCorrectionFields();
           renderCorrectionRequests();
+          signalProfilePageReady();
         },
         (error) => {
           correctionRequestsLoading = false;
@@ -622,6 +632,7 @@ import {
           clearTimeout(correctionRequestsTimeout);
           correctionRequestsTimeout = null;
           renderCorrectionRequests();
+          signalProfilePageReady();
         },
       );
     } catch (error) {
@@ -630,6 +641,7 @@ import {
       clearTimeout(correctionRequestsTimeout);
       correctionRequestsTimeout = null;
       renderCorrectionRequests();
+      signalProfilePageReady();
     }
   }
 
@@ -643,6 +655,7 @@ import {
       correctionRequestsLoading = false;
       correctionRequestsError = "Authentication is taking longer than expected.";
       renderCorrectionRequests();
+      signalProfilePageReady();
     }, 5000);
     try {
       await authReady;
@@ -653,6 +666,7 @@ import {
         correctionRequestsLoading = false;
         correctionRequestsError = "Correction requests are unavailable.";
         renderCorrectionRequests();
+        signalProfilePageReady();
         return;
       }
       correctionAuthUnsubscribe = onAuthStateChanged(auth, (user) => {
@@ -665,6 +679,7 @@ import {
           correctionRequestsLoading = false;
           correctionRequestsError = "Sign in to view your correction requests.";
           renderCorrectionRequests();
+          signalProfilePageReady();
           window.location.replace("EventOrganizerLogin.html");
           return;
         }
@@ -677,6 +692,7 @@ import {
       correctionRequestsLoading = false;
       correctionRequestsError = error?.message || "Couldn't initialize your correction requests.";
       renderCorrectionRequests();
+      signalProfilePageReady();
     }
   }
 

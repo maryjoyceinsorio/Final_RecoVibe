@@ -50,14 +50,19 @@ a {
   display: flex;
   flex-direction: column;
   width: var(--sidebar-width);
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   padding: 20px 16px;
+  overflow: hidden;
+  box-sizing: border-box;
   background: linear-gradient(180deg, #7a1f2e 0%, #4f1420 100%);
   color: #f3e9dc;
 }
 
 .brand {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 10px;
   margin-bottom: 28px;
@@ -95,8 +100,10 @@ a {
 .primary-nav {
   display: flex;
   flex: 1 1 auto;
+  min-height: 0;
   flex-direction: column;
   gap: 3px;
+  overflow-y: auto;
 }
 
 .nav-link {
@@ -142,6 +149,7 @@ a {
 
 .sidebar-footer {
   display: flex;
+  flex: 0 0 auto;
   flex-direction: column;
   margin: auto 0 0;
   padding: 14px 0 0;
@@ -969,8 +977,9 @@ a {
   }
 
   .sidebar {
-    position: relative;
-    inset: auto;
+    position: sticky;
+    top: 0;
+    left: 0;
     width: 100%;
     min-height: auto;
     padding: 10px 14px 12px;
@@ -996,6 +1005,7 @@ a {
     display: flex;
     gap: 4px;
     overflow-x: auto;
+    overflow-y: hidden;
     margin: 8px -14px 0;
     padding: 0 14px 4px;
     scrollbar-width: thin;

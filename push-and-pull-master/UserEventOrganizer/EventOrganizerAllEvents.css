@@ -69,13 +69,17 @@ select:focus-visible {
 .organizer-sidebar {
   position: sticky;
   top: 0;
+  left: 0;
   display: flex;
   flex: 0 0 264px;
   flex-direction: column;
   width: 264px;
   height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   padding: 20px 16px;
   overflow: hidden;
+  box-sizing: border-box;
   background: linear-gradient(
     180deg,
     var(--maroon) 0%,
@@ -86,13 +90,17 @@ select:focus-visible {
 .sidebar {
   position: sticky;
   top: 0;
+  left: 0;
   display: flex;
   flex: 0 0 264px;
   flex-direction: column;
   width: 264px;
   height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   padding: 20px 16px;
   overflow: hidden;
+  box-sizing: border-box;
   background: linear-gradient(
     180deg,
     var(--maroon) 0%,
@@ -102,12 +110,14 @@ select:focus-visible {
 }
 .organizer-brand {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 10px;
   margin-bottom: 28px;
 }
 .brand {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 10px;
   margin-bottom: 28px;
@@ -169,15 +179,19 @@ select:focus-visible {
 }
 .organizer-nav {
   display: flex;
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   flex-direction: column;
   gap: 3px;
+  overflow-y: auto;
 }
 .nav {
   display: flex;
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   flex-direction: column;
   gap: 3px;
+  overflow-y: auto;
 }
 .organizer-nav a {
   display: flex;
@@ -383,6 +397,7 @@ select:focus-visible {
 }
 .organizer-account {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 10px;
   padding: 14px 7px 5px;
@@ -390,6 +405,7 @@ select:focus-visible {
 }
 .sidebar-bottom {
   display: flex;
+  flex: 0 0 auto;
   flex-direction: column;
   margin-top: auto;
   padding-top: 14px;
@@ -987,6 +1003,7 @@ select:focus-visible {
     flex-direction: row;
     justify-content: flex-end;
     gap: 2px;
+    overflow-y: hidden;
   }
   .organizer-nav a {
     width: 38px;
@@ -2063,15 +2080,18 @@ select:focus-visible {
 .app#notificationPage .sidebar {
   position: sticky;
   top: 0;
+  left: 0;
   display: flex;
   flex: 0 0 264px;
   flex-direction: column;
   align-items: stretch;
   width: 264px;
   height: 100vh;
-  min-height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   padding: 20px 16px;
   overflow: hidden;
+  box-sizing: border-box;
   background: linear-gradient(180deg, #7a1f2e 0%, #4f1420 100%);
   color: #f3e9dc;
   font-family: Inter, sans-serif;
@@ -2096,7 +2116,7 @@ select:focus-visible {
   min-height: 0;
   flex-direction: column;
   gap: 3px;
-  overflow: visible;
+  overflow-y: auto;
 }
 
 .organizer-nav a,
@@ -2165,6 +2185,7 @@ select:focus-visible {
 .organizer-account,
 .organizer-sidebar .sidebar-bottom,
 .app#notificationPage .sidebar-bottom {
+  flex: 0 0 auto;
   margin-top: auto;
   border-top: 1px solid rgba(255, 255, 255, 0.14);
 }
@@ -2187,6 +2208,8 @@ select:focus-visible {
   .organizer-sidebar,
   .app#notificationPage .sidebar {
     z-index: 40;
+    top: 0;
+    left: 0;
     flex-direction: row;
     flex-wrap: nowrap;
     align-items: center;

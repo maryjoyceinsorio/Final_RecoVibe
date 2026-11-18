@@ -17,6 +17,19 @@
     <link rel="stylesheet" href="EventOrganizerCreateEvent.css" />
     <link rel="stylesheet" href="../UserTeacher/TeacherCreate.css" />
     <link rel="stylesheet" href="OrganizerNotificationBadge.css" />
+  <style>
+    #userAvatar:empty,
+    #organizerAvatar:empty,
+    #teacherAvatar:empty,
+    #teacherCalendarAvatar:empty,
+    #sidebar-user-avatar:empty,
+    #userName:empty,
+    #organizerName:empty,
+    #teacherName:empty,
+    #teacherCalendarName:empty,
+    #sidebar-user-name:empty { visibility: hidden !important; }
+    #navNotifBadge:empty { display: none !important; }
+  </style>
   </head>
   <body>
     <svg
@@ -250,5 +263,144 @@
     <script src="OrganizerNotificationBadge.js"></script>
     <script type="module" src="eventorganizationcreateevent.js"></script>
     <script type="module" src="OrganizerSidebarProfile.js"></script>
+<script>
+   (() => {
+     const selector = 'a.logout, a.logout-link, a.admin-logout, #organizerLogout, #teacherLogout, #teacherCalendarLogout, #superAdminLogout, #logoutButton';
+     const style = document.createElement("style");
+     style.textContent = `
+       #rvLogoutConfirmOverlay{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;color:#292320;font:inherit}
+       #rvLogoutConfirmOverlay[hidden]{display:none}
+       #rvLogoutConfirmOverlay .confirm-modal-backdrop{position:absolute;inset:0;background:rgba(22,16,16,.56)}
+       #rvLogoutConfirmOverlay .confirm-modal-dialog{position:relative;box-sizing:border-box;width:min(400px,100%);max-height:calc(100vh - 32px);overflow-y:auto;margin:0;padding:24px;background:#fffdf8;border:1px solid #e6dcc9;border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,.28)}
+       #rvLogoutConfirmOverlay .confirm-modal-title{margin:0 0 12px;font-size:1.35rem}
+       #rvLogoutConfirmOverlay .confirm-modal-message{margin:0;line-height:1.5}
+       #rvLogoutConfirmOverlay .confirm-modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:24px}
+       #rvLogoutConfirmOverlay .confirm-modal-actions button{min-height:40px;padding:8px 18px;border:1px solid #7a1f2b;border-radius:8px;font:inherit;font-weight:600;cursor:pointer}
+       #rvLogoutConfirmOverlay .confirm-modal-actions .btn-secondary{background:transparent;color:#7a1f2b}
+       #rvLogoutConfirmOverlay .confirm-modal-actions .btn-primary{background:#7a1f2b;color:#fff}
+       #rvLogoutConfirmOverlay .confirm-modal-actions button:hover:not(:disabled){filter:brightness(.94)}
+       #rvLogoutConfirmOverlay .confirm-modal-actions button:focus-visible{outline:3px solid #c5a15b;outline-offset:2px}
+       #rvLogoutConfirmOverlay .confirm-modal-actions button:disabled{opacity:.65;cursor:wait}
+       #confirmModalOverlay{z-index:2147483647}
+     `;
+     document.head.appendChild(style);
+     let overlay = document.getElementById("confirmModalOverlay");
+     if (!overlay) {
+       const template = document.createElement("template");
+       const usesAccountModal = Boolean(document.querySelector(".account-form-modal"));
+       template.innerHTML = `<div id="rvLogoutConfirmOverlay" class="confirm-modal-overlay${usesAccountModal ? " account-form-modal" : ""}" role="dialog" aria-modal="true" aria-labelledby="rvLogoutConfirmTitle" hidden><div class="confirm-modal-backdrop"></div><div class="confirm-modal-dialog${usesAccountModal ? " modal-dialog" : ""}" tabindex="-1"><div class="confirm-modal-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="28" height="28"><path d="M12 9v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" stroke-linecap="round" stroke-linejoin="round"/></svg></div><h2 class="confirm-modal-title" id="rvLogoutConfirmTitle">Log out?</h2><p class="confirm-modal-message" id="rvLogoutConfirmMessage">Are you sure you want to log out of RecoVibe?</p><div class="confirm-modal-actions${usesAccountModal ? " modal-footer" : ""}"><button type="button" class="btn-secondary" data-rv-logout-cancel>Cancel</button><button type="button" class="btn-primary" data-rv-logout-confirm>Log out</button></div></div></div>`;
+       overlay = template.content.firstElementChild;
+       document.body.appendChild(overlay);
+     }
+     overlay.setAttribute("role", "dialog");
+     overlay.setAttribute("aria-modal", "true");
+     const title = overlay.querySelector("#confirmModalTitle, #rvLogoutConfirmTitle");
+     const message = overlay.querySelector("#confirmModalMessage, #rvLogoutConfirmMessage");
+     const cancel = overlay.querySelector("#confirmModalCancelBtn, [data-rv-logout-cancel]");
+     const confirm = overlay.querySelector("#confirmModalConfirmBtn, [data-rv-logout-confirm]");
+     const backdrop = overlay.querySelector(".confirm-modal-backdrop");
+     const panel = overlay.querySelector(".confirm-modal-dialog");
+     panel.tabIndex = -1;
+     title.textContent = "Log out?";
+     message.textContent = "Are you sure you want to log out of RecoVibe?";
+     cancel.textContent = "Cancel";
+     confirm.textContent = "Log out";
+     confirm.classList.remove("btn-danger");
+     confirm.classList.add("btn-primary");
+     let logoutControl = null;
+     let loggingOut = false;
+     let busySeen = false;
+     let timeoutId = 0;
+     let pollId = 0;
+     let observer = null;
+     const closeDialog = () => {
+       if (loggingOut) return;
+       overlay.hidden = true;
+       overlay.style.display = "none";
+       logoutControl?.focus();
+     };
+     const finishFailedLogout = () => {
+       if (!loggingOut) return;
+       loggingOut = false;
+       window.clearTimeout(timeoutId);
+       window.clearInterval(pollId);
+       observer?.disconnect();
+       observer = null;
+       overlay.removeAttribute("aria-busy");
+       cancel.disabled = false;
+       confirm.disabled = false;
+       confirm.textContent = "Log out";
+       cancel.focus();
+     };
+     document.addEventListener("click", (event) => {
+       const target = event.target instanceof Element ? event.target.closest("a, button") : null;
+       if (!target) return;
+       const label = (target.getAttribute("aria-label") || target.title || target.textContent).trim().toLowerCase();
+       if (!target.matches(selector) && label !== "logout") return;
+       if (target.dataset.rvLogoutProceed === "true") {
+         delete target.dataset.rvLogoutProceed;
+         return;
+       }
+       event.preventDefault();
+       event.stopImmediatePropagation();
+       if (!overlay.hidden) return;
+       logoutControl = target;
+       overlay.hidden = false;
+       overlay.style.display = "flex";
+       cancel.focus();
+     }, true);
+     cancel.addEventListener("click", closeDialog);
+     backdrop.addEventListener("click", closeDialog);
+     document.addEventListener("keydown", (event) => {
+       if (overlay.hidden) return;
+       if (event.key === "Escape") {
+         event.preventDefault();
+         event.stopPropagation();
+         closeDialog();
+         return;
+       }
+       if (event.key !== "Tab") return;
+       if (loggingOut) {
+         event.preventDefault();
+         return;
+       }
+       if (event.shiftKey && document.activeElement === cancel) {
+         event.preventDefault();
+         confirm.focus();
+       } else if (!event.shiftKey && document.activeElement === confirm) {
+         event.preventDefault();
+         cancel.focus();
+       }
+     }, true);
+     confirm.addEventListener("click", () => {
+       if (!logoutControl || loggingOut) return;
+       loggingOut = true;
+       busySeen = false;
+       cancel.disabled = true;
+       confirm.disabled = true;
+       confirm.textContent = "Logging out...";
+       overlay.setAttribute("aria-busy", "true");
+       panel.focus();
+       const checkLogoutState = () => {
+         const busy = logoutControl.disabled || logoutControl.getAttribute("aria-busy") === "true";
+         if (busy) busySeen = true;
+         else if (busySeen) finishFailedLogout();
+       };
+       observer = new MutationObserver(checkLogoutState);
+       observer.observe(logoutControl, { attributes: true, attributeFilter: ["disabled", "aria-busy"] });
+       pollId = window.setInterval(checkLogoutState, 100);
+       logoutControl.dataset.rvLogoutProceed = "true";
+       logoutControl.dataset.rvLogoutConfirmed = "true";
+       logoutControl.click();
+       delete logoutControl.dataset.rvLogoutConfirmed;
+       timeoutId = window.setTimeout(finishFailedLogout, 15000);
+     });
+     window.addEventListener("pagehide", () => {
+       window.clearTimeout(timeoutId);
+       window.clearInterval(pollId);
+       observer?.disconnect();
+     }, { once: true });
+   })();
+   </script>
   </body>
 </html>

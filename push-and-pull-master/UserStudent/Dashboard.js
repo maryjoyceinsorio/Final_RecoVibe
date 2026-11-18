@@ -48,6 +48,7 @@ import {
   loadStudentProfile,
   renderStudentSidebar,
 } from "./studentIdentity.js";
+import { mountHelpBot } from "../recoVibeHelpBot.js";
 
 /* ---------------------------------------------------------
    STATE
@@ -98,6 +99,15 @@ let retryEventFetch = null;
 let eventFetchLoading = true;
 let eventFetchError = null;
 let eventFetchTimeout = null;
+let realtimeEventsLoaded = !isRtdbConfigured;
+let realtimeEventsTimeout = null;
+let pageLoadSignaled = false;
+
+function signalPageLoadReady() {
+  if (pageLoadSignaled || eventFetchLoading) return;
+  pageLoadSignaled = true;
+  window.dispatchEvent(new Event("page-data-ready"));
+}
 let registeredEventIds = new Set();
 const firestoreRegistrationListeners = new Map();
 let firestoreRegistrationListenerUid = null;
@@ -1398,7 +1408,7 @@ function renderUpcoming() {
               <span>${eventMetaIconPin()} ${highlightMatch(ev.venue, state.query)}</span>
             </div>
             <div class="event-foot">
-              <span class="slots">${ev.capacity > 0 ? `${Math.max(0, ev.capacity - ev.registeredCount)} slots left` : "Open registration"}</span>
+              <span class="slots">${ev.capacity > 0 ? `${Math.max(0, Math.min(ev.capacity, ev.capacity - ev.registeredCount))} slots left` : "Open registration"}</span>
               <div class="event-actions">
                 ${actionBtn}
                 <button type="button" class="btn-outline btn-toggle-details" data-event-id="${ev.id}" aria-expanded="${isDetailsOpen}">Details</button>
@@ -1963,6 +1973,14 @@ function syncRegistrationsFromFirestore(eventsList) {
 function initDataListeners(authenticatedUser = auth?.currentUser) {
   unsubscribeFirestoreEvents?.();
   unsubscribeFirestoreEvents = null;
+  clearTimeout(realtimeEventsTimeout);
+  realtimeEventsLoaded = !isRtdbConfigured;
+  if (isRtdbConfigured) {
+    realtimeEventsTimeout = window.setTimeout(() => {
+      realtimeEventsLoaded = true;
+      signalPageLoadReady();
+    }, 8000);
+  }
   if (!authenticatedUser) {
     eventFetchLoading = false;
     eventFetchError = "Sign in to load student events.";
@@ -1970,6 +1988,7 @@ function initDataListeners(authenticatedUser = auth?.currentUser) {
     renderUpcoming();
     renderRecommended();
     renderCalendar();
+    signalPageLoadReady();
   }
   if (isFirebaseConfigured && db && authenticatedUser) {
     eventFetchLoading = true;
@@ -1992,6 +2011,7 @@ function initDataListeners(authenticatedUser = auth?.currentUser) {
       });
       firestoreEventsMap = publishedEvents;
       rebuildStudentEvents();
+      signalPageLoadReady();
     };
     const listenForEvents = (eventsQuery) => {
       clearTimeout(eventFetchTimeout);
@@ -2005,6 +2025,7 @@ function initDataListeners(authenticatedUser = auth?.currentUser) {
         renderUpcoming();
         renderRecommended();
         renderCalendar();
+        signalPageLoadReady();
       }, 8000);
       try {
         unsubscribeFirestoreEvents = onSnapshot(
@@ -2022,6 +2043,7 @@ function initDataListeners(authenticatedUser = auth?.currentUser) {
             renderUpcoming();
             renderRecommended();
             renderCalendar();
+            signalPageLoadReady();
           },
         );
       } catch (error) {
@@ -2036,6 +2058,7 @@ function initDataListeners(authenticatedUser = auth?.currentUser) {
         renderUpcoming();
         renderRecommended();
         renderCalendar();
+        signalPageLoadReady();
       }
     };
     const publishedEventsQuery = () =>
@@ -2072,6 +2095,7 @@ function initDataListeners(authenticatedUser = auth?.currentUser) {
       renderUpcoming();
       renderRecommended();
       renderCalendar();
+      signalPageLoadReady();
     }
     activeCleanups.push(() => {
       clearTimeout(eventFetchTimeout);
@@ -2084,6 +2108,7 @@ function initDataListeners(authenticatedUser = auth?.currentUser) {
     renderUpcoming();
     renderRecommended();
     renderCalendar();
+    signalPageLoadReady();
   }
 
   // 1. Server time offset
@@ -2114,17 +2139,33 @@ function initDataListeners(authenticatedUser = auth?.currentUser) {
         }
       });
       realtimeEventsMap = newMap;
+      realtimeEventsLoaded = true;
+      clearTimeout(realtimeEventsTimeout);
+      realtimeEventsTimeout = null;
       rebuildStudentEvents();
+      signalPageLoadReady();
     };
 
-    onValue(eventsQuery, onEvents);
-    activeCleanups.push(() => off(eventsQuery, "value", onEvents));
+    const onEventsError = (error) => {
+      console.error("Could not load real-time student events:", error);
+      realtimeEventsLoaded = true;
+      clearTimeout(realtimeEventsTimeout);
+      realtimeEventsTimeout = null;
+      signalPageLoadReady();
+    };
+    onValue(eventsQuery, onEvents, onEventsError);
+    activeCleanups.push(() => {
+      clearTimeout(realtimeEventsTimeout);
+      off(eventsQuery, "value", onEvents);
+    });
   } else {
+    realtimeEventsLoaded = true;
     loadFallbackEvents();
     renderHappeningNow();
     renderUpcoming();
     renderRecommended();
     renderCalendar();
+    signalPageLoadReady();
   }
 }
 
@@ -2379,6 +2420,7 @@ function init() {
       try {
         const profile = await loadStudentProfile(user);
         if (auth.currentUser?.uid !== user.uid) return;
+        mountHelpBot({ role: "student" });
 
         Object.keys(studentProfile).forEach((key) => delete studentProfile[key]);
         Object.assign(studentProfile, profile);
@@ -2462,6 +2504,7 @@ function init() {
       renderUpcoming();
       renderRecommended();
       renderCalendar();
+      signalPageLoadReady();
     });
   } else {
     window.location.replace("StudentLogin.html");

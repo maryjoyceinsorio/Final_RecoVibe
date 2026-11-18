@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-page-loading="true" data-page-waits-for-data="true">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -11,6 +11,52 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="AdminNotification.css" />
+  <style id="page-preloader-style">
+    html[data-page-loading="true"] [data-page-load-container] { position: relative; }
+    #userAvatar:empty,
+    #organizerAvatar:empty,
+    #teacherAvatar:empty,
+    #teacherCalendarAvatar:empty,
+    #sidebar-user-avatar:empty,
+    #userName:empty,
+    #organizerName:empty,
+    #teacherName:empty,
+    #teacherCalendarName:empty,
+    #sidebar-user-name:empty { visibility: hidden !important; }
+    #navNotifBadge:empty { display: none !important; }
+    html[data-page-loading="true"] [data-page-load-container] > :not(.page-preloader),
+    html[data-page-load-error="true"] [data-page-load-container] > :not(.page-preloader) { visibility: hidden !important; }
+    html[data-page-loading="true"] [data-page-load-container][hidden] { display: block !important; }
+    .page-preloader {
+      position: absolute;
+      z-index: 20;
+      inset: 0;
+      display: grid;
+      min-height: 100vh;
+      place-content: center;
+      justify-items: center;
+      gap: 12px;
+      background: #f7f6f4;
+      color: #7a1f2e;
+      font: 500 15px/1.4 Inter, "Segoe UI", Arial, sans-serif;
+      text-align: center;
+    }
+    .page-preloader[hidden] { display: none !important; }
+    .page-preloader-spinner {
+      width: 42px;
+      height: 42px;
+      border: 4px solid #e7d9b8;
+      border-top-color: #7a1f2e;
+      border-radius: 50%;
+      animation: page-preloader-spin 800ms linear infinite;
+    }
+    .page-preloader-error { max-width: 28rem; padding: 18px; }
+    .page-preloader-retry { margin-top: 12px; }
+    @keyframes page-preloader-spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) {
+      .page-preloader-spinner { animation: none; border-color: #7a1f2e; }
+    }
+  </style>
   </head>
   <body>
     <div class="admin-app">
@@ -64,7 +110,11 @@
           </a>
         </footer>
       </aside>
-      <main class="admin-main">
+      <main class="admin-main" data-page-load-container="true" aria-busy="true">
+    <div class="page-preloader" id="pagePreloader" role="status" aria-live="polite">
+      <span class="page-preloader-spinner" aria-hidden="true"></span>
+      <span>Loading...</span>
+    </div>
         <section class="admin-content" id="notificationRoot" aria-live="polite">
           <div class="admin-loading">Loading notifications…</div>
         </section>
@@ -73,5 +123,189 @@
     <div id="correctionReviewPanel" class="correction-review-overlay" hidden></div>
     <div class="admin-toast" role="status" aria-live="polite" hidden></div>
     <script type="module" src="AdminNotification.js"></script>
+    <script>
+    (() => {
+      const root = document.documentElement;
+      const container = document.querySelector("[data-page-load-container]");
+      const preloader = document.getElementById("pagePreloader");
+      let completed = false;
+      let timeoutId;
+      const finish = (timedOut = false) => {
+        if (completed) return;
+        completed = true;
+        clearTimeout(timeoutId);
+        if (timedOut) {
+          root.removeAttribute("data-page-loading");
+          root.removeAttribute("data-page-load-error");
+          if (container) container.setAttribute("aria-busy", "false");
+          const existingError = container && container.querySelector("[role='alert'], .notification-source-warning, .page-load-error");
+          if (
+            existingError &&
+            !existingError.hidden &&
+            existingError.textContent.trim() &&
+            getComputedStyle(existingError).visibility !== "hidden" &&
+            existingError.getClientRects().length
+          ) {
+            preloader.hidden = true;
+            return;
+          }
+          root.setAttribute("data-page-load-error", "true");
+          preloader.classList.add("page-preloader-error");
+          preloader.innerHTML = "Could not load data. Please try again.<button class=\"page-preloader-retry\" type=\"button\">Retry</button>";
+          preloader.querySelector("button").addEventListener("click", () => window.location.reload());
+          return;
+        }
+        root.removeAttribute("data-page-loading");
+        root.removeAttribute("data-page-load-error");
+        if (container) container.setAttribute("aria-busy", "false");
+        preloader.hidden = true;
+      };
+      window.addEventListener("page-data-ready", () => finish(), { once: true });
+      if (root.hasAttribute("data-page-waits-for-data")) {
+        timeoutId = setTimeout(() => finish(true), 10000);
+      } else {
+        finish();
+      }
+    })();
+  </script>
+<script>
+   (() => {
+     const selector = 'a.logout, a.logout-link, a.admin-logout, #organizerLogout, #teacherLogout, #teacherCalendarLogout, #superAdminLogout, #logoutButton';
+     const style = document.createElement("style");
+     style.textContent = `
+       #rvLogoutConfirmOverlay{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;color:#292320;font:inherit}
+       #rvLogoutConfirmOverlay[hidden]{display:none}
+       #rvLogoutConfirmOverlay .confirm-modal-backdrop{position:absolute;inset:0;background:rgba(22,16,16,.56)}
+       #rvLogoutConfirmOverlay .confirm-modal-dialog{position:relative;box-sizing:border-box;width:min(400px,100%);max-height:calc(100vh - 32px);overflow-y:auto;margin:0;padding:24px;background:#fffdf8;border:1px solid #e6dcc9;border-radius:14px;box-shadow:0 12px 36px rgba(0,0,0,.28)}
+       #rvLogoutConfirmOverlay .confirm-modal-title{margin:0 0 12px;font-size:1.35rem}
+       #rvLogoutConfirmOverlay .confirm-modal-message{margin:0;line-height:1.5}
+       #rvLogoutConfirmOverlay .confirm-modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:24px}
+       #rvLogoutConfirmOverlay .confirm-modal-actions button{min-height:40px;padding:8px 18px;border:1px solid #7a1f2b;border-radius:8px;font:inherit;font-weight:600;cursor:pointer}
+       #rvLogoutConfirmOverlay .confirm-modal-actions .btn-secondary{background:transparent;color:#7a1f2b}
+       #rvLogoutConfirmOverlay .confirm-modal-actions .btn-primary{background:#7a1f2b;color:#fff}
+       #rvLogoutConfirmOverlay .confirm-modal-actions button:hover:not(:disabled){filter:brightness(.94)}
+       #rvLogoutConfirmOverlay .confirm-modal-actions button:focus-visible{outline:3px solid #c5a15b;outline-offset:2px}
+       #rvLogoutConfirmOverlay .confirm-modal-actions button:disabled{opacity:.65;cursor:wait}
+       #confirmModalOverlay{z-index:2147483647}
+     `;
+     document.head.appendChild(style);
+     let overlay = document.getElementById("confirmModalOverlay");
+     if (!overlay) {
+       const template = document.createElement("template");
+       const usesAccountModal = Boolean(document.querySelector(".account-form-modal"));
+       template.innerHTML = `<div id="rvLogoutConfirmOverlay" class="confirm-modal-overlay${usesAccountModal ? " account-form-modal" : ""}" role="dialog" aria-modal="true" aria-labelledby="rvLogoutConfirmTitle" hidden><div class="confirm-modal-backdrop"></div><div class="confirm-modal-dialog${usesAccountModal ? " modal-dialog" : ""}" tabindex="-1"><div class="confirm-modal-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="28" height="28"><path d="M12 9v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" stroke-linecap="round" stroke-linejoin="round"/></svg></div><h2 class="confirm-modal-title" id="rvLogoutConfirmTitle">Log out?</h2><p class="confirm-modal-message" id="rvLogoutConfirmMessage">Are you sure you want to log out of RecoVibe?</p><div class="confirm-modal-actions${usesAccountModal ? " modal-footer" : ""}"><button type="button" class="btn-secondary" data-rv-logout-cancel>Cancel</button><button type="button" class="btn-primary" data-rv-logout-confirm>Log out</button></div></div></div>`;
+       overlay = template.content.firstElementChild;
+       document.body.appendChild(overlay);
+     }
+     overlay.setAttribute("role", "dialog");
+     overlay.setAttribute("aria-modal", "true");
+     const title = overlay.querySelector("#confirmModalTitle, #rvLogoutConfirmTitle");
+     const message = overlay.querySelector("#confirmModalMessage, #rvLogoutConfirmMessage");
+     const cancel = overlay.querySelector("#confirmModalCancelBtn, [data-rv-logout-cancel]");
+     const confirm = overlay.querySelector("#confirmModalConfirmBtn, [data-rv-logout-confirm]");
+     const backdrop = overlay.querySelector(".confirm-modal-backdrop");
+     const panel = overlay.querySelector(".confirm-modal-dialog");
+     panel.tabIndex = -1;
+     title.textContent = "Log out?";
+     message.textContent = "Are you sure you want to log out of RecoVibe?";
+     cancel.textContent = "Cancel";
+     confirm.textContent = "Log out";
+     confirm.classList.remove("btn-danger");
+     confirm.classList.add("btn-primary");
+     let logoutControl = null;
+     let loggingOut = false;
+     let busySeen = false;
+     let timeoutId = 0;
+     let pollId = 0;
+     let observer = null;
+     const closeDialog = () => {
+       if (loggingOut) return;
+       overlay.hidden = true;
+       overlay.style.display = "none";
+       logoutControl?.focus();
+     };
+     const finishFailedLogout = () => {
+       if (!loggingOut) return;
+       loggingOut = false;
+       window.clearTimeout(timeoutId);
+       window.clearInterval(pollId);
+       observer?.disconnect();
+       observer = null;
+       overlay.removeAttribute("aria-busy");
+       cancel.disabled = false;
+       confirm.disabled = false;
+       confirm.textContent = "Log out";
+       cancel.focus();
+     };
+     document.addEventListener("click", (event) => {
+       const target = event.target instanceof Element ? event.target.closest("a, button") : null;
+       if (!target) return;
+       const label = (target.getAttribute("aria-label") || target.title || target.textContent).trim().toLowerCase();
+       if (!target.matches(selector) && label !== "logout") return;
+       if (target.dataset.rvLogoutProceed === "true") {
+         delete target.dataset.rvLogoutProceed;
+         return;
+       }
+       event.preventDefault();
+       event.stopImmediatePropagation();
+       if (!overlay.hidden) return;
+       logoutControl = target;
+       overlay.hidden = false;
+       overlay.style.display = "flex";
+       cancel.focus();
+     }, true);
+     cancel.addEventListener("click", closeDialog);
+     backdrop.addEventListener("click", closeDialog);
+     document.addEventListener("keydown", (event) => {
+       if (overlay.hidden) return;
+       if (event.key === "Escape") {
+         event.preventDefault();
+         event.stopPropagation();
+         closeDialog();
+         return;
+       }
+       if (event.key !== "Tab") return;
+       if (loggingOut) {
+         event.preventDefault();
+         return;
+       }
+       if (event.shiftKey && document.activeElement === cancel) {
+         event.preventDefault();
+         confirm.focus();
+       } else if (!event.shiftKey && document.activeElement === confirm) {
+         event.preventDefault();
+         cancel.focus();
+       }
+     }, true);
+     confirm.addEventListener("click", () => {
+       if (!logoutControl || loggingOut) return;
+       loggingOut = true;
+       busySeen = false;
+       cancel.disabled = true;
+       confirm.disabled = true;
+       confirm.textContent = "Logging out...";
+       overlay.setAttribute("aria-busy", "true");
+       panel.focus();
+       const checkLogoutState = () => {
+         const busy = logoutControl.disabled || logoutControl.getAttribute("aria-busy") === "true";
+         if (busy) busySeen = true;
+         else if (busySeen) finishFailedLogout();
+       };
+       observer = new MutationObserver(checkLogoutState);
+       observer.observe(logoutControl, { attributes: true, attributeFilter: ["disabled", "aria-busy"] });
+       pollId = window.setInterval(checkLogoutState, 100);
+       logoutControl.dataset.rvLogoutProceed = "true";
+       logoutControl.dataset.rvLogoutConfirmed = "true";
+       logoutControl.click();
+       delete logoutControl.dataset.rvLogoutConfirmed;
+       timeoutId = window.setTimeout(finishFailedLogout, 15000);
+     });
+     window.addEventListener("pagehide", () => {
+       window.clearTimeout(timeoutId);
+       window.clearInterval(pollId);
+       observer?.disconnect();
+     }, { once: true });
+   })();
+   </script>
   </body>
 </html>

@@ -26,6 +26,12 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
   const status = document.getElementById("eventStatusFilter");
   const category = document.getElementById("eventCategoryFilter");
   let organizerId = "";
+  let pageLoadSignaled = false;
+  const signalPageReady = () => {
+    if (pageLoadSignaled) return;
+    pageLoadSignaled = true;
+    window.dispatchEvent(new Event("page-data-ready"));
+  };
   const state = {
     view: "all",
     source: "All Sources",
@@ -207,15 +213,27 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
           year: "numeric",
         })
       : "Date TBA";
-    const totalSlots = Number(event.capacity || 0);
-    const openSlots = Number(event.slotsOpen ?? Math.round(totalSlots * 0.6));
+    const rawCapacity = Number(
+      event.capacity ?? event.maxCapacity ?? event.maxSlots ?? event.slots ?? 0,
+    );
+    const totalSlots = Number.isFinite(rawCapacity)
+      ? Math.max(0, Math.floor(rawCapacity))
+      : 0;
+    const registeredCount = Math.max(
+      0,
+      Math.floor(Number(event.registeredCount) || 0),
+    );
+    const openSlots = Math.max(
+      0,
+      Math.min(totalSlots, totalSlots - registeredCount),
+    );
     const eventId = escape(event.eventId || event.id || "");
     return `<article class="published-event-card" id="organizer-event-card-${eventId}" data-event-id="${eventId}"><div class="published-event-date" id="published-event-date-${eventId}" aria-label="${escape(dateLabel)}"><span class="published-event-month" id="published-event-month-${eventId}">${date ? date.toLocaleDateString("en-US", { month: "short" }) : "TBA"}</span><strong class="published-event-day" id="published-event-day-${eventId}">${date ? date.getDate() : ""}</strong><span class="published-event-year" id="published-event-year-${eventId}">${date ? date.getFullYear() : ""}</span></div><div class="published-event-content" id="published-event-content-${eventId}"><div class="published-event-heading"><div><h2 class="published-event-title" id="published-event-title-${eventId}">${escape(event.title)}</h2><p class="published-event-source" id="published-event-source-${eventId}">${escape(normalizeSource(event.source || event.eventSource))}</p></div></div><div class="published-event-meta" id="published-event-meta-${eventId}"><span id="published-event-date-label-${eventId}" class="visually-hidden">${escape(dateLabel)}</span><span class="published-event-meta-time" id="published-event-time-${eventId}">${escape(event.time || "Time TBA")}</span><span class="published-event-meta-location" id="published-event-location-${eventId}">${escape(event.location || "Location TBA")}${event.room ? `&nbsp;·&nbsp;${escape(event.room)}` : ""}</span></div><div class="published-event-footer"><div class="published-event-summary" id="published-event-summary-${eventId}"><div class="published-event-tags" id="published-event-category-group-${eventId}"><span id="published-event-category-${eventId}">${escape(event.category || "General")}</span></div><span class="published-event-capacity" id="published-event-capacity-${eventId}">${openSlots} of ${totalSlots} Slots Open</span></div><div class="published-event-actions"><button type="button" id="published-event-details-${eventId}" data-preview-id="${eventId}">View Details</button></div></div></div></article>`;
   }
 
   function renderList(element, list, emptyText = "No events match your filters.") {
     if (isLoading) {
-      element.innerHTML = '<div class="organizer-empty">Loading events...</div>';
+      element.replaceChildren();
       return;
     }
     if (loadError) {
@@ -866,6 +884,7 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
     isLoading = false;
     loadError = "Event data is unavailable. Please contact support.";
     render();
+    signalPageReady();
   } else {
     authReady.then(() => onAuthStateChanged(auth, async (user) => {
       unsubscribeEvents?.();
@@ -886,6 +905,7 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
         isLoading = false;
         loadError = "Could not verify your organization. Please refresh and try again.";
         render();
+        signalPageReady();
         return;
       }
       unsubscribeEvents = onSnapshot(
@@ -937,6 +957,7 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
           isLoading = false;
           loadError = "";
           render();
+          signalPageReady();
           if (initialEventId) openDetails(initialEventId);
         },
         (error) => {
@@ -945,6 +966,7 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
           isLoading = false;
           loadError = "Could not load events. Please try again later.";
           render();
+          signalPageReady();
         },
       );
     })).catch((error) => {
@@ -952,6 +974,7 @@ import { syncOrganizerOrganization } from "../organizationScope.js";
       isLoading = false;
       loadError = "Could not verify your session. Please refresh and try again.";
       render();
+      signalPageReady();
     });
   }
 })();

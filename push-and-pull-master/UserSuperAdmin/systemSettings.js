@@ -108,6 +108,7 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
   let workingMainOrg = "IBITS";
 
   let settingsReady = false;
+  let pageLoadSignaled = false;
   let initializingDocument = false;
   let backfillingDefaults = null;
   let pendingSettingsSync = null;
@@ -207,6 +208,10 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
 
   function setReady(ready) {
     settingsReady = ready;
+    if (ready && !pageLoadSignaled) {
+      pageLoadSignaled = true;
+      window.dispatchEvent(new Event("page-data-ready"));
+    }
     if (mainOrgSelect) mainOrgSelect.disabled = !ready;
     if (maxUploadInput) maxUploadInput.disabled = !ready;
     if (allowedDocsInput) allowedDocsInput.disabled = !ready;

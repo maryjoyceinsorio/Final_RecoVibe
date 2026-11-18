@@ -699,6 +699,10 @@ body {
   color: #4f1420;
 }
 
+.sidebar .avatar:empty {
+  visibility: hidden;
+}
+
 .sidebar .user-name {
   color: #fff;
   font:

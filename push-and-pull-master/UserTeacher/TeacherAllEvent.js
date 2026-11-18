@@ -64,6 +64,12 @@ import { teacherEventReadFilters, teacherEventsQuery } from "./TeacherEventQuery
   let loadError = "";
   let directEventHandled = false;
   let searchTimer = null;
+  let pageLoadSignaled = false;
+  function signalEventsPageReady() {
+    if (pageLoadSignaled) return;
+    pageLoadSignaled = true;
+    window.dispatchEvent(new Event("page-data-ready"));
+  }
 
   function debug(...args) {
     if (DEBUG) console.debug("[Teacher Events]", ...args);
@@ -462,10 +468,6 @@ import { teacherEventReadFilters, teacherEventsQuery } from "./TeacherEventQuery
     </article>`;
   }
 
-  function skeletonCards() {
-    return Array.from({ length: 2 }, () => '<div class="teacher-event-skeleton" aria-hidden="true"><span></span><div><i></i><i></i><i></i></div></div>').join("");
-  }
-
   function activeFilters() {
     return state.query !== "" ||
       state.scope !== "all" ||
@@ -481,17 +483,18 @@ import { teacherEventReadFilters, teacherEventsQuery } from "./TeacherEventQuery
     elements.dateRange.hidden = elements.date.value !== "custom";
     if (loading) {
       elements.count.textContent = "";
-      elements.current.innerHTML = skeletonCards();
-      elements.all.innerHTML = skeletonCards();
+      elements.current.replaceChildren();
+      elements.all.replaceChildren();
       elements.loadState.hidden = true;
       return;
     }
     if (loadError) {
-      elements.count.textContent = "0 events";
+      elements.count.textContent = "";
       elements.current.replaceChildren();
       elements.all.replaceChildren();
       elements.loadState.hidden = false;
       elements.loadState.innerHTML = `<span>${escapeHTML(loadError)}</span><button type="button" id="teacherRetryEvents">Retry</button>`;
+      signalEventsPageReady();
       return;
     }
 
@@ -662,6 +665,7 @@ import { teacherEventReadFilters, teacherEventsQuery } from "./TeacherEventQuery
     syncControls();
     render();
     if (!directEventHandled) openRequestedEvent();
+    signalEventsPageReady();
   }
 
   function subscribeEvents(user) {
@@ -676,6 +680,7 @@ import { teacherEventReadFilters, teacherEventsQuery } from "./TeacherEventQuery
       loadError = "Sign in with a teacher account to view events.";
       loading = false;
       render();
+      signalEventsPageReady();
       return;
     }
     startSafetyTimeout();

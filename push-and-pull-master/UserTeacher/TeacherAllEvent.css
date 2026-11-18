@@ -60,17 +60,23 @@ a {
 .teacher-sidebar {
   width: 264px;
   flex: 0 0 264px;
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   padding: 20px 16px;
+  overflow: hidden;
+  box-sizing: border-box;
   background: linear-gradient(180deg, var(--maroon) 0%, #661a29 100%);
   color: #fff4ec;
   display: flex;
   flex-direction: column;
   position: sticky;
   top: 0;
+  left: 0;
 }
 .teacher-sidebar-top {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
@@ -111,8 +117,11 @@ a {
 }
 .teacher-nav {
   display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
   flex-direction: column;
   gap: 5px;
+  overflow-y: auto;
 }
 .teacher-nav-item {
   display: flex;
@@ -143,6 +152,7 @@ a {
   line-height: 1;
 }
 .teacher-sidebar-bottom {
+  flex: 0 0 auto;
   margin-top: auto;
   padding-top: 14px;
   border-top: 1px solid rgba(255, 255, 255, 0.14);
@@ -1052,7 +1062,8 @@ a {
   min-height: 100vh;
 }
 .teacher-nav {
-  overflow: visible;
+  min-height: 0;
+  overflow-y: auto;
 }
 .teacher-search svg { color: #949a9f; width: 16px; height: 16px; flex-shrink: 0; }
 .teacher-toolbar select {
@@ -1464,14 +1475,18 @@ body {
   .teacher-sidebar {
     position: sticky;
     inset: auto;
-    height: auto;
+    height: 62px;
     min-height: 62px;
+    left: 0;
+    box-sizing: border-box;
   }
   .teacher-main {
     margin-left: 0;
     min-height: 0;
   }
   .teacher-nav {
+    min-width: 0;
+    flex: 1 1 auto;
     overflow-x: auto;
     overflow-y: hidden;
   }
@@ -1503,6 +1518,8 @@ body {
   .teacher-sidebar {
     position: sticky;
     inset: 0 0 auto;
+    top: 0;
+    left: 0;
     z-index: 40;
     flex-direction: row;
     flex-wrap: nowrap;

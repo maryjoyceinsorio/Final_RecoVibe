@@ -35,18 +35,24 @@ body {
 .admin-sidebar {
   position: sticky;
   top: 0;
+  left: 0;
   display: flex;
   flex: 0 0 258px;
   flex-direction: column;
   width: 258px;
   height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   padding: 20px 15px;
+  overflow: hidden;
+  box-sizing: border-box;
   background: linear-gradient(180deg, #7a1f2e, #4f1420);
   color: #f4e9e8;
   font-family: Inter, sans-serif;
 }
 .admin-brand {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 11px;
   margin: 0 0 30px;
@@ -80,8 +86,16 @@ body {
   font-size: 10px;
 }
 .admin-sidebar nav {
-  display: grid;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
   gap: 4px;
+  scrollbar-width: none;
+}
+.admin-sidebar nav::-webkit-scrollbar {
+  display: none;
 }
 .admin-sidebar nav a {
   display: flex;
@@ -130,6 +144,7 @@ body {
 }
 .admin-sidebar footer {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 9px;
   margin-top: auto;
@@ -147,6 +162,9 @@ body {
   color: #4f1420;
   font-size: 12px;
   font-weight: 700;
+}
+.admin-avatar:empty {
+  visibility: hidden;
 }
 .admin-user {
   display: grid;
@@ -794,6 +812,7 @@ body {
     position: sticky;
     z-index: 50;
     top: 0;
+    left: 0;
     flex-direction: row;
     align-items: center;
     width: 100%;
@@ -810,8 +829,11 @@ body {
   .admin-sidebar nav {
     display: flex;
     flex: 1;
+    flex-direction: row;
     gap: 2px;
-    overflow: auto;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
     margin-left: 8px;
   }
   .admin-sidebar nav a {
@@ -836,13 +858,10 @@ body {
   }
   .admin-sidebar footer {
     flex: none;
+    min-width: 180px;
     margin: 0;
     padding: 0;
     border: 0;
-  }
-  .admin-user,
-  .admin-logout {
-    display: none;
   }
   .admin-main {
     padding: 19px 14px 36px;

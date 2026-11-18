@@ -22,6 +22,20 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
       limit: 0,
     },
   ].filter((entry) => entry.table && entry.tbody);
+  const initialTableSources = new Set();
+  const initialAccountSources = new Set();
+  let pageLoadSignaled = false;
+  function signalPageLoadIfReady() {
+    const accountsReady =
+      !document.getElementById("accounts-overview-panel") ||
+      initialAccountSources.size === 2;
+    const tablesReady = tables.every(({ table }) =>
+      initialTableSources.has(table.id),
+    );
+    if (pageLoadSignaled || !accountsReady || !tablesReady) return;
+    pageLoadSignaled = true;
+    window.dispatchEvent(new Event("page-data-ready"));
+  }
   const modal =
     document.getElementById("audit-modal-backdrop") ||
     document.getElementById("audit-detail-modal");
@@ -336,7 +350,13 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
 
   function renderTableError(table, message) {
     if (!table?.tbody) return;
-    console.info(`[SuperAdminDashboard] ${message}; retaining static audit rows.`);
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.className = "user-table-empty";
+    cell.colSpan = 4;
+    cell.textContent = message;
+    row.append(cell);
+    table.tbody.replaceChildren(row);
   }
 
   try {
@@ -525,10 +545,14 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
                 .toLowerCase() === "student",
           );
         recomputeAndRender();
+        initialAccountSources.add("users");
+        signalPageLoadIfReady();
       },
       (error) => {
         console.info("[SuperAdminDashboard] users student-profile listener failed:", error);
         showAoError();
+        initialAccountSources.add("users");
+        signalPageLoadIfReady();
       },
     );
 
@@ -537,10 +561,14 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
       (snapshot) => {
         adminUserDocs = snapshot.docs.map((d) => d.data());
         recomputeAndRender();
+        initialAccountSources.add("adminUser");
+        signalPageLoadIfReady();
       },
       (error) => {
         console.info("[SuperAdminDashboard] adminUser listener failed:", error);
         showAoError();
+        initialAccountSources.add("adminUser");
+        signalPageLoadIfReady();
       },
     );
 
@@ -557,17 +585,16 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
     if (aoRetryBtn) {
       aoRetryBtn.addEventListener("click", () => {
         hideAoError();
-        // Reset skeletons
         Object.values(aoRoleMap).forEach(({ totalEl, activeEl }) => {
           const tEl = document.getElementById(totalEl);
           const aEl = document.getElementById(activeEl);
-          if (tEl) tEl.innerHTML = '<span class="ao-skeleton"></span>';
-          if (aEl) aEl.innerHTML = '<span class="ao-skeleton ao-skeleton-sm"></span>';
+          if (tEl) tEl.textContent = "";
+          if (aEl) aEl.textContent = "";
         });
         const activeTotalEl = document.getElementById("ao-active-total");
         const activeStatusEl = document.getElementById("ao-active-status");
-        if (activeTotalEl) activeTotalEl.innerHTML = '<span class="ao-skeleton"></span>';
-        if (activeStatusEl) activeStatusEl.innerHTML = '<span class="ao-skeleton ao-skeleton-sm"></span>';
+        if (activeTotalEl) activeTotalEl.textContent = "";
+        if (activeStatusEl) activeStatusEl.textContent = "";
         subscribeAccountsOverview();
       });
     }
@@ -601,10 +628,14 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
           recordsById.clear();
           records.forEach((record) => recordsById.set(record.id, record));
           renderTable(recentTable, records);
+          initialTableSources.add(recentTable.table.id);
+          signalPageLoadIfReady();
         },
         (error) => {
           console.info("[SuperAdminDashboard] Recent audit listener failed.", error);
           renderTableError(recentTable, "Could not load recent audit activity.");
+          initialTableSources.add(recentTable.table.id);
+          signalPageLoadIfReady();
         },
       ),
     );
@@ -619,10 +650,14 @@ import { db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js";
           recordsById.clear();
           records.forEach((record) => recordsById.set(record.id, record));
           renderTable(allAuditTable, records);
+          initialTableSources.add(allAuditTable.table.id);
+          signalPageLoadIfReady();
         },
         (error) => {
           console.info("[SuperAdminDashboard] Audit log listener failed.", error);
           renderTableError(allAuditTable, "Could not load audit activity.");
+          initialTableSources.add(allAuditTable.table.id);
+          signalPageLoadIfReady();
         },
       ),
     );

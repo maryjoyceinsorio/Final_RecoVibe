@@ -158,6 +158,7 @@ import { auth, authReady, db, isFirebaseConfigured } from "../UserStudent/fireba
     errorState.hidden = false;
     errorMessage.textContent = msg;
     downloadCopyBtn.disabled = true;
+    window.dispatchEvent(new Event("page-data-ready"));
   }
 
   retryBtn.addEventListener("click", () => {
@@ -233,6 +234,7 @@ import { auth, authReady, db, isFirebaseConfigured } from "../UserStudent/fireba
           dataContainer.hidden = false;
           downloadCopyBtn.disabled = false;
           renderReport();
+          window.dispatchEvent(new Event("page-data-ready"));
         },
         (err) => {
           if (reportLoadExpired) return;

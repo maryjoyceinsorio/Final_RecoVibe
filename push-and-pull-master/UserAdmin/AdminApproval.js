@@ -247,6 +247,20 @@ import {
   let firestoreScopedEventIds = new Set();
   let firestorePendingEventsError = "";
   let firestorePendingEventsLoaded = false;
+  let approvalPageLoadSignaled = false;
+  const pendingInitialApprovalSources = new Set([
+    "directory",
+    "firestore",
+    "queue",
+    "decisions",
+  ]);
+  function settleInitialApprovalSource(source) {
+    pendingInitialApprovalSources.delete(source);
+    if (!pendingInitialApprovalSources.size && !approvalPageLoadSignaled) {
+      approvalPageLoadSignaled = true;
+      window.dispatchEvent(new Event("page-data-ready"));
+    }
+  }
   let recentDecisions = [];
   let activeReviewEventId = null;
   let activeEvent = null;
@@ -880,12 +894,17 @@ import {
       </div>
     `;
     root.querySelector("#retryApprovalDashboard")?.addEventListener("click", () => window.location.reload());
+    settleInitialApprovalSource("directory");
+    settleInitialApprovalSource("firestore");
+    settleInitialApprovalSource("queue");
+    settleInitialApprovalSource("decisions");
   }
 
   async function initAdminData() {
     findOrAssignAdminKey();
     const assignedStage = getAccountStage();
     loadApproverDirectory().then(() => {
+      settleInitialApprovalSource("directory");
       findOrAssignAdminKey();
       subscribeFirestorePendingEvents();
       if (activeReviewEventId) renderReviewScreen();
@@ -930,6 +949,7 @@ import {
       firestorePendingEventsLoaded = true;
       firestorePendingEventsError = "Firestore is not configured; submitted event proposals cannot be loaded.";
       if (!activeReviewEventId) renderReviewQueue();
+      settleInitialApprovalSource("firestore");
       return;
     }
 
@@ -953,6 +973,7 @@ import {
         organizationIds: [...currentAdminOrganizationIds],
       });
       if (!activeReviewEventId) renderReviewQueue();
+      settleInitialApprovalSource("firestore");
       return;
     }
     firestorePendingEventsTimeout = setTimeout(() => {
@@ -962,6 +983,7 @@ import {
       firestorePendingEventsLoaded = true;
       firestorePendingEventsError = "Couldn't load proposals in time. Check your connection and permissions, then refresh.";
       if (!activeReviewEventId) renderReviewQueue();
+      settleInitialApprovalSource("firestore");
     }, 5000);
 
     try {
@@ -1021,6 +1043,7 @@ import {
           }
           firestorePendingEventsLoaded = true;
           if (!activeReviewEventId) renderReviewQueue();
+          settleInitialApprovalSource("firestore");
         },
         (error) => {
           console.error("Could not load pending Firestore event proposals:", error);
@@ -1033,6 +1056,7 @@ import {
           firestorePendingEventsLoaded = true;
           firestorePendingEventsError = "Couldn't load proposals. Check your connection and permissions, then refresh.";
           if (!activeReviewEventId) renderReviewQueue();
+          settleInitialApprovalSource("firestore");
         },
       );
     } catch (error) {
@@ -1046,6 +1070,7 @@ import {
       firestorePendingEventsLoaded = true;
       firestorePendingEventsError = "Couldn't load proposals. Check your connection and permissions, then refresh.";
       if (!activeReviewEventId) renderReviewQueue();
+      settleInitialApprovalSource("firestore");
     }
   }
 
@@ -1090,6 +1115,7 @@ import {
       // Demo fallback
       queueItems = [];
       updateQueueBadge(0);
+      settleInitialApprovalSource("queue");
       return;
     }
 
@@ -1132,8 +1158,10 @@ import {
       if (!activeReviewEventId) {
         renderReviewQueue();
       }
+      settleInitialApprovalSource("queue");
     }, (err) => {
       console.warn("approverQueue listener error:", err);
+      settleInitialApprovalSource("queue");
     });
   }
 
@@ -1265,14 +1293,20 @@ import {
       timeText(startTime || timeParts[0]),
       timeText(endTime || timeParts[1]),
     ];
-    const capacity = event.maxCapacity ?? event.capacity ?? event.maxSlots ?? event.slots;
+    const capacity = event.capacity ?? event.maxCapacity ?? event.maxSlots ?? event.slots;
     const noCapacityLimit = event.capacityMode === "N/A" || capacity == null || capacity === "";
     const parsedCapacity = noCapacityLimit ? null : Number(capacity);
-    const total = parsedCapacity == null || Number.isNaN(parsedCapacity) ? null : parsedCapacity;
-    const registered = Number(event.registeredCount || event.participantCount || 0);
+    const total = parsedCapacity == null || !Number.isFinite(parsedCapacity)
+      ? null
+      : Math.max(0, Math.floor(parsedCapacity));
+    const registered = Math.max(
+      0,
+      Math.floor(Number(event.registeredCount) || 0),
+    );
     const expected = event.expectedParticipants ?? event.expectedAttendees ?? registered;
-    const slotsLeft = event.slotsLeft ?? event.availableSlots ?? event.slotsOpen ?? event.openSlots ??
-      (total === null ? null : Math.max(0, total - registered));
+    const slotsLeft = total === null
+      ? null
+      : Math.max(0, Math.min(total, total - registered));
     const dateInfo = (label, value) =>
       `<div class="student-event-info-card"><strong>${esc(label)}</strong><span>${esc(value || "Not specified")}</span></div>`;
     const categories = values(event.categories || event.category || event.tag).map(valueText).filter(Boolean);
@@ -1392,7 +1426,10 @@ import {
       decisionsListenerRef = null;
     }
 
-    if (!rtdb || !currentAdminUid) return;
+    if (!rtdb || !currentAdminUid) {
+      settleInitialApprovalSource("decisions");
+      return;
+    }
 
     decisionsListenerRef = ref(rtdb, `approverDecisions/${currentAdminUid}`);
     onValue(decisionsListenerRef, (snap) => {
@@ -1417,6 +1454,10 @@ import {
       if (!activeReviewEventId) {
         renderReviewQueue();
       }
+      settleInitialApprovalSource("decisions");
+    }, (error) => {
+      console.warn("approverDecisions listener error:", error);
+      settleInitialApprovalSource("decisions");
     });
   }
 

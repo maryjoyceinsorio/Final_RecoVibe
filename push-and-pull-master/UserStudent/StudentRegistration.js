@@ -568,17 +568,49 @@ noMiddleNameBox.addEventListener("change", () => {
 fields.middleName.setAttribute("aria-disabled", "false");
 updatePasswordChecklist();
 
-document.querySelectorAll(".toggle-password").forEach((button) => {
+document.querySelectorAll(".password-toggle-button").forEach((button) => {
+  const input = document.getElementById(button.dataset.target);
+  const showLabel =
+    input.id === "reg-confirm" ? "Show confirm password" : "Show password";
+  const hideLabel =
+    input.id === "reg-confirm" ? "Hide confirm password" : "Hide password";
+  let isVisible = false;
+  let inputHadFocus = false;
+  let selectionStart = null;
+  let selectionEnd = null;
+  let selectionDirection = "none";
+
+  input.addEventListener("blur", () => {
+    selectionStart = input.selectionStart;
+    selectionEnd = input.selectionEnd;
+    selectionDirection = input.selectionDirection;
+  });
+  button.addEventListener("mousedown", (event) => {
+    inputHadFocus = document.activeElement === input;
+    selectionStart = input.selectionStart;
+    selectionEnd = input.selectionEnd;
+    selectionDirection = input.selectionDirection;
+    if (inputHadFocus) event.preventDefault();
+  });
   button.addEventListener("click", () => {
-    const input = document.getElementById(button.dataset.target);
-    const showing = input.type === "text";
-    input.type = showing ? "password" : "text";
-    button.querySelector(".icon-eye").style.display = showing ? "" : "none";
-    button.querySelector(".icon-eye-off").style.display = showing ? "none" : "";
-    button.setAttribute(
-      "aria-label",
-      showing ? "Show password" : "Hide password",
-    );
+    const restoreFocus = inputHadFocus;
+    inputHadFocus = false;
+    if (selectionStart === null || selectionEnd === null) {
+      selectionStart = input.selectionStart;
+      selectionEnd = input.selectionEnd;
+      selectionDirection = input.selectionDirection;
+    }
+    isVisible = !isVisible;
+    input.type = isVisible ? "text" : "password";
+    button.classList.toggle("is-visible", isVisible);
+    button.setAttribute("aria-label", isVisible ? hideLabel : showLabel);
+    button.setAttribute("aria-pressed", String(isVisible));
+    requestAnimationFrame(() => {
+      if (restoreFocus) input.focus({ preventScroll: true });
+      if (selectionStart !== null && selectionEnd !== null) {
+        input.setSelectionRange(selectionStart, selectionEnd, selectionDirection);
+      }
+    });
   });
 });
 

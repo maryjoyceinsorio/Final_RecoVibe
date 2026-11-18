@@ -1234,6 +1234,7 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
 
           updateReportHeaderMeta();
           renderReport();
+          window.dispatchEvent(new Event("page-data-ready"));
         },
         (err) => {
           console.error("Firestore listener error:", err);
@@ -1252,6 +1253,7 @@ import { auth, db, isFirebaseConfigured } from "../UserStudent/firebaseConfig.js
     if (errorState) errorState.hidden = false;
     if (errorMessage) errorMessage.textContent = msg;
     if (downloadCopyBtn) downloadCopyBtn.disabled = true;
+    window.dispatchEvent(new Event("page-data-ready"));
   }
 
   if (retryBtn) {
